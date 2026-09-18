@@ -12,8 +12,10 @@ import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { webSearch, webFetch } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
-import { jmRequest } from './jm-bridge.js';
 import { firstFrameOnly, countFrames } from './gif.js';
+// 工具注册表（Skills 基础设施，来自上游 0.3.1）：原生工具与技能工具都在这里登记，
+// 技能工具（带 skillId）的可用性统一问 getToolAvailability()。
+import { registerTool, listTools, getToolAvailability } from './tool-registry.js';
 
 // ── 图片注入的体积闸门 ──────────────────────────────────────────────────
 //
@@ -269,7 +271,8 @@ function imageSearchWasAsked(ctx) {
 }
 
 /**
- * 按配置过滤工具集：无视觉模型 → 去掉看图工具；搜索关 → 去掉联网工具；本子查询关 → 去掉那个工具。
+ * 按配置过滤工具集：无视觉模型 → 去掉看图工具；搜索关 → 去掉联网工具；
+ * 技能工具（本子查询已搬进 skills/doujin-lookup/）→ 走 getToolAvailability() 统一口径。
  *
  * 抽成独立函数（原来内联在 orchestrator 的 #runAgent 里）是为了**能单测** ——
  * "开关关掉之后工具真的不会给到模型"这件事，靠读源码形状证明不了。
@@ -281,12 +284,26 @@ function imageSearchWasAsked(ctx) {
 export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
   const searchEnabled = cfg?.webSearch?.enabled !== false;
   const imageSearchEnabled = cfg?.imageSearch?.enabled !== false;
-  const doujinEnabled = cfg?.doujinLookup?.enabled === true;   // 默认关：明确打开才给
   return defs.filter((d) => {
+    // ① 原生工具：保持改造前那一套逐条判断，一个字都没动
+    //    （回归 test-image-limits.mjs / test-doujin-lookup.mjs 直接验这三条）
     if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
     if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
     if (!imageSearchEnabled && d.name === 'search_image_source') return false;
-    if (!doujinEnabled && d.name === 'doujin_lookup') return false;
+    // ② 技能注册的工具（带 skillId 的那批，如 doujin-lookup__lookup）：走**统一可用性口径** ——
+    //    Skill 开关 / requires 能力 / 分类开关 / 单工具 overrides / vision / search / tool.guard
+    //    全在 getToolAvailability() 里判，这里不再自己拼条件。
+    //    本子查询的开关仍是 config.doujinLookup.enabled（由 skill 自己的 available() 判定，
+    //    见 skills/doujin-lookup/index.js 头部注释）；把本次运行的 cfg 通过 runtimeContext
+    //    传下去，保证"用哪份配置判定"和调用方（orchestrator 传进来的 cfg）是同一份。
+    if (d.skillId) {
+      return getToolAvailability(d.id ?? d.name, {
+        toolsCfg: cfg?.tools,
+        visionEnabled,
+        searchEnabled,
+        runtimeContext: { config: cfg }
+      }).enabled;
+    }
     return true;
   });
 }
@@ -298,9 +315,16 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
  *   onebot, store, memory, stickers, sender, session,
  *   emit  (事件上报给 UI/日志)
  * }
+ *
+ * 返回 = 原生工具 + **技能注册的工具**（skills/ 下的 Skill 通过 registerTool 注册，
+ * 注册表里带 skillId；本子查询就是其中之一）。两段都在这里拼好，过滤交给 gateToolDefs。
+ *
+ * ⚠️ 顺序：技能工具要等 `await loadPlugins()` 之后才在注册表里。buildToolDefs() 是**同步**的，
+ * 所以必须"先 loadPlugins 再 buildToolDefs"（app.js 启动流程与测试都按这个顺序写）。
+ * Orchestrator 构造时那次调用抓不到技能工具，启动流程里加载完技能会重赋 orchestrator.toolDefs。
  */
 export function buildToolDefs() {
-  return [
+  const nativeDefs = [
     {
       name: 'send_message',
       description: '发送消息到当前聊天（本工具只能发到本次会话对应的群/私聊）。messages 传字符串=发一条；传字符串数组=分多条发送（推荐，更像真人）。只有需要明确"我回的是哪条"时才传 replyToMessageId 引用；需要点名某人才传 atUserId。不要在字符串内部用空格分句。',
@@ -745,86 +769,6 @@ export function buildToolDefs() {
       }
     },
     {
-      name: 'doujin_lookup',
-      description: '按关键词/类型查本子。返回【本子码 + 名字 + 作者】，直接把名字和码发给对方即可（可写成"JM<码>"）。'
-        + '适合"有没有 XX 类型的本子""帮我找 XX 的本子""XX 作者的本子"这类请求。'
-        + '关键词用对方说的词**原样**传进来就行 —— 中文、日文、英文、任何语言都可以，不用先翻译。'
-        + '两个来源：JM（禁漫，实时直连，名字多为中文或日文原名）和本地 NH 库（那批名字是英文）；'
-        + 'source=auto（默认）会先查 JM，JM 没结果才落到 NH。'
-        + '**不要挑语言、也不要翻译或改写查到的名字** —— 查到什么语言就原样发什么。'
-        + '想看某一本的具体信息（作者/标签/页数/中英别名）就带 detail=true。',
-      parameters: {
-        type: 'object',
-        properties: {
-          keyword: { type: 'string', description: '搜索关键词（类型/题材/作者/作品名，任意语言都行，按对方原话传）' },
-          source: { type: 'string', enum: ['auto', 'jm', 'nh'], description: 'auto=先 JM 再 NH 兜底（默认）；jm=只查 JM；nh=只查本地 NH 库' },
-          limit: { type: 'integer', description: '最多返回几本（默认取配置，上限 50）' },
-          detail: { type: 'boolean', description: 'true 时对第一条补查详情（作者/标签/页数/别名），会让这次调用慢一点' }
-        },
-        required: ['keyword']
-      },
-      async execute(ctx, args) {
-        const kw = String(args.keyword ?? '').trim();
-        if (!kw) return err('keyword 不能为空。');
-        const cfg = getConfig().doujinLookup || {};
-        if (cfg.allowInGroup === false && ctx.kind === 'group') {
-          return err('这个功能只在私聊里可用（设置里关掉了群聊）。');
-        }
-        const limit = Math.min(50, Math.max(1, Number(args.limit) || Number(cfg.maxResults) || 10));
-        const source = String(args.source || 'auto').toLowerCase();
-        const wantDetail = args.detail === true || String(args.detail) === 'true';
-        try {
-          let items = [];
-          let used = '';
-          if (source === 'auto' || source === 'jm') {
-            const r = await jmRequest({ cmd: 'search', kw, limit });
-            if (r.ok) {
-              items = (r.items || []).map((x) => ({ code: x.code, title: x.title, source: 'JM' }));
-              used = 'JM';
-            } else if (source === 'jm') {
-              return err(`JM 查询失败：${r.error}`);
-            }
-          }
-          if (!items.length && (source === 'auto' || source === 'nh')) {
-            const r = await jmRequest({ cmd: 'nh', kw, limit });
-            if (r.ok) {
-              items = (r.items || []).map((x) => ({ code: x.id, title: x.title, source: 'NH', tags: x.tags }));
-              used = used ? 'JM(无结果)→NH' : 'NH';
-            } else if (source === 'nh') {
-              return err(`NH 兜底查询失败：${r.error}`);
-            }
-          }
-          if (!items.length) {
-            return ok({
-              keyword: kw, source: used || source, results: [],
-              tip: used.startsWith('JM')
-                ? 'JM 没搜到这个关键词，本地 NH 库也没有。换个更宽的说法再试（JM 是中文站，但任何语言的关键词都能传）。'
-                : '本地 NH 库没有匹配（那批入库的名字是英文，换成英文关键词命中率更高 —— 但这不是必须的）。'
-            });
-          }
-          const out = {
-            keyword: kw,
-            source: used,
-            count: items.length,
-            results: items.map((x) => ({
-              code: x.code,
-              title: x.title,
-              链接: x.source === 'JM' ? `https://18comic.vip/album/${x.code}` : `https://nhentai.net/g/${x.code}`,
-              ...(x.tags ? { tags: x.tags } : {})
-            })),
-            tip: '把名字和本子码直接发给对方（可以写成"JM<码>"的形式）。别把这里的链接原样贴出去，除非对方要。'
-          };
-          if (wantDetail && used.startsWith('JM') && items[0]?.code) {
-            const d = await jmRequest({ cmd: 'detail', code: items[0].code });
-            if (d.ok) out.firstDetail = d.album;
-          }
-          return ok(out);
-        } catch (error) {
-          return err(`本子查询失败：${error?.message ?? error}`);
-        }
-      }
-    },
-    {
       name: 'memory_append',
       description: '记一条对群友的长期印象（下次运行会自动看到）。只记"以后和这个人打交道时用得上"的稳定印象：他的身份/关系、说话风格、爱玩的梗、雷点、常聊话题、别踩的坑。太临时的事情不要记。userId 必须填对方的 QQ 号（不知道就先调 get_active_members / get_recent_messages 查）；target 填备注名/群名片/昵称，用于展示。',
       parameters: {
@@ -975,6 +919,51 @@ export function buildToolDefs() {
       }
     }
   ];
+
+  // ── ① 原生工具逐个同步进工具注册表 ──────────────────────────────────────
+  // 注册表是"这台机器上有哪些工具"的唯一索引：注册表用 id，我们其余代码用 name，
+  // 原生工具的 name 全是 [a-z_]+，直接拿来当 id（满足 OpenAI 函数名规范）。
+  // 重复调用是覆盖语义，幂等；原生工具的**可用性**仍由 gateToolDefs 上面那三条判断，
+  // 不走 getToolAvailability（那会把 vision/search 的现有语义搞乱，风险不成比例）。
+  const nativeNames = new Set();
+  for (const def of nativeDefs) {
+    const id = String(def.name || '');
+    if (!id) { console.warn('[tools] ⚠️ 原生工具缺少 name，已跳过注册'); continue; }
+    if (nativeNames.has(id)) console.warn(`[tools] ⚠️ 原生工具重名：${id}（后注册的覆盖前一个）`);
+    nativeNames.add(id);
+    try {
+      registerTool({ ...def, id });
+    } catch (error) {
+      // id 不合规只影响"注册表里看不看得到"，不该把整个启动带崩 —— 但要出声
+      console.warn(`[tools] ⚠️ 原生工具 ${id} 注册失败：${error?.message ?? error}`);
+    }
+  }
+
+  // ── ② 合并技能注册的工具（带 skillId 的那批）────────────────────────────
+  // 形状适配：注册表用 id，我们的 executeTool / toOpenAiTools 用 name。
+  // 本子查询返回的 name 就是 doujin-lookup__lookup（前缀由 plugin-loader 强制加）。
+  const skillDefs = [];
+  for (const t of listTools()) {
+    if (!t.skillId) continue;                       // 原生工具已在 nativeDefs 里，跳过
+    if (nativeNames.has(t.id)) {
+      console.warn(`[tools] ⚠️ 技能工具与原生工具重名：${t.id}（来自技能 ${t.skillId}），原生工具优先生效，技能工具被忽略`);
+      continue;
+    }
+    if (skillDefs.some((d) => d.name === t.id)) {
+      console.warn(`[tools] ⚠️ 技能工具 id 重复：${t.id}（来自技能 ${t.skillId}），只保留先注册的那个`);
+      continue;
+    }
+    skillDefs.push({
+      name: t.id,
+      id: t.id,
+      description: t.description || '',
+      parameters: t.parameters || { type: 'object', properties: {} },
+      skillId: t.skillId,                           // gateToolDefs 靠它识别"这是技能工具"
+      execute: t.execute
+    });
+  }
+
+  return [...nativeDefs, ...skillDefs];
 }
 
 /** 转成 OpenAI tools 参数格式。 */

@@ -22,6 +22,9 @@ import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLID
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
 import { formatFullTime, formatShortTime } from './util.js';
 import { buildStickerContext, buildStickerStrategyHint } from './stickers.js';
+// 技能提示词片段（Skill 的 prompt.sections + 动态 promptSections()）。
+// 单例，与 tool-registry / plugin-loader 共用同一份 Skill 状态。
+import { skillManager } from './skills/manager.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
@@ -166,24 +169,10 @@ function qqSceneRules() {
     );
   }
   lines.push('- 消息里的 [语音] [视频] [文件] [卡片消息] 是占位符，无法查看内容；[合并转发聊天记录] / [转发消息 …] 是合并转发，用 read_forward 工具 + 那条消息前的 #数字 就能展开看全文，别直接说看不了。');
-  // 本子查询（JM 直连 + NH 离线兜底）
-  //
-  // 这里按开关条件插入：工具被 gateToolDefs 拿掉之后，提示词里就**不能**再提它 ——
-  // 否则模型会去调一个不存在的工具，拿到"未知工具"的错误（这是提示词和工具集
-  // 必须同时跟着开关走的原因）。照着上面 search / imageSearch 的写法来。
-  if (cfg.doujinLookup?.enabled === true) {
-    const djGroup = cfg.doujinLookup?.allowInGroup !== false;
-    lines.push(
-      '- 群友想看某个类型的本子（"有没有 XX 类型的本子""帮我找 XX 的本子""XX 作者的本子"）时，用 doujin_lookup 查：'
-      + '它返回【本子码 + 名字】，把名字和码直接报给对方就行（可写成"JM<码>"）。'
-      + '关键词用对方说的词**原样**传进去即可 —— 中文、日文、英文、任何语言都行，不用先翻译。',
-      '- doujin_lookup 有两个来源，默认 auto：先查 JM（中文站，名字多为中文或日文原名），JM 没结果才落到本地 NH 库（那批名字是英文）。'
-      + '**不要挑语言、也不要为了"统一"去翻译或改写名字**：查到什么语言就原样发什么 —— '
-      + '不同语言的群友用自己习惯的词去查，名字原样发出来反而方便对照着学。',
-      '- doujin_lookup 查不到就如实说没搜到，换个更宽的关键词可以再试一次；不要连查好几次，也不要编造本子码。'
-      + (djGroup ? '' : '（这个工具只在私聊里可用，群里不要提。）')
-    );
-  }
+  // 本子查询（JM 直连 + NH 离线兜底）那 3 条说明已搬到
+  // skills/doujin-lookup/index.js 的 promptSections()：工具被 gateToolDefs 拿掉之后，
+  // 提示词里就**不能**再提它（否则模型会去调一个不存在的工具），所以片段必须和工具集
+  // 同一个开关 —— 现在由 buildSystemPrompt 末尾统一插，开关判断在 Skill 自己那里。
   return lines.join('\n');
 }
 
@@ -252,13 +241,44 @@ function customRulesBlock(persona) {
   return text ? `\n\n【管理员附加规则】\n${text}` : '';
 }
 
-/** 组装系统提示。 */
-export function buildSystemPrompt({ persona } = {}) {
+/**
+ * 把技能提示词片段渲染成一个块。
+ *
+ * ⚠️ 没有片段时返回**空字符串** —— 于是"没有任何技能生效"时系统提示与改造前逐字节相同
+ * （测试-现行\test-skills基础设施.mjs 用 sha256 钉住这条）。
+ * ⚠️ 位置是花钱的：系统提示在前缀缓存的头部，片段一律**追加在块尾**（内置段落之后、
+ * 【管理员附加规则】之前），绝不插到中间 —— 否则它后面所有 token 从命中变原价重算
+ * （项目实测前缀命中率 92.2%，见 项目记忆 §8/§9.2）。
+ */
+function renderSkillSections(sections) {
+  const list = Array.isArray(sections) ? sections.filter((s) => s?.content) : [];
+  if (!list.length) return '';
+  const lines = ['', '【可用技能】', '你已学会以下技能，在合适的场景下主动使用：'];
+  for (const s of list) {
+    if (s.title) lines.push(`▸ ${s.title}`);
+    lines.push(String(s.content));
+  }
+  return `\n${lines.join('\n')}`;
+}
+
+/**
+ * 组装系统提示。
+ * @param {{persona?: object, skillContext?: object}} opts
+ *   skillContext 传给 Skill 做运行期判断（技能自己决定要不要出片段），缺省 {}。
+ */
+export function buildSystemPrompt({ persona, skillContext } = {}) {
   const cfg = persona ?? getConfig().persona;
+  // 技能片段（Skill 的 prompt.sections + 动态 promptSections()，已按 priority 降序）。
+  // 没有任何技能生效时是空字符串 —— 输出与改造前逐字节一致。
+  const skillBlock = renderSkillSections(skillManager.getPromptSections(skillContext || {}));
 
   // ① 整份覆盖：persona.systemPrompt 非空时完全替代内置系统提示。
+  //    技能片段在这里**也**追加在末尾（与上游 buildSystemPrompt 一致）：整份覆盖换掉的是
+  //    "人格/风格"那些内置段落，而技能片段是"你还会用哪些工具"的操作说明 ——
+  //    工具已经在 tools 列表里给模型了，提示词里不跟着说一句，模型会少用它。
+  //    位置同样在【管理员附加规则】之前、块尾。
   const full = String(cfg.systemPrompt ?? '').trim();
-  if (full) return expandPlaceholders(full, cfg) + customRulesBlock(cfg);
+  if (full) return expandPlaceholders(full, cfg) + skillBlock + customRulesBlock(cfg);
 
   // ② 逐段覆盖：persona.systemPromptSegments[key] 非空时替换该段，其余走内置。
   const defaults = buildDefaultSegments(cfg);
@@ -274,7 +294,7 @@ export function buildSystemPrompt({ persona } = {}) {
       : defaults[key]);
     if (index < keys.length - 1) parts.push('');
   });
-  return parts.join('\n') + customRulesBlock(cfg);
+  return parts.join('\n') + skillBlock + customRulesBlock(cfg);
 }
 
 // ── 用户消息 ─────────────────────────────────────────────────────────────

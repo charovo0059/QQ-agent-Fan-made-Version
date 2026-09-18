@@ -63,7 +63,9 @@ export const DEFAULT_CONFIG = {
     maxDownloadMB: 12     // 下载阶段上限（MB，要留够原图才能截 GIF 第一帧）
   },
   // ── 本子查询（JM 禁漫直连 + NH 离线库兜底）──
-  // 给 doujin_lookup 工具用：群友说个类型/关键词，查本子码 + 名字。
+  // 给 doujin-lookup__lookup 工具用（2026-09-18 起该工具由 `skills/doujin-lookup/` 提供，
+  // 不再是 src/tools.js 里的原生工具；名字带 `skillId__` 前缀是上游 plugin-loader 强制的）：
+  // 群友说个类型/关键词，查本子码 + 名字。
   //
   // 为什么 JM 走"常驻 Python 子进程"：JM 的搜索接口虽然是 JSON，但**要签名头**，
   // 而且它的内置域名经常失效（jmcomic 会自动把域名换成当前可用的）。这些都在
