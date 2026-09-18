@@ -8,31 +8,89 @@ import { fileURLToPath } from 'node:url';
 // Windows 上部分显卡驱动会导致渲染进程黑屏；禁用硬件加速是最稳妥的修复
 app.disableHardwareAcceleration();
 
-// ── 数据目录：始终固定在「应用根目录/data」──
-// Kondius 钦定：所有数据都存在安装目录下，不往 %APPDATA% 塞。
-//   压缩包用户：data 本来就在压缩包目录里，直接用（项目内 data/）；
-//   安装版用户：安装目录/exe 旁边的 data/。选压缩包目录当安装目录时
-//   天然接管里面的 data/（config、记忆、聊天记录、telemetry id 全保留），零迁移零 bug。
-// NSIS 覆盖安装只替换它自己装的文件，运行时生成的 data/ 不在清单里 → 升级不丢数据。
-// 兼容兜底：外置 %APPDATA% 时期（2026-09-06 短命版本）的数据自动搬回安装目录。
+// ── 数据目录解析（2026-09-18 重做：**默认移到安装目录之外**）──
+//
+// 🔴 为什么必须移出安装目录（三轮实测的结论，别再改回去）：
+//   electron-builder 的**旧卸载器**在覆盖安装时先跑，并且**无条件** `RMDir /r $INSTDIR`
+//   （uninstaller.nsh:187），而升级时文件内容一致会让它短路 —— 也就是说
+//   "会不会删"取决于版本差异，行为不可预测。我们试过在安装器钩子里抢时间：
+//     · `.onInit`（customInit）阶段 `$INSTDIR` **还是默认值**，拿不到真实安装目录
+//     · `customInstall` 太晚（数据已被删）
+//     · `customHeader` 插在顶层，**不能放命令**（构建直接失败）
+//   ⇒ 结论：**不要跟卸载器抢时间，把数据放到它够不着的地方。**
+//   （用户实测丢过两次配置/人设卡；详见 项目记忆.md §23.13 / §23.14）
+//
+// 解析顺序（**已有数据优先** —— 这一条最重要，任何情况下都不能让用户数据"看起来消失"）：
+//   0) $QQ_AGENT_DATA_DIR 显式指定（测试/高级用法）→ 最高优先
+//   1) 开发模式：项目内 data/
+//   2) exe 旁边的 data/        ← 老版本（含压缩包版）的数据就在这
+//   3) %LOCALAPPDATA%\QQ Agent\data  ← **新默认**，在安装目录之外
+//   4) 都没有 → 用 (3)，并尝试从旧位置迁移
 function resolveDataDir() {
   if (process.env.QQ_AGENT_DATA_DIR) return process.env.QQ_AGENT_DATA_DIR;
   // 开发模式（.bat 直起 node_modules 里的 electron.exe + 项目目录）：项目内 data/
   if (!app.isPackaged) return path.resolve(fileURLToPath(import.meta.url), '..', '..', 'data');
-  const portable = path.join(path.dirname(app.getPath('exe')), 'data');
+
+  const besideExe = path.join(path.dirname(app.getPath('exe')), 'data');
+  // 外部默认位置：**不要**用 app.getPath('userData')，因为它的位置受 productName 影响，
+  // 上游改名就会换目录；这里写死一个稳定路径。
+  const external = path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'QQ Agent', 'data');
+
+  const hasData = (dir) => {
+    try {
+      if (!fs.existsSync(path.join(dir, 'config.json'))) return false;
+      return true;
+    } catch { return false }
+  };
+
+  // ② 老位置有数据 → **先试着一次性搬到外部位置**（搬成功就用外部；失败就继续用老的）
+  //
+  // 为什么值得主动搬：留在安装目录里的数据，随时可能被"下一次覆盖安装"删掉
+  // （旧卸载器 `RMDir /r $INSTDIR`）。搬出安装目录是**唯一**不依赖安装器时机的保命手段。
+  //
+  // 为什么搬失败要退回老位置：绝不能因为"搬家"让用户**看不到自己的数据** ——
+  // 那比数据被删还难排查（界面上一切正常，就是配置全空）。
+  if (hasData(besideExe)) {
+    if (hasData(external)) {
+      // 两边都有 → 不猜谁是"对"的，留在原处并明确告知（用户可自行取舍）
+      console.warn('[data] ⚠️ 安装目录与外部位置**都有**数据，继续使用安装目录内的那份：', besideExe);
+      console.warn('[data]    外部那份未被使用：', external);
+      return besideExe;
+    }
+    try {
+      fs.mkdirSync(path.dirname(external), { recursive: true });
+      fs.cpSync(besideExe, external, { recursive: true });
+      if (hasData(external)) {
+        console.log('[data] ✅ 已把数据搬到安装目录之外（以后覆盖安装不会再丢）:', external);
+        console.log('[data]    原位置保留未删，确认一切正常后可自行删除：', besideExe);
+        return external;
+      }
+      console.warn('[data] 搬家后校验未通过，继续使用安装目录内的数据:', besideExe);
+      return besideExe;
+    } catch (error) {
+      console.error('[data] 搬到外部位置失败，继续使用安装目录内的数据:', error?.message ?? error);
+      return besideExe;
+    }
+  }
+  // ③ 外部位置已有数据 → 用它
+  if (hasData(external)) return external;
+
+  // ④ 都没有 → 用外部位置（新默认）；顺手接管两种旧遗留
   try {
-    if (!fs.existsSync(portable)) {
-      // 接管旧版遗留：%APPDATA%/qq-agent/data（外置期版本）→ 搬回安装目录
-      const legacy = path.join(app.getPath('userData'), 'data');
-      if (fs.existsSync(legacy) && fs.readdirSync(legacy).length > 0) {
-        fs.cpSync(legacy, portable, { recursive: true });
-        console.log('[data] 已从 %APPDATA% 迁回安装目录:', legacy, '→', portable);
+    fs.mkdirSync(external, { recursive: true });
+    const legacy = path.join(app.getPath('userData'), 'data');   // 2026-09-06 外置期的旧位置
+    for (const src of [legacy]) {
+      if (fs.existsSync(src) && fs.readdirSync(src).length > 0) {
+        fs.cpSync(src, external, { recursive: true });
+        console.log('[data] 已迁移旧数据到外部位置:', src, '→', external);
+        break;
       }
     }
   } catch (error) {
-    console.error('[data] 旧数据迁移失败（不影响启动，将从空数据开始）:', error?.message ?? error);
+    console.error('[data] 外部数据目录创建/迁移失败（不影响启动）:', error?.message ?? error);
   }
-  return portable;
+  console.log('[data] 数据目录（安装目录之外）:', external);
+  return external;
 }
 process.env.QQ_AGENT_DATA_DIR = resolveDataDir();
 
