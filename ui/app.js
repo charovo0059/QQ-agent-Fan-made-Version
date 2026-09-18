@@ -5427,21 +5427,10 @@ function bindSettingsEvents(c) {
   applyShowVision();
 
   // ── 人设区块事件 ──
+  // ⚠️ `currentPersonaId()` / `syncPersonaButtons()` **已提到模块作用域**（本文件上方、
+  //    `openPersonaPicker` 前面）—— 原来它们定义在这里，导致弹窗那边跨作用域调用时报
+  //    `ReferenceError: syncPersonaButtons is not defined`。改回去会重新引入那个 bug。
   const personaPick = $('#cfg-persona-pick');
-  function currentPersonaId() {
-    const roleText = $('#cfg-roletext')?.value ?? '';
-    const found = Object.entries(state.personaTemplates || {}).find(([, p]) => p.text === roleText);
-    return found ? found[0] : '';
-  }
-  function syncPersonaButtons() {
-    const id = currentPersonaId();
-    const tpl = state.personaTemplates[id];
-    const isCustom = id.startsWith('custom_');
-    const delBtn = $('#del-persona-btn');
-    if (delBtn) delBtn.classList.toggle('hidden', !isCustom);
-    const hint = $('#persona-pick-hint');
-    if (hint) hint.textContent = tpl ? (tpl.builtin ? '内置人设' : '自定义人设') : '';
-  }
   if (personaPick) {
     personaPick.addEventListener('click', () => openPersonaPicker());
   }
@@ -5730,6 +5719,30 @@ function openToolBreakdown() {
 }
 
 // ── 人设选择/添加 模态框 ──
+
+// ⚠️ 这两个函数**必须挂在模块作用域**（2026-09-18 修）：
+// 它们原来定义在 `bindSettingsEvents(c)` 内部，而 `openPersonaPicker()` 是顶层函数、
+// 从弹窗里调 `syncPersonaButtons()` —— **跨作用域调用，运行时抛
+// `ReferenceError: syncPersonaButtons is not defined`**（真的发生过：朋友那台机器
+// 20:08:53 的诊断日志里就有这条，见 项目记忆.md §23.12）。
+// 症状是"选完人设点确定，界面上那两个按钮的状态没跟着更新"，
+// 而且因为它抛在事件回调里，**不会让页面整体崩**，所以很容易没人发现。
+// 两者只依赖模块级的 `state` 与 `$`，提到顶层不需要任何额外参数。
+function currentPersonaId() {
+  const roleText = $('#cfg-roletext')?.value ?? '';
+  const found = Object.entries(state.personaTemplates || {}).find(([, p]) => p.text === roleText);
+  return found ? found[0] : '';
+}
+
+function syncPersonaButtons() {
+  const id = currentPersonaId();
+  const tpl = state.personaTemplates[id];
+  const isCustom = id.startsWith('custom_');
+  const delBtn = $('#del-persona-btn');
+  if (delBtn) delBtn.classList.toggle('hidden', !isCustom);
+  const hint = $('#persona-pick-hint');
+  if (hint) hint.textContent = tpl ? (tpl.builtin ? '内置人设' : '自定义人设') : '';
+}
 
 /** 选择人设：弹窗列出所有人设（含自定义），点击后填入角色设定文本框。 */
 function openPersonaPicker() {
