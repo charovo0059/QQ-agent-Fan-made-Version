@@ -462,7 +462,11 @@ async function loadSkillRoot(rootDir, { log = console.log, label = 'skill' } = {
     .filter((e) => e.isDirectory())
     .map((e) => path.join(rootDir, e.name));
   if (!dirs.length) {
-    log(`[${label}] ${path.basename(rootDir)}/ 为空：${rootDir}`);
+    // ⚠️ 措辞要区分"目录不存在"和"目录在但没有子目录"（2026-09-18 修）：
+    // 原来一律说"为空"，但 plugins/ 里放一个 README.md 说明文件时目录**并不空**，
+    // 日志却说"为空"，读的人会以为 README 没落地 / 提交漏了 —— 实际只是没有子目录。
+    // 只影响日志措辞，不影响行为（两种情况的返回值本来就一样）。
+    log(`[${label}] ${path.basename(rootDir)}/ 下没有子目录（该目录本身存在）：${rootDir}`);
     return { loaded: [], failed: [], empty: true, rootDir };
   }
 
@@ -474,6 +478,8 @@ async function loadSkillRoot(rootDir, { log = console.log, label = 'skill' } = {
   }
   const loaded = results.filter((r) => r.loaded);
   const failed = results.filter((r) => !r.loaded);
+  // 注：loadSkillRoot 会被 skills/ 与 plugins/ **各调一次**，所以这条日志里的目录名
+  // 已经指明是哪一个；不要写成"已加载 N 个 Skill"这种把两处混起来的口径。
   log(`[${label}] ${path.basename(rootDir)}/（${rootDir}）：${loaded.length} 成功，${failed.length} 失败`);
   return { loaded, failed, rootDir };
 }
