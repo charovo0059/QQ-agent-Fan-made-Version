@@ -1,0 +1,34 @@
+{
+  "id": "doujin-lookup",
+  "name": "本子查询",
+  "version": "1.0.0",
+  "description": "按关键词查本子：JM 直连 + 本地 NH 库兜底，返回本子码与名字",
+  "author": "QQ Agent（K 任务：从 src/tools.js + src/prompt.js 搬进 skills/）",
+  "entry": "index.js",
+  "permissions": [],
+  "enabledByDefault": true,
+  "_note_enabledByDefault": "⚠️ 这里写 true 不等于『默认开』。真正的开关是 config.doujinLookup.enabled（默认 false），由 index.js 的 available() 判定；写 true 只是为了让上游 isEnabled 不要先短路掉 available()。理由与代价见 index.js 文件头注释，改动前务必先读它。",
+  "category": "knowledge",
+  "prompt": {
+    "sections": []
+  },
+  "tools": [
+    {
+      "id": "lookup",
+      "name": "本子查询",
+      "description": "按关键词/类型查本子，返回本子码 + 名字 + 作者",
+      "category": "knowledge",
+      "icon": "📚",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "keyword": { "type": "string", "description": "搜索关键词（类型/题材/作者/作品名，任意语言都行，按对方原话传）" },
+          "source": { "type": "string", "enum": ["auto", "jm", "nh"], "description": "auto=先 JM 再 NH 兜底（默认）；jm=只查 JM；nh=只查本地 NH 库" },
+          "limit": { "type": "integer", "description": "最多返回几本（默认取配置，上限 50）" },
+          "detail": { "type": "boolean", "description": "true 时对第一条补查详情（作者/标签/页数/别名），会让这次调用慢一点" }
+        },
+        "required": ["keyword"]
+      }
+    }
+  ]
+}

@@ -3976,7 +3976,7 @@ function renderSearchSection(c) {
   return `
     <div class="field">
       <div class="checkbox-row"><input type="checkbox" id="cfg-doujin" ${c.doujinLookup?.enabled ? 'checked' : ''} />
-        <label for="cfg-doujin">本子查询：启用 doujin_lookup 工具（JM 禁漫<b>直连</b>查「本子码 + 名字」，JM 搜不到时用本地 NH 英文库兜底）</label></div>
+        <label for="cfg-doujin">本子查询：启用 <code>doujin-lookup__lookup</code> 工具（由 <code>skills/doujin-lookup/</code> 提供；JM 禁漫<b>直连</b>查「本子码 + 名字」，JM 搜不到时用本地 NH 英文库兜底）</label></div>
       <div class="field-row">
         <div class="field"><label>一次最多返回几本</label>
           <input type="number" id="cfg-doujin-max" min="1" max="50" value="${esc(c.doujinLookup?.maxResults ?? 10)}" /></div>

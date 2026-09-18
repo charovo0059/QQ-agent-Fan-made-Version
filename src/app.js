@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, fetchForward, forwardIdFromData } from './onebot.js';
-import { ensureStickerImage } from './tools.js';
+import { ensureStickerImage, buildToolDefs } from './tools.js';
 import { ChatStore } from './store.js';
 import { MemoryStore } from './memory.js';
 import { StickerManager } from './sticker-manager.js';
@@ -24,6 +24,10 @@ import { Dreamer } from './dream.js';
 import { resolveOfficialPrice, listOfficialPrices, isPeakHour, priceAt, resolveModelPrice, modelLabel, splitModelLabel, UNKNOWN_VENDOR } from './model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.js';
 import { startTelemetryLoop } from './telemetry.js';
+// Skills 基础设施（上游 0.3.1）：启动时扫 skills/ 与 plugins/ 两个目录。
+// 位置锚点用的是本文件自己的路径（plugin-loader.js 里 APP_ROOT = src/..），不是 cwd。
+import { loadPlugins } from './plugin-loader.js';
+import { skillManager } from './skills/manager.js';
 import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
@@ -873,7 +877,8 @@ export function createApp({ log = console.log } = {}) {
     '看图上限可调（单张 KB / 一次几张 / 一轮累计 MB）',
     '群发通知：自定义文本 + 范围（白名单群 / 私聊）',
     '手动唤醒如实回报原因（无未读 / 档位不命中 / 排不上队）',
-    '本子查询工具 doujin_lookup（JM 直连，需本机 Python 环境，默认关闭）',
+    '本子查询（JM 直连，需本机 Python 环境，默认关闭）已搬进 skills/doujin-lookup/，工具名 doujin-lookup__lookup',
+    'Skills 基础设施：上游 0.3.1 的 tool-registry + plugin-loader + src/skills，可从 skills/ 目录插拔加载（不启用热重载）',
     '工具调用遗漏追问：正文写了但没调 send_message 时追问一轮',
     '「我替你收着了」：门控静默扫成已读的消息量会告知模型',
     '跨会话记忆互通 + 公平性修复（轮流取，不被"最近整理过的会话"挤掉）',
@@ -2631,6 +2636,30 @@ export function createApp({ log = console.log } = {}) {
 
     // 匿名用量遥测：启动 90 秒后发第一次，之后每 6 小时一次；失败静默不影响使用
     startTelemetryLoop(log);
+
+    // 加载 Skill（skills/ 与 plugins/）—— 在内置工具注册之后、OneBot 连接之前。
+    // 位置照抄上游 0.3.1 的 app.js（第 1296-1321 行），顺序很关键：
+    //   buildToolDefs() 是同步的，而技能工具要等 loadPlugins() 之后才进注册表 ——
+    //   所以必须"先加载技能、再重建 toolDefs"，否则开关打开了工具却不在列表里。
+    //   Orchestrator 构造时那次 buildToolDefs() 抓不到技能工具，这里重赋一次即可
+    //   （orchestrator.js 一行都不用改）。
+    // 不做热重载（watchPlugins）：那等于"放进目录的 JS 会被自动执行"，是行为变化，
+    // 用户没批；要热重载再说。
+    try {
+      const pluginResult = await loadPlugins({ log });
+      log(`[skill] 已加载 ${pluginResult.loaded.length} 个 Skill`
+        + (pluginResult.failed.length ? `，失败 ${pluginResult.failed.length}` : ''));
+      for (const f of pluginResult.failed) log(`[skill] ❌ ${f.id || '(未知)'}：${f.error}`);
+      // 技能状态如实回报：本子查询这类"Skill 加载成功、但开关默认关"的情况，
+      // 只有这行能说清它为什么没生效（否则只能靠猜）。
+      for (const st of skillManager.list()) {
+        log(`[skill] ${st.active ? '✅ 生效' : '⏸️ 未生效'}：${st.name}（${st.id}）${st.active ? '' : ` —— ${st.reason}`}`);
+      }
+      orchestrator.toolDefs = buildToolDefs();
+      log(`[skill] 工具集已刷新：${orchestrator.toolDefs.length} 个工具`);
+    } catch (error) {
+      log('[skill] 加载失败:', error?.message ?? error);
+    }
 
     // 拉起 SnowLuma（如配置了自动启动）、连 OneBot。
     if (getConfig().snowluma?.autoLaunch) {
