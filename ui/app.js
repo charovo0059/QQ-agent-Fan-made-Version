@@ -319,6 +319,19 @@ function assessReadiness(cfg, status) {
   const tips = [];
   if (!cfg.doujinLookup?.enabled) {
     tips.push('「本子查询」是可选功能，默认关闭。需要时到「设置 → 搜索服务 → 本子查询」打开，再用「导入离线库」导入 .db 或 .csv（离线库不随安装包分发）。');
+  } else {
+    // 开关**开着**的时候才检查资源 —— 这才是真的会出事的状态：
+    // 离线库 nh.db 不随包分发，所以"开着开关但没导库"是装完新包后很常见的一步之差。
+    // 后果是**静默半失效**：JM 直连照常能用，`source=auto` 的 NH 兜底却永远查不到东西，
+    // 而界面上一点提示都没有（§7「静默失效」那条）。
+    const dj = status?.doujin;
+    // ⚠️ 顺序要紧：入口缺失是更严重、更靠前的一环（没有 jm_server 就什么都查不了，
+    // 包括 JM 直连）。先报它，再说"库没导入"这种"只坏一半"的情况。
+    if (dj && dj.serverExists === false) {
+      tips.push('「本子查询」已开启，但**找不到服务入口**（jm_server.exe / jm_server.py）—— 现在查不了任何东西。到「设置 → 搜索服务 → 本子查询」检查工具目录。');
+    } else if (dj && dj.nhDbExists === false) {
+      tips.push('「本子查询」已开启，但**离线库（nh.db）还没导入** —— 现在只有 JM 直连能用，JM 查不到时不会自动兜底。到「设置 → 搜索服务 → 本子查询 → 导入离线库」选一个 .db 或 .csv。');
+    }
   }
   return { ready: urlOk && modelOk && allowOk && obOk, checks, tips };
 }
