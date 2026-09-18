@@ -1061,6 +1061,27 @@ export function createApp({ log = console.log } = {}) {
             ...snowlumaStatus()
           },
           orchestrator: orchestrator.statusSummary(),
+          // 本子查询的"资源到位了没"—— 给体检卡用，**只做 existsSync，不拉子进程**
+          // （spawnCount 那类统计要真起进程，不该出现在每次轮询的 /api/status 里）。
+          // 为什么必须有这个：离线库 nh.db **不随包分发**（151MB，用户决定改成设置页导入），
+          // 所以"开关开着 + JM 直连能用 + NH 兜底静默失效"是一个很可能的真实状态 ——
+          // 正是 §7 那条"静默失效：开关开着、接口 200、就是查不到东西"。
+          doujin: (() => {
+            try {
+              const p = jmPaths();
+              return {
+                enabled: cfgNow.doujinLookup?.enabled === true,
+                toolDir: p.toolDir || '',
+                toolDirFromConfig: p.toolDirFromConfig === true,
+                useExe: p.useExe === true,
+                serverExists: p.serverExists === true,
+                nhDbPath: p.nhDbPath || '',
+                nhDbExists: p.nhDbExists === true
+              };
+            } catch (error) {
+              return { enabled: cfgNow.doujinLookup?.enabled === true, error: String(error?.message ?? error) };
+            }
+          })(),
           usage,
           cost,
           cacheHitRate: cacheHitRate(usage),
