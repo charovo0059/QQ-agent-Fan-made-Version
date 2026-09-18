@@ -136,7 +136,7 @@ export class MemoryStore {
         });
       }
       // 旧的 activeTopic/pendingThought 直接丢弃（本版只保留群友印象）
-      for (const m of migrated) this.#appendRaw(chatKey, m.userId, m.name, m.content, m.createdAt);
+      for (const m of migrated) this.#appendRaw(chatKey, m.userId, m.name, m.content, m.createdAt, 'legacy');
       const backupDir = path.join(MEMORY_DIR, 'backups');
       fs.mkdirSync(backupDir, { recursive: true });
       const backup = path.join(backupDir, path.basename(legacy));
@@ -214,14 +214,21 @@ export class MemoryStore {
     for (const k of toDelete) map.delete(k);
   }
 
-  #appendRaw(chatKey, userId, name, content, createdAt = Date.now()) {
+  #appendRaw(chatKey, userId, name, content, createdAt = Date.now(), source = 'model') {
     const map = this.#ensureChat(chatKey);
     const key = userId ? String(userId) : `_n_${memberFileName('', name)}`;
     const member = map.get(key) || loadMember(chatKey, userId, name);
     const entry = {
       content: String(content ?? '').slice(0, 300),
-      createdAt: Number(createdAt) || Date.now()
+      createdAt: Number(createdAt) || Date.now(),
+      // 2026-09-19 加：这条印象是谁写的。
+      //   model        = 聊天时模型自己记的（原话在会话日志里可查）
+      //   consolidation= 整理（做梦）重写/合并出来的 —— 原来是不可追的那一半
+      //   manual       = 在记忆页签手工编辑的
+      // 老条目没有这个字段 ⇒ 消费方按 undefined 显示"未知（早于 09-19）"
+      source: String(source || 'model')
     };
+    // ⚠️ 只比 content：entry 现在多了 source 字段，用整个对象比较会**永远不相等**、去重直接失效
     if (!member.impressions.some((e) => e.content === entry.content)) {
       member.impressions.push(entry);
     }
@@ -253,7 +260,8 @@ export class MemoryStore {
           userId: String(m.userId || ''),
           target: String(m.name || m.userId || '某人'),
           content: e.content,
-          createdAt: e.createdAt
+          createdAt: e.createdAt,
+          source: e.source
         });
       }
     }
@@ -300,11 +308,20 @@ export class MemoryStore {
     const finalName = String(name ?? '').trim().slice(0, 60) || String(old.name || '').trim() || uid;
     const list = Array.isArray(impressions) ? impressions : [impressions];
     const now = Date.now();
+    // 未改动过的条目（内容与旧条目逐字相同）继承它原来的形成时间，只有真正改写的才盖 now
+    const prevAt = new Map();
+    for (const e of old.impressions || []) {
+      const c = String(e?.content ?? '');
+      if (c && !prevAt.has(c)) prevAt.set(c, Number(e?.createdAt) || now);
+    }
     const entries = list
       .map((s) => String(s ?? '').trim())
       .filter(Boolean)
       .slice(0, 20)
-      .map((content) => ({ content: content.slice(0, 300), createdAt: now }));
+      .map((content) => {
+        const c = content.slice(0, 300);
+        return { content: c, createdAt: prevAt.get(c) || now, source: 'manual' };
+      });
     const member = {
       userId: uid,
       name: finalName,
@@ -646,12 +663,41 @@ export class MemoryStore {
   }
 
   /**
+   * 整理前把「内容 → 首次写入时间」建成索引，供 replaceConsolidated 继承原始 createdAt。
+   *
+   * ⚠️ 为什么需要它（2026-09-19，P3）：`replaceConsolidated` 是**删光重建**，
+   * 原来一律写 `now` ⇒ 整理一跑，所有印象的 createdAt 全被刷成整理时刻，
+   * 「这条印象是什么时候形成的」永久丢失。这不是理论问题：2026-09-15 已经因此出过真 bug
+   * （见本文件 `sharesInto` 上方那段注释：取最近 N 条退化成"取最近整理过的会话的 N 条"）。
+   * 当时的处置是**绕过**（改成按会话轮取），根因一直没治 —— 这里把它治掉。
+   * 同一内容出现在多个成员名下时取**最早**的那个时间。
+   */
+  #createdAtIndex(chatKey) {
+    const index = new Map(); // content -> 最早 createdAt
+    const map = this.#ensureChat(chatKey);
+    for (const m of map.values()) {
+      for (const e of m.impressions || []) {
+        const c = String(e?.content ?? '');
+        if (!c) continue;
+        const t = Number(e?.createdAt) || 0;
+        if (!t) continue;
+        const prev = index.get(c);
+        if (prev === undefined || t < prev) index.set(c, t);
+      }
+    }
+    return index;
+  }
+
+  /**
    * 用整理结果整体替换本会话的印象（按成员写回各自文件）。
    * next.memberImpression: [{ userId?, target?, content }]
    */
   replaceConsolidated(chatKey, next) {
     const cut = (s, n) => String(s ?? '').trim().slice(0, n);
     const now = Date.now();
+    // 删光重建之前先把「内容 → 首次时间」记下来（P3：整理不得抹掉印象的形成时间）
+    const bornAt = this.#createdAtIndex(chatKey);
+    let inherited = 0;
     const groups = new Map(); // key -> { userId, name, contents }
     for (const item of Array.isArray(next?.memberImpression) ? next.memberImpression.slice(0, 15) : []) {
       const content = cut(item?.content, 300);
@@ -682,7 +728,10 @@ export class MemoryStore {
     map.clear();
     for (const g of groups.values()) {
       for (const content of g.contents) {
-        this.#appendRaw(chatKey, g.userId, g.name, content, now);
+        // 原文照抄的条目继承它原来的形成时间；整理新写出/改写过的内容才用 now
+        const at = bornAt.get(content);
+        if (at) inherited += 1;
+        this.#appendRaw(chatKey, g.userId, g.name, content, at || now, 'consolidation');
       }
       const file = memberFile(chatKey, g.userId, g.name);
       const member = loadMember(chatKey, g.userId, g.name);
@@ -693,6 +742,7 @@ export class MemoryStore {
     }
     writeJson(metaFile(chatKey), { lastConsolidatedAt: now });
     const totalAfter = [...map.values()].reduce((n, m) => n + m.impressions.length, 0);
+    console.log(`[memory] 整理写回：${totalAfter} 条（其中 ${inherited} 条继承原始时间，${totalAfter - inherited} 条为整理新写）`);
     return { memberImpression: groups.size ? this.query(chatKey).memberImpression : [], count: totalAfter };
   }
 }

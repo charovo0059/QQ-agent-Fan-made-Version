@@ -775,7 +775,10 @@ export function buildToolDefs() {
         type: 'object',
         properties: {
           category: { type: 'string', enum: ['memberImpression'] },
-          userId: { type: ['integer', 'string'], description: '对方 QQ 号（数字）' },
+          // ⚠️ 只能是数字 QQ 号：memory.js 的校验是 /^\d{1,15}$/。
+          // 2026-09-19 实测：这里原本声明 ['integer','string']，模型于是填了名字（"qwq白果"）被拒、
+          // 白烧两轮才改对（会话 mu3uizk7-791fb483）。schema 与实现必须一致。
+          userId: { type: 'string', pattern: '^\\d{1,15}$', description: '对方 QQ 号，纯数字（先用 get_active_members 查准确号码再填）' },
           target: { type: 'string', description: '对方名字（备注名/群名片/昵称）' },
           content: { type: 'string', description: '印象内容（≤120字，稳定、可跨多次聊天使用）' }
         },
