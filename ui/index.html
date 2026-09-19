@@ -29,6 +29,14 @@
     <div class="top-status" data-page-node-id="bJ0ckrJT6G2Tmd3CRV0BDG">
       <span id="onebot-dot" class="dot dot-off" title="OneBot 连接状态" data-page-node-id="kZj99OAhFFri832S3xi5AY"></span>
       <span id="onebot-label" class="muted" data-page-node-id="fFZerwgFQ1Y2b5Ypm3z9jJ">OneBot 未连接</span>
+      <!-- 平台切换（2026-09-20）：**只切显示**，两个平台的后端都照常跑。
+           ⚠️ 刻意放在状态点**紧后面**（而不是最右）—— 顶栏是 flex-wrap，
+           右边的东西在窄窗口下会先被挤到下一行/看不见；放在这儿保证永远够得着。
+           （这是"截图看一眼"发现的：第一次实现放在最右，窗口一窄就找不到了。） -->
+      <span id="platform-switch" class="platform-switch" role="tablist" aria-label="平台切换">
+        <button class="plat-btn active" data-platform="qq" role="tab" aria-selected="true">QQ</button>
+        <button class="plat-btn" data-platform="wechat" role="tab" aria-selected="false" title="微信（需要先让中继与 Bridge 跑起来）">微信</button>
+      </span>
       <span class="sep" data-page-node-id="xxx5qYDKjwTwAWINv1K3YF"></span>
       <span id="model-label" class="muted" data-page-node-id="mxYqKFiIVWYn1SDTF1HQvJ">模型：-</span>
       <span class="sep" data-page-node-id="JuGqHVKz2OXrfUFdvohz3O"></span>
