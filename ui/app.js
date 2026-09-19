@@ -2754,50 +2754,70 @@ function renderProposalReview() {
   const box = $('#proposal-review');
   if (!box) return;
   const items = state.proposals || [];
+  const accepted = state.proposalsAccepted || [];
   const counts = state.proposalCounts || {};
   const pending = counts.pending ?? items.length;
 
-  if (!items.length) {
-    box.innerHTML = `<div class="proposal-head">
-      <span class="proposal-title">改进提案</span>
-      <span class="uc-tag">暂无待审</span>
-    </div>
-    <div class="hint" style="margin-bottom:10px">她可以在聊天里用 <code>submit_proposal</code> 提议改自己（记忆/人设/功能/底层都行）。
-      提议只会出现在这里，<b>不会自动生效</b> —— 由你看过之后决定怎么做。</div>`;
-    return;
-  }
-
   const kindCls = { memory: 'ok', persona: 'warn', feature: 'info', code: 'err', other: '' };
-  const card = (p) => {
+  // 卡片。⚠️ accepted 的卡片去掉"采纳"按钮（已经采纳了），换成"标记已实现" ——
+  //    否则那一栏永远越积越长，而且看不出哪条真的做完了。
+  const card = (p, isAccepted) => {
     const when = p.at ? new Date(p.at).toLocaleString('zh-CN', { hour12: false }) : '';
     const from = p.fromChat ? `　来自 ${esc(p.fromChat)}` : '';
-    return `<div class="proposal-card" data-id="${esc(p.id)}">
+    const reviewed = isAccepted && p.reviewedAt
+      ? `<span class="muted" style="font-size:11px">　采纳于 ${esc(new Date(p.reviewedAt).toLocaleString('zh-CN', { hour12: false }))}</span>`
+      : '';
+    return `<div class="proposal-card${isAccepted ? ' proposal-card--accepted' : ''}" data-id="${esc(p.id)}">
       <div class="proposal-card__head">
-        <span class="proposal-kind ${kindCls[p.kind] || ''}">${esc(p.kindLabel || p.kind)}</span>
+        <span class="proposal-kind ${isAccepted ? 'ok' : (kindCls[p.kind] || '')}">${isAccepted ? '已采纳' : esc(p.kindLabel || p.kind)}</span>
         <span class="proposal-card__title">${esc(p.title)}</span>
         <span class="spacer"></span>
         <span class="muted" style="font-size:11px">${esc(when)}${from}</span>
       </div>
       <div class="proposal-card__detail">${esc(p.detail)}</div>
       ${p.rationale ? `<div class="hint">理由：${esc(p.rationale)}</div>` : ''}
+      ${reviewed}
       <div class="proposal-card__foot">
-        <span class="hint" style="margin:0">提案只是文字，勾选不会执行任何改动</span>
+        <span class="hint" style="margin:0">${isAccepted ? '已列入待办，改动由人来做' : '提案只是文字，勾选不会执行任何改动'}</span>
         <span class="spacer"></span>
-        <button class="btn btn-small" data-proposal="rejected" data-id="${esc(p.id)}">不采纳</button>
-        <button class="btn btn-small btn-primary" data-proposal="accepted" data-id="${esc(p.id)}">采纳（待办）</button>
+        ${isAccepted
+          ? `<button class="btn btn-small" data-proposal="pending" data-id="${esc(p.id)}" title="放回待审">撤回</button>
+             <button class="btn btn-small btn-primary" data-proposal="done" data-id="${esc(p.id)}">标记已实现</button>`
+          : `<button class="btn btn-small" data-proposal="rejected" data-id="${esc(p.id)}">不采纳</button>
+             <button class="btn btn-small btn-primary" data-proposal="accepted" data-id="${esc(p.id)}">采纳（待办）</button>`}
       </div>
     </div>`;
   };
 
+  if (!items.length && !accepted.length) {
+    box.innerHTML = `<div class="proposal-head">
+      <span class="proposal-title">改进提案</span>
+      <span class="uc-tag">暂无</span>
+    </div>
+    <div class="hint" style="margin-bottom:10px">她可以在聊天里用 <code>submit_proposal</code> 提议改自己（记忆/人设/功能/底层都行）。
+      提议只会出现在这里，<b>不会自动生效</b> —— 由你看过之后决定怎么做。</div>`;
+    return;
+  }
+
+  // 已采纳那一栏默认折叠：这是"工单存档"，平时不占地方，但要能查得到
+  //（2026-09-19 修：原来只拉 pending ⇒ 一采纳就从列表消失，用户问"采纳之后在哪看"才发现）
+  const acceptedHtml = accepted.length
+    ? `<details class="proposal-accepted"><summary>已采纳（${accepted.length}）—— 列在待办里，改动由人来做</summary>
+         ${accepted.map((p) => card(p, true)).join('')}
+       </details>`
+    : '';
+
   box.innerHTML = `<div class="proposal-head">
       <span class="proposal-title">改进提案</span>
       <span class="uc-tag">待审 ${pending}</span>
+      ${accepted.length ? `<span class="uc-tag" title="已采纳、还没做完的条数">已采纳 ${accepted.length}</span>` : ''}
       <span class="spacer"></span>
       <button class="btn btn-small" id="proposal-refresh">刷新</button>
     </div>
     <div class="hint" style="margin-bottom:8px">这里只记她想改什么，<b>任何一项都不会被自动执行</b> ——
       采纳只是打个标记，真正动手由人来做（见 <code>src/proposals.js</code> 顶部）。</div>
-    ${items.map(card).join('')}`;
+    ${items.map((p) => card(p, false)).join('')}
+    ${acceptedHtml}`;
 
   $('#proposal-refresh')?.addEventListener('click', () => loadProposals().then(() => renderProposalReview()));
   $$('#proposal-review [data-proposal]').forEach((b) => {
@@ -2821,9 +2841,16 @@ function renderProposalReview() {
 
 async function loadProposals() {
   try {
-    const r = await api('/api/proposals?status=pending');
-    state.proposals = r.items || [];
-    state.proposalCounts = r.counts || {};
+    // ⚠️ 2026-09-19 修：原来只拉 `status=pending` ⇒ **一采纳就从列表里消失**，
+    //    用户问"采纳之后在哪看"时才暴露出这个洞。现在待审与已采纳都拉。
+    //    已实现(done)与不采纳(rejected)刻意不进列表：它们已归档，留着只会让这块越来越长。
+    const [pend, acc] = await Promise.all([
+      api('/api/proposals?status=pending'),
+      api('/api/proposals?status=accepted')
+    ]);
+    state.proposals = pend.items || [];
+    state.proposalsAccepted = acc.items || [];
+    state.proposalCounts = { ...(pend.counts || {}), ...(acc.counts || {}) };
   } catch (e) {
     // 取不到就保持原值，别清空成"没有提案"的假象
     console.warn('[proposal] 拉取失败：', e?.message || e);
