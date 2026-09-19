@@ -60,13 +60,16 @@ export function reengageWaitMs(cfg, unanswered) {
 }
 
 export class Orchestrator {
-  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null }) {
+  constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, mutes = null }) {
     this.store = store;
     this.memory = memory;
     this.stickers = stickers;
     this.sender = sender;
     this.sessions = sessions;
     this.onebot = onebot;
+    // 群禁言状态表（见 src/mutes.js）。可以为 null —— 那种情况下退化成旧行为（不拦）。
+    // ⚠️ 这里刻意用"可缺省"而不是"必需"：老调用方（测试、工具）不传也能跑。
+    this.mutes = mutes;
     this.emit = typeof emit === 'function' ? emit : ((b) => b.emit.bind(b))(createEventBus());
     this.toolDefs = buildToolDefs();
 
@@ -99,6 +102,16 @@ export class Orchestrator {
   /** 收到新消息（已通过白名单校验并写入 store）。 */
   onIncoming(chatKey) {
     if (this.paused || this.aborted) return;
+    // ── 群禁言：认出来就别再起编排了（2026-09-19 第八对话新增）────────────────
+    //
+    // 为什么卡在这里而不是卡在发送处：被禁言时**发言注定失败**，而起一轮运行的代价
+    // 是**一整次 LLM 调用**。实测那次单群 140+ 轮空转、当日全站 1164 万 prompt token。
+    // 消息**照样落 store**（只是不叫醒），所以解禁后内容不丢、还能当上下文。
+    if (this.mutes?.isMuted?.(chatKey)) {
+      this.mutes.lastBlocked = { chatKey, at: Date.now(), reason: this.mutes.describe(chatKey) };
+      this.emit('chat-update', chatKey);
+      return;
+    }
     if (this.runningChats.has(chatKey)) return;   // 运行结束后 drain 会接管
     this.scheduleWake(chatKey);
   }
@@ -278,6 +291,19 @@ export class Orchestrator {
     if (this.aborted) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.paused && !proactive) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.runningChats.has(chatKey)) return;
+
+    // ── 群禁言：**这里也必须拦**（2026-09-19 第八对话新增）────────────────────
+    // ⚠️ 只在 onIncoming 拦是不够的 —— 禁言可能发生在"已经排好唤醒"之后：
+    //    防抖窗口（wakeDelayMs，默认 2 秒）里被禁言、或主动开口/续聊那条线排的唤醒，
+    //    都会绕过 onIncoming 直接走到这儿。**实测就是这么漏的**：
+    //    单测里"禁言后不再叫起编排"通过、但那个群照样起了一轮 —— 因为起它的是先前排的唤醒。
+    // 处置：不消费未读、干净撤掉等待会话 ⇒ 解禁后这批消息还能被正常处理，一条不丢。
+    if (this.mutes?.isMuted?.(chatKey)) {
+      this.mutes.lastBlocked = { chatKey, at: Date.now(), reason: this.mutes.describe(chatKey) };
+      if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '该群禁言中');
+      this.emit('chat-update', chatKey);
+      return;
+    }
 
     // 模型未设置：不产生报错会话，消息保留为未读；设置模型后（下一条消息或手动唤醒）自动补处理
     if (!String(getConfig().api.model || '').trim()) {
