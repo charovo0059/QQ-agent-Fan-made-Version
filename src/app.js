@@ -490,6 +490,13 @@ export function createApp({ log = console.log } = {}) {
   //   不能让它依赖一次网络往返（中继没起来就会把整个状态接口拖慢）。
   const wechatUpstream = { online: null, checkedAt: 0, error: '', identityAt: 0 };
 
+  /**
+   * 「收到了、但白名单没放行」的最近几条（给界面提示用）。
+   * 只留昵称/种类/时间，**不留正文** —— 白名单外不记录正文是有意为之的设计，
+   * 这里只是把"有人在敲门"这件事说出来（见 ingestMessage 里那段注释）。
+   */
+  const blockedWechat = [];
+
   async function probeWechatUpstream() {
     if (!wechatOnebot || !wechatOnebot.connected) {
       wechatUpstream.online = null; wechatUpstream.error = ''; wechatUpstream.checkedAt = Date.now();
@@ -824,7 +831,23 @@ export function createApp({ log = console.log } = {}) {
       }
     }
 
-    if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天不记录、不触发会话
+    if (!allowed(kind, id, cfgNow)) {
+      // 🔴 「收到了、但没放行」必须变成**看得见**的（2026-09-20 实测补）。
+      //    实测的教训：用户在通道还没开的时候连发三条（OK / test2 / test3），界面上**一点反馈都没有**
+      //    ⇒ 看的人只会以为"接微信这事坏了"。而它其实在正常工作（白名单外不记录、不触发会话），
+      //    只是**没说**。而"没说"正是本项目最忌的那种失败。
+      //    所以这里记一条，随 `/api/status.wechat.blocked` 暴露出去，设置页据此提示"勾选它即可"。
+      //    ⚠️ 只留**最近几条**、只存**昵称与时间**（不留正文）—— 这是告诉用户"谁在敲门"，
+      //       不是把没放行的聊天内容也存下来（那会绕过"白名单外不记录"这条设计）。
+      if (source === 'wechat') {
+        const who = String(event?.sender?.card || event?.sender?.nickname || event?.sender?.user_id || id || '');
+        const rec = { id: String(id), kind, name: who, at: Date.now() };
+        blockedWechat.unshift(rec);
+        if (blockedWechat.length > 5) blockedWechat.length = 5;
+        log(`[wechat] 收到未放行的消息（${kind}:${id} ${who}）—— 去「设置 → 微信联系人」勾选它`);
+      }
+      return; // 白名单外的聊天不记录、不触发会话
+    }
 
     const segments = Array.isArray(event.message) ? event.message : null;
     const senderId = String(event.sender?.user_id ?? event.user_id ?? '');
@@ -1368,6 +1391,9 @@ export function createApp({ log = console.log } = {}) {
             //    null = 还没问过/问不出来（**未知**，不要当成 false）。
             bridgeConnected: (() => { const u = wechatUpstreamNow(); return wechatOnebot?.connected ? u.online : null })(),
             upstreamError: wechatUpstreamNow().error || '',
+            // 🔴 「有消息进来了、但这个会话没放行」：不暴露它，用户就只会看到"发了没反应"（实测踩过）。
+            //    只给最近 3 条、只含昵称/种类/时间，**不含正文**。
+            blocked: blockedWechat.slice(0, 3),
             // 当前有几个会话被标成微信来源（前端切视图要用它判断"这边有没有东西"）
             chats: (() => { try { return store.chatsBySource('wechat').length } catch { return 0 } })()
           },
