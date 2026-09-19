@@ -1144,6 +1144,16 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, aboutPayload());
       }
 
+      // 主动开口的只读评估（2026-09-19 加）：让设置页那一块能显示"现在会不会开口、为什么"。
+      // ⚠️ 只读：不掷骰子、不改状态、不唤醒（详见 orchestrator.proactiveReport 的注释）。
+      if (pathname === '/api/proactive' && method === 'GET') {
+        try {
+          return json(res, 200, { ok: true, ...orchestrator.proactiveReport() });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
       // 端口占用预检（2026-09-19 第七对话新增）。
       // 单独开一个接口而不是塞进 /api/status：它是**主动探测**（要 connect 四次、约几百毫秒），
       // 而 /api/status 是被前端每 15 秒轮询一次的热路径 —— 塞进去等于每 15 秒白探一次。

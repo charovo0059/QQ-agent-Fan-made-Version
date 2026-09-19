@@ -944,6 +944,72 @@ export class Orchestrator {
     return quietHoursAt(cfg);
   }
 
+  /**
+   * 主动开口的**只读**评估（2026-09-19 加）—— 给设置页那一块显示"现在会不会开口、为什么"。
+   *
+   * 为什么需要：主动开口的判定链有**六道**（开关 → 安静时段 → 并发 → 掷骰子 →
+   *   冷场阈值/白名单/未读 → 连发上限+退避），而其中四道的参数原来在界面上根本看不见。
+   *   结果就是"它到底会不会开口"完全靠猜 —— 这个方法是把那条链**摊开说清**。
+   * ⚠️ **只读**：不掷骰子（否则每次调接口都消耗一次机会）、不改任何状态、不唤醒。
+   *    "掷骰子"那一项只报概率，不报结果。
+   */
+  proactiveReport() {
+    const cfg = getConfig();
+    const p = cfg.proactive || {};
+    const enabled = p.enabled === true;
+    const idleMs = Math.max(300000, Number(p.idleThresholdMs) || 1800000);
+    const maxConsec = Math.max(1, Number(p.maxConsecutive) || 2);
+    const quietNow = quietHoursAt(cfg);
+    const busy = this.runningChats.size >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2);
+
+    const allowGroups = (cfg.allow?.groups ?? []).map(String);
+    const chats = [];
+    for (const chatKey of this.store.listChats()) {
+      const [kind, id] = chatKey.split(':');
+      if (kind !== 'group') continue;
+      const inAllow = allowGroups.length > 0 ? allowGroups.includes(id) : !!cfg.allowAllWhenEmpty;
+      const meta = this.store.getChatMeta(chatKey);
+      const pro = this.store.peekProactive(chatKey);
+      const idleForMs = Math.max(0, Date.now() - (Number(meta.lastTs) || 0));
+      // 逐条说清"为什么不行"，顺序与 #proactiveCandidates 一致
+      let blocked = '';
+      if (!inAllow) blocked = '不在白名单里';
+      else if (Number(meta.unread) > 0) blocked = `有 ${meta.unread} 条未读`;
+      else if (idleForMs < idleMs) blocked = `只静默了 ${Math.round(idleForMs / 60000)} 分钟（要 ${Math.round(idleMs / 60000)} 分钟）`;
+      else if (this.runningChats.has(chatKey)) blocked = '正在处理这个会话';
+      else if (Number(pro.consecutive) >= maxConsec) {
+        const waited = Date.now() - (Number(pro.lastAt) || 0);
+        const need = this.#reengageWaitMs(cfg, Number(pro.consecutive) - maxConsec + 1);
+        blocked = waited >= need
+          ? ''   // 等够了，"再戳一次"是允许的
+          : `已开口 ${pro.consecutive} 次没人理，还要再等 ${Math.max(0, Math.round((need - waited) / 3600000))} 小时`;
+      }
+      chats.push({
+        chatKey, consecutive: Number(pro.consecutive) || 0,
+        idleMinutes: Math.round(idleForMs / 60000), ok: !blocked, blocked
+      });
+    }
+    // 全局层面先说清
+    const globalBlock = !enabled ? '总开关关着'
+      : quietNow ? `现在是安静时段（${Number(p.quietHoursStart) || 23} 点 ~ ${Number(p.quietHoursEnd) || 8} 点），不会开口`
+        : busy ? `正在忙（并发上限 ${Math.max(1, Number(cfg.maxConcurrentRuns) || 2)}），这次跳过`
+          : '';
+    return {
+      enabled, quietNow, busy, globalBlock,
+      intervalMinutes: [Math.round((Number(p.checkIntervalMinMs) || 1800000) / 60000), Math.round((Number(p.checkIntervalMaxMs) || 5400000) / 60000)],
+      probability: Number(p.probability) || 0.25,
+      idleThresholdMinutes: Math.round(idleMs / 60000),
+      quietHours: [Number(p.quietHoursStart) || 23, Number(p.quietHoursEnd) || 8],
+      maxConsecutive: maxConsec,
+      reengage: {
+        afterHours: Number(p.reengageAfterHours) || 14,
+        backoff: Number(p.reengageBackoff) || 2,
+        maxHours: Number(p.reengageMaxHours) || 336
+      },
+      chats
+    };
+  }
+
   /** 被晾久了允许"再戳一次"的等待时长（算式见模块级 reengageWaitMs） */
   #reengageWaitMs(cfg, unanswered) {
     return reengageWaitMs(cfg, unanswered);

@@ -257,6 +257,47 @@ function minToMs(min, fallbackMs = 1800000) {
   return Math.max(60000, Math.round(n * 60000));   // 下限 1 分钟，与原来 min="60000" 一致
 }
 
+/**
+ * 读并显示「主动开话题」的实时状态（2026-09-19 加）。
+ *
+ * 目的：那六道闸原来有四道的参数界面上看不见，于是"它到底会不会开口"只能靠猜。
+ * 这里把 GET /api/proactive 的结果摊成一句话 + 每群一行原因。
+ * ⚠️ 接口是**只读**的（不掷骰子、不改状态），所以可以随时刷新。
+ */
+async function loadProactiveStatus() {
+  const box = $('#proactive-status')
+  const rg = $('#proactive-reengage')
+  if (!box && !rg) return
+  let d = null
+  try { d = await api('/api/proactive') } catch (e) { /* 拿不到就保持原样 */ }
+  if (!d || !d.ok) {
+    if (box) box.textContent = '（读不到主动开口状态）'
+    return
+  }
+  if (rg) rg.textContent = `首次 ${d.reengage.afterHours} 小时起、每次 ×${d.reengage.backoff}、最多等 ${d.reengage.maxHours} 小时`
+  if (!box) return
+  const iv = d.intervalMinutes || [30, 90]
+  const head = d.globalBlock
+    ? `现在不会开口：${d.globalBlock}`
+    : `现在每 ${iv[0]}~${iv[1]} 分钟检查一次，掷骰子概率 ${d.probability}`
+  const oks = (d.chats || []).filter((x) => x.ok)
+  const detail = !d.enabled
+    ? ''
+    : (oks.length
+      ? `　可开口的群：${oks.map((x) => x.chatKey.slice(6) + `（静默 ${x.idleMinutes} 分钟）`).join('、')}`
+      : `　暂时没有"冷场且允许"的群（共看了 ${(d.chats || []).length} 个群，逐条原因如下）`)
+  box.textContent = head + detail
+  if (box) {
+    box.innerHTML = esc(head) + (detail ? `<br />${esc(detail.trim())}` : '')
+    // 逐群原因：只在"一个都不能开口"时展开，避免平时太吵
+    if (d.enabled && !oks.length && (d.chats || []).length) {
+      box.innerHTML += `<br /><span style="color:var(--faint)">` +
+        (d.chats || []).slice(0, 8).map((x) => `${esc(x.chatKey.slice(6))}：${esc(x.blocked || '可以开口')}`).join('　·　') +
+        `</span>`
+    }
+  }
+}
+
 const STATUS_LABEL = { waiting: '等待中', done: '已发言', noreply: '未回复', running: '运行中', error: '出错', aborted: '中止' };
 
 // ── 启动 loading 壳：页面先渲染，等服务可用后自动隐藏 ──
@@ -4390,6 +4431,11 @@ function renderSettings() {
   box.innerHTML = `
     ${renderSettingsSection(c)}`;
   bindSettingsEvents(c);
+  // ⚠️ 必须在 innerHTML **之后**再读状态 —— loadProactiveStatus 是去查 DOM 元素再填内容的，
+  //    放在 renderSettingsSection 里面（模板字符串求值阶段）时元素还没进 DOM，
+  //    于是它查不到 #proactive-status、静默什么都不做（界面上就永远停在"正在读当前状态…"）。
+  //    第一版就是这么写错的。
+  if ((state.settingsSection || 'api') === 'chat') loadProactiveStatus();
 }
 
 function renderSettingsSection(c) {
@@ -5017,17 +5063,32 @@ return `
     <h3>主动开话题</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-proactive" ${c.proactive.enabled ? 'checked' : ''} />
       <label for="cfg-proactive">冷场时按概率主动开话题</label></div>
-    <div class="field-row">
-      <!-- ⚠️ 界面用**分钟**，存储仍是**毫秒**（proactive.checkIntervalMinMs/MaxMs）。
+    <!-- 实时状态：把六道闸摊开，回答"现在会不会开口、为什么"。数据来自 GET /api/proactive（只读） -->
+    <div id="proactive-status" class="hint" style="margin:-2px 0 10px">（正在读当前状态…）</div>
+    <!-- ⚠️ 界面用**分钟**，存储仍是**毫秒**（proactive.checkIntervalMinMs/MaxMs）。
            为什么不改存储单位：那几个键的名字里就带 Ms、值也一直是毫秒；改成分钟会让键名与值不符，
            而且已有配置文件里存的是毫秒，会被按"分钟"读成天文数字（1800000 分钟 ≈ 3.4 年）—— 静默出错。
            ⚠️ 注意：本段注释在**模板字符串里面**，所以**不能出现反引号**（会提前结束字符串）。
            ⇒ 只在渲染与保存两处 ×/÷ 60000，见 msToMin / minToMs。 -->
+    <div class="field-row">
       <div class="field"><label>检查间隔下限（分钟）</label><input type="number" id="cfg-pro-min" min="1" step="1" value="${esc(msToMin(c.proactive.checkIntervalMinMs, 30))}" /></div>
       <div class="field"><label>检查间隔上限（分钟）</label><input type="number" id="cfg-pro-max" min="1" step="1" value="${esc(msToMin(c.proactive.checkIntervalMaxMs, 90))}" /></div>
       <div class="field"><label>触发概率 0~1</label><input type="number" id="cfg-pro-prob" step="0.05" min="0" max="1" value="${esc(c.proactive.probability)}" /></div>
     </div>
-    <div class="hint" style="margin:-4px 0 8px">间隔是"隔多久检查一次冷场"，不是"多久必说一次" —— 每次检查还要过安静时段、连发上限、退避三道闸，再掷一次概率。</div>
+    <div class="field-row">
+      <!-- 群里安静多久才算"冷场"（原来这个键界面上没有 ⇒ 看不见也调不了） -->
+      <div class="field"><label>群里安静多久才算冷场（分钟）</label><input type="number" id="cfg-pro-idle" min="5" step="5" value="${esc(msToMin(c.proactive.idleThresholdMs, 30))}" /></div>
+      <!-- 安静时段：默认 23 → 8（跨零点）；这两键原来界面上也没有 -->
+      <div class="field"><label>安静时段（点，含起点）</label><input type="number" id="cfg-pro-quiet-start" min="0" max="23" step="1" value="${esc(Number(c.proactive.quietHoursStart ?? 23))}" /></div>
+      <div class="field"><label>到（点，不含终点）</label><input type="number" id="cfg-pro-quiet-end" min="0" max="24" step="1" value="${esc(Number(c.proactive.quietHoursEnd ?? 8))}" /></div>
+      <!-- 连发上限：没人理最多连开几次。⚠️ 超过它之后的"退避"见下面只读那一行 -->
+      <div class="field"><label>没人理最多连开（次）</label><input type="number" id="cfg-pro-maxconsec" min="1" max="10" step="1" value="${esc(Number(c.proactive.maxConsecutive ?? 2))}" /></div>
+    </div>
+    <div class="hint" style="margin:-4px 0 10px">
+      间隔是"隔多久检查一次冷场"，不是"多久必说一次" —— 每次检查还要过安静时段、并发、掷骰子、冷场阈值、连发上限/退避。
+      超过连发上限后不再无限开口，只在等够退避时间后允许"再戳一次"：
+      <span id="proactive-reengage">…</span>
+    </div>
 
     <h3>表情包</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-sticker" ${c.sticker.enabled ? 'checked' : ''} />
@@ -6975,7 +7036,15 @@ async function saveConfig({ quiet = false } = {}) {
       // 界面是分钟 ⇒ 存盘前 ×60000 换回毫秒（键名带 Ms，见上面 HTML 里的注释）
       checkIntervalMinMs: minToMs(val('#cfg-pro-min', msToMin(c.proactive?.checkIntervalMinMs, 30)), 1800000),
       checkIntervalMaxMs: minToMs(val('#cfg-pro-max', msToMin(c.proactive?.checkIntervalMaxMs, 90)), 5400000),
-      probability: Number(val('#cfg-pro-prob', c.proactive?.probability)) || 0.25
+      probability: Number(val('#cfg-pro-prob', c.proactive?.probability)) || 0.25,
+      // 新增到界面上的四个（原来它们只在 config 里，看不见也调不了）
+      idleThresholdMs: minToMs(val('#cfg-pro-idle', msToMin(c.proactive?.idleThresholdMs, 30)), 1800000),
+      quietHoursStart: clampInt(val('#cfg-pro-quiet-start', c.proactive?.quietHoursStart ?? 23), 0, 23, 23),
+      quietHoursEnd: clampInt(val('#cfg-pro-quiet-end', c.proactive?.quietHoursEnd ?? 8), 0, 24, 8),
+      maxConsecutive: clampInt(val('#cfg-pro-maxconsec', c.proactive?.maxConsecutive ?? 2), 1, 10, 2)
+      // ⚠️ reengageAfterHours / Backoff / MaxHours 三个**故意不做输入框**：
+      //    它们是"没人理就慢慢收手"的退避参数，逻辑绕；而 proactive.enabled 目前是关着的，
+      //    为一个没开的功能够造三个输入框不划算。面板上只**只读显示**当前值。
     };
     patch.sticker = {
       ...c.sticker,
