@@ -17,6 +17,48 @@ import { buildToolDefs, toOpenAiTools, executeTool, gateToolDefs } from './tools
 import { modelImageVerdict } from './vision-scan.js';
 import { currentProviders } from './providers.js';
 
+// ── 主动开口的三道闸（纯函数，便于单测）──────────────────────────────────
+//
+// 为什么提成模块级：这几个判据全是"给定配置和当前时间，算什么"，
+// 不需要 store / onebot / 模型。留成类私有方法就只能靠起真循环+定时间接测，
+// 而它们恰恰是三处最容易写错边界（跨零点、翻倍封顶、正好等于阈值）的地方。
+
+/**
+ * 现在是不是"安静时段"（这段时间内绝不主动开口）。
+ *
+ * 为什么要它（调研报告 M2 / §10）：我们的 proactive 原本没有这个闸 ⇒ **凌晨 3 点也可能开口**。
+ * 跨零点由 start > end 表达（默认 23 → 8）。
+ * ⚠️ 用本地时区的小时数，不用 UTC —— 机器人是给本机用户用的。
+ */
+export function quietHoursAt(cfg, now = new Date()) {
+  const s = Number(cfg?.proactive?.quietHoursStart);
+  const e = Number(cfg?.proactive?.quietHoursEnd);
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return false;
+  if (s === e) return false;                       // 起止相同 = 不设安静时段
+  const h = now.getHours();
+  return s < e ? (h >= s && h < e) : (h >= s || h < e);   // 后者跨零点
+}
+
+/**
+ * 被晾了这么久之后，允许"再戳一次"的等待时长（毫秒）。
+ *
+ * 依据 lingxi 的 reengage 设计（调研报告 M2）：14h × 2^超出条数，封顶 reengageMaxHours（336h=14天）。
+ * 它注释里的原话解释了为什么要封顶：
+ *   "一个平铺的 14 小时永远不会放弃：某个收件人的缓冲区里堆了 30 轮、没有一条是他的，
+ *    以及 24 条连续没人回的开口。到那时候已经没东西可开口了 —— 没有新事实、没有可跟进的消息，
+ *    于是每次尝试都退化成「你还在忙吗」「都一个星期没你消息了」。
+ *    那种词被怪到措辞头上；它其实就是'没话可说'听起来的样子。"
+ *
+ * @param unanswered 超出上限的那一条是第几条（1 = 刚超出，2 = 超出第二条……）
+ */
+export function reengageWaitMs(cfg, unanswered) {
+  const after = Math.max(1, Number(cfg?.proactive?.reengageAfterHours) || 14);
+  const backoff = Math.max(1, Number(cfg?.proactive?.reengageBackoff) || 2);
+  const maxH = Math.max(after, Number(cfg?.proactive?.reengageMaxHours) || 336);
+  const over = Math.max(0, Number(unanswered) - 1 || 0);
+  return Math.min(after * Math.pow(backoff, over), maxH) * 3600000;
+}
+
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null }) {
     this.store = store;
@@ -499,6 +541,9 @@ export class Orchestrator {
       stickerEntries,
       selfNickname,
       selfLastMessageAt,
+      // 我自己最近发过的话（已在上面查过，不额外查库）—— buildUserPrompt 用它统计
+      // "我最近开口爱用什么词"，治 38.2% 以接话词开头的口癖。详见 prompt.js recentSelfOpeners。
+      recentSelfMessages: myMessages,
       lastMessageAt,
       recentCount,
       runSeq: seq,
@@ -565,6 +610,7 @@ export class Orchestrator {
     const maxRounds = Math.max(1, Number(cfg.api.maxRounds) || 12);
     let finish = false;
     let nudged = false;          // 「写了正文但没发出去」是否已经追问过（每次运行最多一次）
+    let roundsUsed = 0;          // ⚠️ 循环外的计数器：`round` 是 for 的块级作用域，循环外访问不到
     let webSearchCount = 0;
     session.activity = '';
     session.webSearchCount = 0;
@@ -650,7 +696,7 @@ export class Orchestrator {
         // 没有工具调用 = 模型结束思考（文本不会发给 QQ）
         //
         // ⚠️ 但这里有个实测出来的失效模式：模型把**完整的、面向用户的回答**写进正文、
-        // 又没调用 send_message —— 循环在这里 break，那段话谁都没收到（会话页显示"未回复"）。
+        // 又没调用 send_message —— 那段话谁都没收到（会话页显示"未回复"）。
         //
         // 实测数据（冻结上下文重放，每个上下文各 20 遍）：
         //   · "工具返回后、准备作答"这个位置，漏发率 25%~40%
@@ -658,21 +704,10 @@ export class Orchestrator {
         //   · 生产数据：152 次该位置的生成里有 6 次这种形态，其中 2 次真的一个字都没发出去；
         //     而"本轮之前没有工具结果"的位置 100 次里一次都没有
         //
-        // 所以这里补一次**追问**。触发条件刻意收得很紧：
-        //   · 本轮写了正文（非空）
-        //   · 且**整次运行一条都没发过**（已经回过话的，末尾再写句内心备注是无害的，不打扰它）
-        //   · 每次运行最多追问一次（nudged 兜住，不可能循环）
-        // 让它自己决定发不发 —— 我们不去猜那段话是"发言"还是"独白"，它自己最清楚
-        // （实测它确实会用「【内心】」这样的标记区分）。
-        if (!nudged && String(finalContent || '').trim() && (session.sent || []).length === 0) {
-          nudged = true;
-          session.nudged = true;
-          session.messages.push({ nudgeDraft: String(finalContent).slice(0, 300) });
-          messages.push({ role: 'user', content: NUDGE_TEXT });
-          this.sessions.update(session.id);
-          this.emit('session-update', session.id);
-          continue;
-        }
+        // ⚠️ 追问**不在这里做**（2026-09-19 改动）：原先它挂在这个分支里，
+        //    结果只覆盖"模型没调任何工具"这一条退出路径 ——
+        //    模型调 `finish` 或用满 maxRounds 时都够不到，正文照样丢（见循环后的兜底注释）。
+        //    现在统一交给循环后的那一处，判据也更简单：整次没发过 + 最后一条有正文。
         break;
       }
 
@@ -742,6 +777,77 @@ export class Orchestrator {
       // 图片消息跟随在全部 tool 结果之后（OpenAI 校验要求每个 tool_call 都有对应 tool 消息）
       messages.push(...imageUserMessages);
       // 给 UI 的简化消息流（跳过纯 tool 结果的重复展示）
+      roundsUsed = round + 1;
+    }
+
+    // ── 循环后的漏发兜底（2026-09-19 新增）────────────────────────────────
+    //
+    // 为什么要在这里再兜一次：原来的追问**只挂在"模型没调任何工具"这一条路径的分支里**
+    // （见上面 `if (!toolCalls.length)` 那段）。而循环还有另外两条退出路径：
+    //   · 模型调了 `finish` ⇒ 循环条件 `!finish` 直接结束，追问**够不到**
+    //   · 用满 `maxRounds` ⇒ 同上
+    // ⇒ 只要模型在这两条路径上把**用户可见的正文**写进了 content 却没调发送工具，
+    //   那段话就永久丢失，而且模型自己以为已经回了。
+    //
+    // 实测证据（2026-09-19，449 个真实会话逐条排查）：
+    //   `mu6mhmro-7f20755c`：模型把回答写进 finish 的 content
+    //     （"P3 大概 94%，sRGB 是满的。响应实测 2.46ms 左右…"），
+    //     `sent` 为空，finishReason 却自称"一条消息答完" ⇒ 用户一个字都没收到。
+    //   `mu1j1m6b-771c157f`：同样形态（25 字正文、0 个工具调用、sent 为空）。
+    //
+    // ⚠️ 为什么不区分"是发言还是独白"：我们不去猜，让模型自己判断 ——
+    //    这与上面那段分支里的追问设计一致（实测它确实会用「【内心】」这类标记自我区分）。
+    // ⚠️ 为什么不用 `!finish` 做条件：循环走到这儿 `finish` 必为 true（否则条件不成立），
+    //    所以判据只能落在"**整次运行一条都没发过 + 最后一条有正文**"上。
+    //    这同时覆盖"它有话说却写进了 finish 的 content"这个真实失效模式。
+    // ⚠️ maxRounds 保护：追问要再发一次请求，给它单独一轮预算，不占用正常轮次。
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    const leftoverDraft = typeof lastAssistant?.content === 'string' ? lastAssistant.content.trim() : '';
+    if (!nudged && !this.aborted && leftoverDraft && session.sent.length === 0
+        && roundsUsed < maxRounds && !session.error) {
+      nudged = true;
+      session.nudged = true;
+      session.messages.push({ nudgeDraft: leftoverDraft.slice(0, 300), nudgeReason: finish ? 'finish' : 'no-tool-call' });
+      messages.push({ role: 'user', content: NUDGE_TEXT });
+      this.sessions.update(session.id);
+      this.emit('session-update', session.id);
+      markActivity('追问…');
+      try {
+        const retry = await chatCompletionWithRetry({ messages, tools: openAiTools });
+        addUsage(session.usage, retry.usage);
+        session.usage.calls += 1;
+        session.model = retry.model || session.model;
+        const rmsg = retry.message;
+        const rContent = typeof rmsg.content === 'string' ? rmsg.content : '';
+        const rToolCalls = Array.isArray(rmsg.tool_calls) ? rmsg.tool_calls : [];
+        const rEntry = {
+          role: 'assistant', content: rContent, tool_calls: rmsg.tool_calls ?? null,
+          raw: retry.raw ?? null,
+          // ⚠️ 记账必须与循环一致（2026-09-19 修）：
+          //    `round` 的语义是"**本次运行的**第几次模型调用"（27 个正常会话里
+          //    `session.rounds` 与最后一条 assistant 的 round 100% 相等，这就是判据）。
+          //    重试是**紧接着的第 2 次调用**，所以是 `roundsUsed + 2`、`session.rounds = roundsUsed + 2`。
+          //    第一版写成 +1，导致重试条目拿到 `round=1` —— 而它明明是第 2 次说话，
+          //    于是"首轮必为 false"的不变式被破坏（真实数据里抓出来 2 例，回归 check-fields.mjs 报红）。
+          round: roundsUsed + 2, hadToolResult: true, nudgeRetry: true,
+          draftWithoutSend: !rToolCalls.length && rContent.trim().length > 0
+        };
+        messages.push(rEntry);
+        session.messages.push(structuredClone(rEntry));
+        session.rounds = roundsUsed + 2;
+        // 追问后如果它这次调了工具，就把工具跑掉（只跑一轮，不再递归追问）
+        for (const call of rToolCalls) {
+          const nm = call?.function?.name ?? '';
+          markActivity(`正在调用 ${nm}…`);
+          const res = await executeTool(toolDefs, ctx, nm, call?.function?.arguments ?? '{}');
+          const text = Array.isArray(res.content)
+            ? res.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n')
+            : String(res.content ?? '');
+          messages.push({ role: 'tool', tool_call_id: call.id, name: nm, content: text });
+        }
+      } catch (error) {
+        session.messages.push({ nudgeError: String(error?.message ?? error).slice(0, 200) });
+      }
     }
 
     // 收尾：发过话 = done；没发 = noreply（这是正常选项）
@@ -795,15 +901,33 @@ export class Orchestrator {
       );
       this.proactiveTimer = setTimeout(() => { tick().catch(() => {}); }, next);
       if (this.aborted || this.paused || cfg.proactive?.enabled !== true) return;
+      // ① 安静时段：先判这个再判别的 —— 它是唯一一个"跟聊天内容完全无关"的闸，
+      //    而且它的默认档（23→8）本身就表达了一种立场：半夜不吵人。
+      if (this.#quietHours(cfg)) return;
       if (this.runningChats.size >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2)) return;
       if (Math.random() > (Number(cfg.proactive?.probability) || 0.25)) return;
       // 挑一个"安静且允许"的群
       const candidates = this.#proactiveCandidates(cfg);
       if (!candidates.length) return;
       const chatKey = candidates[Math.floor(Math.random() * candidates.length)];
+      // 先记"开口了一次"，再唤醒。
+      // ⚠️ 顺序：必须在 wake 之前记 —— wake 是异步的，而且它可能什么都没发出去
+      //    （模型有权决定"这次不说话"）。**记的是"给了它一次主动开口的机会"**，
+      //    这正是我们要限制的东西（为什么半夜/连发要受限），而不是"它真的说了几句"。
+      this.store.markProactiveSent(chatKey);
       this.wake(chatKey, { proactive: true }).catch((error) => console.error('[orchestrator] proactive 出错:', error));
     };
     this.proactiveTimer = setTimeout(() => { tick().catch(() => {}); }, 15000);
+  }
+
+  /** 现在是不是"安静时段"（判定见模块级 quietHoursAt） */
+  #quietHours(cfg) {
+    return quietHoursAt(cfg);
+  }
+
+  /** 被晾久了允许"再戳一次"的等待时长（算式见模块级 reengageWaitMs） */
+  #reengageWaitMs(cfg, unanswered) {
+    return reengageWaitMs(cfg, unanswered);
   }
 
   #proactiveCandidates(cfg) {
@@ -818,6 +942,13 @@ export class Orchestrator {
       if (meta.unread > 0) continue;
       if (Date.now() - meta.lastTs < idleMs) continue;
       if (this.runningChats.has(chatKey)) continue;
+      // ② 连发上限 + ③ 退避：没人搭理就收手，被晾久了只允许按翻倍等待"再戳一次"。
+      const pro = this.store.peekProactive(chatKey);
+      const maxConsec = Math.max(1, Number(cfg.proactive?.maxConsecutive) || 2);
+      if (pro.consecutive >= maxConsec) {
+        const waited = Date.now() - (pro.lastAt || 0);
+        if (waited < this.#reengageWaitMs(cfg, pro.consecutive - maxConsec + 1)) continue;
+      }
       out.push(chatKey);
     }
     return out;

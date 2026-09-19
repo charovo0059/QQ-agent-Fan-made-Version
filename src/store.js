@@ -159,6 +159,10 @@ export class ChatStore {
     };
     st.messages.push(entry);
     this.#trim(st);
+    // 对方真的回话了 ⇒ 主动开口的连发计数清零。
+    // ⚠️ 放在**入站**而不是 appendSelf 里 —— "开口"不是"被回应"（见 peekProactive 的说明）。
+    //    主动消息也是 self，所以绝不能在 appendSelf 里清零，否则计数永远回不到 1 以上。
+    if (st.proactive) delete st.proactive;
     saveChat(st);
     return entry;
   }
@@ -254,6 +258,50 @@ export class ChatStore {
     delete st.swept;
     saveChat(st);
     return info;
+  }
+
+  /**
+   * 主动开口的连发状态（治"没人搭理还一直开口"）。
+   *
+   * 为什么需要它（2026-09-19，调研报告 M2 / §10）：
+   *   我们的 `config.proactive` 原本只有 4 个键（enabled/两个间隔/idleThreshold/probability），
+   *   **没有安静时段、没有连发上限** ⇒ 凌晨 3 点也可能主动开口、没人理也会一直开口。
+   *   对标项目 lingxi 的注释记着真实事故："没有这个上限的话，用户静默 24 小时、
+   *   冷却 3 小时 = 8 条主动消息 —— 像跟踪狂。"
+   *
+   * ⚠️ 关键设计（两边都踩过的坑，必须照做）：
+   *   **"开口"不等于"被回应"** —— 只有**对方真的回话**才清零。
+   *   开口本身只让计数 +1（配合 orchestrator 的退避）。
+   *   lingxi 的 `resetConnection()` 就是因为放在"开口后"而翻过车；
+   *   xiyuai 的 v1.13 更严重：把状态更新错放在 idle 路径上，
+   *   导致"用户越不理她、信任越涨"。
+   *
+   * ⚠️ 与"沉默驱动情绪"的区别：这里记的是**行为**（发了几条），不是**感受**。
+   *   静默只允许驱动行为，绝不允许驱动情绪 —— 见报告 §7 红线 1。
+   */
+  peekProactive(chatKey) {
+    const st = this.#state(chatKey);
+    const p = st.proactive;
+    if (!p || !(Number(p.consecutive) > 0)) return { consecutive: 0, lastAt: 0 };
+    return { consecutive: Number(p.consecutive) || 0, lastAt: Number(p.lastAt) || 0 };
+  }
+
+  /** 记一次主动开口（计数 +1，并记时间）。**不是**"对方回话了"。 */
+  markProactiveSent(chatKey, ts = Date.now()) {
+    const st = this.#state(chatKey);
+    const prev = st.proactive && Number(st.proactive.consecutive) > 0 ? Number(st.proactive.consecutive) : 0;
+    st.proactive = { consecutive: prev + 1, lastAt: Number(ts) || Date.now() };
+    saveChat(st);
+    return st.proactive;
+  }
+
+  /** 对方真的回话了 → 连发计数清零。**只应由"收到对方消息"触发。** */
+  resetProactive(chatKey) {
+    const st = this.#state(chatKey);
+    if (!st.proactive) return false;
+    delete st.proactive;
+    saveChat(st);
+    return true;
   }
 
   unreadCount(chatKey) {

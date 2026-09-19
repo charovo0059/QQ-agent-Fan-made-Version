@@ -74,6 +74,112 @@ function loadMeta(chatKey) {
   return { lastConsolidatedAt: Number(raw?.lastConsolidatedAt) || 0 };
 }
 
+// ── 印象召回：门槛制（2026-09-19）─────────────────────────────────────────
+//
+// 为什么改：原来是**配额制** —— `all.slice(0, 15)` + 每人 `impressions.slice(-3)`。
+//   配额制的病是"凑数"：不相关的印象被硬塞进上下文充场面，模型拿着一堆不贴题的
+//   "已记得"说话。实测（调研报告 §1.3）：印象层等权、无轻重、无衰减。
+//
+// 依据 WrenWen docs/01-记忆召回打分.md（作者自己说"这份是纯逻辑，架在 CC/Codex 上的人也能直接搬"）：
+//   "早期版本是配额制：每源固定名额，结果是凑数……现行制度整个反过来：
+//    **一道绝对相关度门槛，过线才进，低于门槛宁可零条。**"
+//   它的实测结论："top1 分数的中位数是 67.95 < 75 ⇒ 弱相关的一轮直接 0 条，
+//    正是要的行为（**错的不如空着**）。"
+//
+// ⚠️ 我们**没有 embedding**（配置里没有 embedding provider），所以不能照搬它的 semantic×100。
+//    这里用**词法重合 + 时间衰减**替代，判据落在同一句原则上：**过线才进，宁缺毋滥。**
+//
+// ⚠️ 门槛值不拍脑袋：它**锚在公式自己的"噪声水位"上** —— 见 IMPRESSION_THRESHOLD 的推导。
+//    WrenWen 的方法论原话："定阈值的方法比这个数值钱：要么挂在系统里已有的同类水位线上，
+//    要么拿真实分布标定；**孤立的数没有来历，只会被下一个人顺手调掉。**"
+
+/** 时间衰减：30 天半衰式的线性近似，归一到 [0,1]。 */
+const IMPRESSION_RECENCY_HALFLIFE_DAYS = 30;
+/** 每条印象最多贡献多少分给"关键词重合"。 */
+const IMPRESSION_KEYWORD_CAP = 3;
+
+/**
+ * 给一条印象打分。**纯函数**，返回 0~1。
+ *
+ * ⚠️ 权重分配是**实测调出来的**，不是拍的。第一版把"讲的人正在说话"当最强信号（+0.35），
+ *    结果在测试里立刻暴露问题：`userIds` 在这套系统里是「**这一轮卷进来的所有人**」
+ *    （触发批 + 档位选中的已读，见 prompt.js 的 relevantUserIds），**群里可能有好几个人**，
+ *    所以这个加成区分不了谁——而 0.35 单独就能过线 ⇒ **只要是"这轮里出现的人"，
+ *    哪怕印象是 400 天前的"他喜欢喝咖啡"，也会被放进来**。那正是要治的病。
+ *    ⇒ 改成：**关键词重合当主信号，时间衰减当基线**，去掉那个区分不出东西的讲话人加成。
+ *
+ * 三个分项：
+ *   · keyword    —— 与"这一轮在聊什么"的词法重合（每个 2 字词 +0.25，封顶 0.75）。
+ *                   **主信号**："这件事现在被提到"才是真正相关的证据。
+ *   · recency    —— 30 天半衰，满值 0.30。**基线**：够新的印象本身有一点价值，
+ *                   但**单独不够过线**（刻意如此 —— 不然就退化成"总是带最近的"，
+ *                   那正是原实现 `slice(-3)` 的毛病）。
+ *   · reinforced —— 被用过（写过 reinforcedAt）+0.05，只是打破平局用。
+ *                   ⚠️ 权重必须小、且**必须配合时间衰减** —— 否则会自我强化锁死。
+ *                   这是 Generative Agents 踩过的坑（`retrieve.py` 检索后刷 `last_accessed`，
+ *                   而 reflect 按 `last_accessed` 排序，"被想起的更容易再被想起"，它没做任何抑制）。
+ */
+export function scoreImpression(entry, { member = {}, isSpeaking = false, keywords = [], now = Date.now() } = {}) {
+  if (!entry || typeof entry !== 'object') return 0;
+  const text = String(entry.content ?? '');
+  if (!text.trim()) return 0;
+
+  let score = 0;
+  // ① 与当前这轮的关键词重合（主信号）
+  let hits = 0;
+  for (const kw of keywords) {
+    if (kw && text.includes(kw)) hits += 1;
+  }
+  score += Math.min(IMPRESSION_KEYWORD_CAP, hits) * 0.25;
+  // ② 时间衰减（基线）
+  const at = Number(entry.createdAt) || 0;
+  if (at > 0) {
+    const days = Math.max(0, (now - at) / 86400000);
+    score += 0.3 * Math.pow(0.5, days / IMPRESSION_RECENCY_HALFLIFE_DAYS);
+  }
+  // ③ 被用过（打破平局用的小权重）
+  if (Number(entry.reinforcedAt) > 0) score += 0.05;
+  return Math.min(1, score);
+}
+
+/**
+ * 绝对门槛。**推导（不是拍的）**：
+ *
+ *   本公式的"噪声水位" = 只有 ② 时间衰减、其他全不命中时能拿到的最大值。
+ *   刚写下的印象：0.30×0.5^0 = 0.30。再加 ③ 被用过 0.05 = **0.35**。
+ *   ⇒ 门槛取 **0.30**，含义是：
+ *     **"仅仅是新"（刚写下、跟这轮毫无关系）刚好等于门槛，不算过线。**
+ *     必须**至少命中一个关键词**（0.25 + 衰减）才真正进来。
+ *
+ *   ⇒ 一句话：**进不进提示词，取决于"这件事现在有没有被提到"，而不是"够不够新"。**
+ *     这正是门槛制与配额制（原 `slice(-3)`）的分野。
+ *
+ *   ⚠️ 这个门槛刻意与 WrenWen 的 75 同构：它把门槛压在同一条水位线上
+ *      （语义准入线 = base + 0.71×100 = 75），"两条通道一把尺子"。
+ *      我们这里是**一条通道一把尺子：噪声不得入选**。
+ *   ⚠️ 调这个数之前请先想清楚：改的不是"严格程度"，而是"什么叫噪声"。
+ */
+export const IMPRESSION_THRESHOLD = 0.3;
+
+/** 从这一轮的消息里抽关键词（只取 2 字及以上的中文词与 2+ 的英文/数字串，去重、限量）。 */
+export function extractKeywords(text, limit = 40) {
+  const t = String(text ?? '');
+  if (!t.trim()) return [];
+  const out = [];
+  const seen = new Set();
+  // 中文 2~4 字滑窗 + 英文/数字词。刻意粗一点：宁可多抽，反正后面按"命中"计分。
+  const cjk = t.match(/[\u4e00-\u9fa5]{2,4}/g) || [];
+  const latin = t.match(/[A-Za-z0-9_]{2,}/g) || [];
+  for (const w of [...cjk, ...latin]) {
+    const k = w.toLowerCase();
+    if (seen.has(k) || k.length < 2) continue;
+    seen.add(k);
+    out.push(w);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 // ── 跨会话互通的两个上限（控 token）──
 // 记忆是按「会话 + 群友」切的，互通后同一个人可能同时带来好几个会话的印象。
 // 一次提示词里，跨会话部分最多 CROSS_CHAT_TOTAL 行，单个人最多 CROSS_CHAT_PER_MEMBER 条。
@@ -489,7 +595,7 @@ export class MemoryStore {
    * 管理端给某个 QQ 号设了「跨会话互通」时，这里会额外带上他在**别的会话**里的印象，
    * 每行标出来源（（私聊）/（群 123456）），并加一句提醒别把 A 场合的私事拿到 B 场合说。
    */
-  formatForPrompt(chatKey, { userIds = null } = {}) {
+  formatForPrompt(chatKey, { userIds = null, queryText = '', now = Date.now() } = {}) {
     const notes = getConfig().memberNotes || {};
     const all = this.members(chatKey);
     if (!all.length) return '';
@@ -498,31 +604,50 @@ export class MemoryStore {
       ? all.filter((m) => !m.userId || filter.has(String(m.userId)))  // 无 QQ 号的旧数据始终带上
       : all.slice(0, 15);
     if (!picked.length) return '';
+
+    // 门槛制：按相关度打分，过线才进（低于门槛宁可零条）。
+    const keywords = extractKeywords(queryText);
+    const speaking = new Set(userIds ? [...userIds].map(String) : []);
     const lines = ['【对群友的印象】'];
     let crossBudget = CROSS_CHAT_TOTAL;
     let usedCross = false;
+    let admitted = 0;
     for (const m of picked) {
       const who = notes[String(m.userId)] || m.name || String(m.userId || '') || '某人';
-      const local = m.impressions.slice(-3);
+      const isSpeaking = !!(m.userId && speaking.has(String(m.userId)));
+      // 本地印象：逐条打分、过线才进。**不再 slice(-3)** —— 那是配额制。
+      const scored = (m.impressions || [])
+        .map((e) => ({ e, s: scoreImpression(e, { member: m, isSpeaking, keywords, now }) }))
+        .filter((x) => x.s > IMPRESSION_THRESHOLD)
+        .sort((a, b) => b.s - a.s);
       const seen = new Set();
-      for (const e of local) {
+      for (const { e } of scored) {
         const key = String(e?.content ?? '').trim();
-        if (key) seen.add(key);
+        if (!key) continue;
+        seen.add(key);
         lines.push(`- ${who}：${e.content}`);
+        admitted += 1;
       }
-      // 跨会话：同一个人在别处记下的印象（同一个会话里已出现过的那句不再重复）
+      // 跨会话：同一个人在别处记下的印象（同一个会话里已出现过的那句不再重复）。
+      // ⚠️ 跨会话同样走门槛 —— 否则"配额制"会从这个入口原样漏回来。
       if (crossBudget > 0) {
         for (const x of this.crossChatImpressions(chatKey, m.userId)) {
           const key = String(x.content ?? '').trim();
           if (!key || seen.has(key)) continue;
           if (crossBudget <= 0) break;
+          const s = scoreImpression({ content: x.content, createdAt: x.createdAt }, { isSpeaking, keywords, now });
+          if (s <= IMPRESSION_THRESHOLD) continue;
           seen.add(key);
           lines.push(`- ${who}（${x.fromLabel}）：${x.content}`);
           crossBudget -= 1;
+          admitted += 1;
           usedCross = true;
         }
       }
     }
+    // 一条都没过线 ⇒ 宁可不给（"错的不如空着"）。
+    // ⚠️ 这会让"记忆"段经常为空 —— 那是**预期行为**，不是故障。
+    if (!admitted) return '';
     if (usedCross) {
       lines.splice(1, 0,
         '（带「（私聊）」「（群 X）」的是**别的场合**记下的：那件事只在那个场合说，'
