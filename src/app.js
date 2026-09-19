@@ -1407,7 +1407,7 @@ export function createApp({ log = console.log } = {}) {
       //    当成一个"装过又删掉的扩展"，页面上真的显示成「已配置但未安装（1）· hotReload」；
       //    更糟的是 `/api/skills/cleanup` 会把它**删掉**（它不在注册表里 ⇒ 判定为可清理）。
       //    ⇒ 以后**每加一个扩展全局开关，都要同步加进这个集合**。
-      const RESERVED_SKILL_KEYS = new Set(['hotReload']);
+      const RESERVED_SKILL_KEYS = new Set(['hotReload', 'openerHint']);
       const readByPath = (obj, p) => p.reduce((o, k) => (o == null ? undefined : o[k]), obj);
       const enabledSwitchOf = (id, st) => {
         const ov = ENABLED_BY_PATH[id];
