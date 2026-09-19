@@ -30,6 +30,8 @@ import { loadPlugins, watchPlugins } from './plugin-loader.js';
 import { skillManager } from './skills/manager.js';
 // 技能/插件管理页（2026-09-19 第七对话）用：开关唯一入口与"已配置但未安装"的枚举。
 import { setSkillEnabled, setSkillConfig, listConfiguredSkillIds } from './skills/config.js';
+// 改进提案队列（2026-09-19 第七对话）：只读 + 标记，**没有执行路径**，见 proposals.js 顶部。
+import { listProposals, reviewProposal } from './proposals.js';
 import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
@@ -1436,6 +1438,26 @@ export function createApp({ log = console.log } = {}) {
         const next = (getConfig().customPersonas || []).filter((_, i) => i !== idx);
         updateConfig({ customPersonas: next });
         return json(res, 200, { ok: true });
+      }
+
+      // ── 改进提案队列（2026-09-19 第七对话新增）───────────────────────────
+      // ⚠️ 这里**只有读与标记**，没有任何"执行提案内容"的路径。
+      //    设计边界见 src/proposals.js 顶部：她可以提议任何事，但改动永远由人来做。
+      //    要开自动执行，必须先逐类设计白名单 + 限路径 + 备份，见 待办与决策记录.md。
+      if (pathname === '/api/proposals' && method === 'GET') {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        const status = String(u.searchParams.get('status') || 'pending');
+        const limit = Number(u.searchParams.get('limit')) || 50;
+        return json(res, 200, { ok: true, ...listProposals({ status, limit }) });
+      }
+      const proposalMatch = /^\/api\/proposals\/([A-Za-z0-9]+)$/.exec(pathname);
+      if (proposalMatch && method === 'POST') {
+        const id = proposalMatch[1];
+        const body = await readBody(req).catch(() => ({}));
+        const r = reviewProposal(id, { status: body?.status, note: body?.note });
+        if (!r.ok) return json(res, 400, { ok: false, error: r.error });
+        emit('status', { proposalsUpdated: true });
+        return json(res, 200, { ok: true, item: r.item, ...listProposals({ status: 'pending' }) });
       }
 
       // ── 技能 / 插件管理页（2026-09-19 第七对话新增）─────────────────────

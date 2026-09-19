@@ -16,6 +16,44 @@ import { firstFrameOnly, countFrames } from './gif.js';
 // 工具注册表（Skills 基础设施，来自上游 0.3.1）：原生工具与技能工具都在这里登记，
 // 技能工具（带 skillId）的可用性统一问 getToolAvailability()。
 import { registerTool, listTools, getToolAvailability } from './tool-registry.js';
+import { appendProposal, PROPOSAL_KINDS } from './proposals.js';
+
+/**
+ * 读 `data/dreams.json` 并做筛选/裁剪 —— 供 `dream_recall` 工具用（2026-09-19 加）。
+ *
+ * ⚠️ 为什么在这里直接读文件、而不是拿 `ctx.dreamer`：工具上下文里**没有** dreamer
+ *    （见 orchestrator 里 toolCtx 的字段清单），而为了一个只读工具去改 orchestrator 的传参
+ *    不划算。dreams.json 很小（几十条笔记），每次读的代价可忽略。
+ * ⚠️ 读不到文件时返回**空结构**而不是抛错：对模型来说"还没写过梦"是一个正常答案，
+ *    不该变成一个工具错误（那会让它以为工具坏了、反复重试）。
+ */
+function readDreamsBrief({ day = '', keyword = '', limit = 5, text = false } = {}) {
+  let all = [];
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'dreams.json'), 'utf8'));
+    if (j && Array.isArray(j.notes)) all = j.notes;
+  } catch { /* 还没做过梦 */ }
+  let items = all;
+  if (day) items = items.filter((n) => String(n.day) === String(day));
+  if (keyword) items = items.filter((n) => String(n.text || '').includes(keyword));
+  const lim = Math.max(1, Math.min(30, Number(limit) || 5));
+  return {
+    total: all.length,
+    matched: items.length,
+    oldest: all.length ? all[all.length - 1].day : '',
+    newest: all.length ? all[0].day : '',
+    notes: items.slice(0, lim).map((n) => ({
+      day: n.day,
+      at: n.at,
+      // 这篇梦涉及哪几个会话 —— 模型据此判断"哪些事不该拿到别的群里说"
+      chatLabels: n.chatLabels || [],
+      messages: n.messages ?? null,
+      mine: n.mine ?? null,
+      chars: String(n.text || '').length,
+      text: text ? String(n.text || '') : String(n.text || '').slice(0, 600)
+    }))
+  };
+}
 
 // ── 图片注入的体积闸门 ──────────────────────────────────────────────────
 //
@@ -847,6 +885,83 @@ export function buildToolDefs() {
         return ok({ removed });
       }
     },
+    {
+      name: 'dream_recall',
+      description: '翻你自己的「梦」—— 深夜安静时你回想当天写下的笔记（只给管理员看的那些）。'
+        + '想看某一天就传 day；想找某个话题/某个人的事就传 keyword。'
+        + '不传参数时只给你**最近几篇的开头**（省 token）；要看全文，再调一次并传 day 或 text=true。'
+        + '⚠️ 每篇都会告诉你它涉及哪几个会话：涉及别的群/私聊的具体事，**别拿到当前这个会话来说**。',
+      parameters: {
+        type: 'object',
+        properties: {
+          day: { type: 'string', description: '可选：只看这一天（格式 YYYY-MM-DD）' },
+          keyword: { type: 'string', description: '可选：只在笔记正文里找包含这个词的' },
+          limit: { type: 'integer', description: '最多返回几篇（默认 5，上限 30）' },
+          text: { type: 'boolean', description: 'true = 返回全文；默认 false 只给开头' }
+        }
+      },
+      async execute(ctx, args) {
+        const brief = readDreamsBrief({
+          day: String(args.day ?? '').trim(),
+          keyword: String(args.keyword ?? '').trim(),
+          limit: Number(args.limit) || 5,
+          text: args.text === true
+        });
+        if (!brief.total) {
+          return ok({ notes: [], note: '你还没有写过任何梦（`data/dreams.json` 里是空的）。这不是错误，只是还没到能做的时候。' });
+        }
+        if (!brief.matched) {
+          return ok({
+            total: brief.total,
+            oldest: brief.oldest,
+            newest: brief.newest,
+            notes: [],
+            note: `一共 ${brief.total} 篇（${brief.oldest} ~ ${brief.newest}），但没有符合这次条件的。换个 day 或 keyword 再试。`
+          });
+        }
+        return ok(brief);
+      }
+    },
+    {
+      name: 'submit_proposal',
+      description: '向管理员提交一条**改进提案** —— 你认为自己哪里该改（记忆方式、说话风格、某个功能、甚至底层实现都可以提）。'
+        + '⚠️ 提交**不会立刻生效**，它只会出现在管理端的「待审区」，由人看过之后决定怎么做。'
+        + '所以：提清楚"想改什么 / 为什么 / 具体希望变成什么样"，别指望它自动生效。'
+        + '只在真的觉得重要时提，不要每轮都提。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: {
+            type: 'string',
+            // 直接用 proposals.js 那份常量 —— 手写一遍迟早会跟那边漂移
+            enum: [...PROPOSAL_KINDS],
+            description: 'memory=记忆方式 / persona=说话风格与性格 / feature=功能 / code=底层实现 / other=其他'
+          },
+          title: { type: 'string', description: '一句话说清想改什么（≤80 字）' },
+          detail: { type: 'string', description: '具体想怎么改，写清楚到别人能照着做（≤4000 字）' },
+          rationale: { type: 'string', description: '可选：为什么觉得该改（遇到的具体情况）' }
+        },
+        required: ['kind', 'title', 'detail']
+      },
+      async execute(ctx, args) {
+        const r = appendProposal({
+          kind: args.kind,
+          title: args.title,
+          detail: args.detail,
+          rationale: args.rationale,
+          chatKey: ctx.chatKey,
+          model: getConfig()?.api?.model || ''
+        });
+        if (!r.ok) return err(r.error);
+        return ok({
+          saved: true,
+          id: r.item.id,
+          kindLabel: r.item.kindLabel,
+          note: '已经放进管理员的待审区了。**它不会自动生效**，别以为改完了；也不用在聊天里提这件事。'
+        });
+      }
+    },
+
     {
       name: 'report_feedback',
       description: '向管理员（控制台）反馈你遇到的问题、困惑或需要人工介入的情况。不要用于聊天。',

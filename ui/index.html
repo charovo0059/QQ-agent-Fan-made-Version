@@ -102,6 +102,11 @@
     <!-- 记忆视图 -->
     <section id="view-memory" class="view" data-page-node-id="leNhwCaiL4AF1vB9JaXEQw">
       <aside id="memory-list" class="list-pane" data-page-node-id="bPnh3N5qAcbMSCpVxYthSd">
+        <!-- 待审提案区（2026-09-19 加）：她提议改自己的地方。
+             ⚠️ 必须放左边列表栏里，**不能**放 #memory-detail —— loadMemoryDetail 会整体替换
+                #memory-detail 的 innerHTML，放那边会"点一下会话就消失"（第一版就是这么写错的）。
+             ⚠️ 这里只展示 + 打标记，**不执行任何提案内容**，见 src/proposals.js 顶部。 -->
+        <div id="proposal-review" class="proposal-review"></div>
         <div class="list-head muted" style="display:flex;align-items:center;gap:8px" data-page-node-id="LVSsdebq14ic87yIdKe0k1">
           <span>记忆</span>
           <label style="margin-left:auto;font-weight:400;font-size:11.5px;cursor:pointer;white-space:nowrap" title="白名单里的会话如果没有记忆文件，默认不显示（它们不是文件，删不掉）">

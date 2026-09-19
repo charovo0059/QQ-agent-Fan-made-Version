@@ -115,7 +115,11 @@ const SYSTEM_PROMPT = [
   '只写下面给过你的消息里真实发生过的事，不要编造没出现的人或事。',
   '不要写成报告，不要分点罗列，不要总结成"今天共收到 N 条消息"。',
   '用第一人称，像一个人回想今天：谁说的什么让你在意、哪句话你没接住、你当时其实想说什么。',
-  '可以有一点情绪，也可以淡淡地写；但必须是真的。'
+  '可以有一点情绪，也可以淡淡地写；但必须是真的。',
+  // ⚠️ 2026-09-19 加：素材是多个会话混在一起的，而这条笔记将来会被她自己回想、
+  //    甚至在某一个群里被她提起来。所以在这里就把边界讲清，别让她养成"把别处的事拿到这里说"的习惯。
+  '注意：下面的消息来自**好几个不同的群和私聊**。想的时候可以一起想，',
+  '但要记住哪个事是在哪儿发生的 —— 以后跟人聊起今天，别把这个群的事说给另一个群听。'
 ].join('\n');
 
 function buildUserContent({ botName, day, digest }) {
@@ -180,6 +184,43 @@ export class Dreamer {
       whyNot: this.whyNot(),
       idleMinutes: Math.round(this.#idleMinutes()),
       notes: this.state.notes.map((n) => ({ ...n }))
+    };
+  }
+
+  /**
+   * 供**工具**用的查询（2026-09-19 加）—— 这就是白天"翻日记"的数据源。
+   *
+   * 设计取舍（用户把粒度交给我决定）：
+   *   · `text: false` 时只给**元信息 + 开头几句**，让模型先看清"有哪几天、都是什么调子"，
+   *     而不是一上来就把几百字全文塞进上下文（那是真花钱的）；
+   *   · 想看全文就再调一次并指定 `day`（或 `text: true`）。
+   *   ⇒ 默认省、按需细 —— 与"prefix cache 敏感"这个成本规律一致。
+   */
+  brief({ day = '', keyword = '', limit = 10, text = false, maxChars = 600 } = {}) {
+    const all = this.state.notes || [];
+    let items = all;
+    if (day) items = items.filter((n) => String(n.day) === String(day));
+    if (keyword) {
+      const k = String(keyword).trim();
+      if (k) items = items.filter((n) => String(n.text || '').includes(k));
+    }
+    const lim = Math.max(1, Math.min(30, Number(limit) || 10));
+    const picked = items.slice(0, lim);
+    return {
+      total: all.length,
+      matched: items.length,
+      oldest: all.length ? all[all.length - 1].day : '',
+      newest: all.length ? all[0].day : '',
+      notes: picked.map((n) => ({
+        day: n.day,
+        at: n.at,
+        // 这篇梦涉及哪几个会话 —— 模型据此判断"哪些事不该拿到别的群里说"
+        chatLabels: n.chatLabels || [],
+        messages: n.messages ?? null,
+        mine: n.mine ?? null,
+        chars: String(n.text || '').length,
+        text: text ? String(n.text || '') : String(n.text || '').slice(0, Math.max(60, Number(maxChars) || 600))
+      }))
     };
   }
 
@@ -411,6 +452,13 @@ export class Dreamer {
         day,
         at: Date.now(),
         text,
+        // 素材统计 + **这篇梦涉及哪几个会话**（2026-09-19 加）。
+        // 为什么要记 chats：白天的 `dream_recall` 工具要能按会话/日期筛，
+        // 或至少告诉模型"这篇里有几个会话的事、是哪些"——否则它不知道哪些内容不该拿到别的群里说。
+        // ⚠️ `chats`（会话数组）只存在于 `#digest` 的局部作用域，`runNow` 里拿不到；
+        //    `#digest` 已经把 key/label 放进它返回的 `chats` 数组里了，这里从 digest 取。
+        chatKeys: (digest.chats || []).map((c) => c.key),
+        chatLabels: (digest.chats || []).map((c) => c.label),
         chats: digest.chats.length,
         messages: digest.total,
         mine: digest.mine,
