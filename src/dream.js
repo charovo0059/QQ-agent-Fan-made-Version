@@ -4,12 +4,21 @@
 // 这次模型调用**一个工具都不给**（压根不传 tools）。所以它在物理上就写不了任何东西：
 // 不能改记忆、不能碰人设卡、不能发消息。笔记只有一个去处 —— data/dreams.json，给人看。
 //
-// 为什么坚持只读：我们有实测，记忆再巩固会漂移 —— 整理「**自称**我爹」时写成了「爸爸」。
-// 让它自己改自己的人设卡，一次漂移就走样，而且没有审核点。
-// 等看过几十条笔记、质量稳定了，再谈要不要放开写权限。
+// 为什么坚持只读：
+//   ⚠️ **2026-09-19 更正一处归因错误**。这里原来写着"我们有实测，记忆再巩固会漂移 ——
+//      整理「**自称**我爹」时写成了「爸爸」"。**那条归因是错的**：用户确认
+//      「自称我爹 → 爸爸」是**用户自己改人设卡**时加的彩蛋（当时卡里确实还没有"我是她爸爸"这条），
+//      **不是任何自动流程改的**。
+//   ⇒ 所以"只读"不是因为有"记错了"的实测证据，而是**设计上的审慎**：
+//      让它自己改人设卡/记忆会**没有审核点**，一旦改坏难以追责、也难回滚。
+//      等看过几十条笔记、质量稳定了，再谈要不要放开写权限。
+//   （注：另一条**真实存在**的漂移是"记忆整理把 createdAt 刷新了"，那是记忆整理逻辑的问题，
+//     与梦无关，见 项目记忆 §6 / memory.js。）
+//
+// ⚠️ 成本一行里的"上限 8000 字"已过时：现在是 config.dream.maxInputChars，默认 20000。
 //
 // ── 成本 ──────────────────────────────────────────────────────────────
-// 一天一次：输入是当天的消息（上限 8000 字），输出几百字，几分钱。
+// 一天一次：输入是当天的消息（上限 config.dream.maxInputChars，默认 20000 字），输出几百字，几分钱。
 // 用量走 sessions.recordExternalUsage() 记账 —— 一个每天悄悄花钱、账上却不显示的功能，
 // 比没有这个功能更糟。
 //
@@ -25,7 +34,7 @@ import { todayKey } from './util.js';
 
 const DREAMS_FILE = path.join(DATA_DIR, 'dreams.json');
 // 默认值；**权威值在 config.dream**（2026-09-19 挪进配置，以便按需调节）
-const DEF_MAX_INPUT_CHARS = 8000;   // 全局预算
+const DEF_MAX_INPUT_CHARS = 20000;  // 全局预算（权威值在 config.dream.maxInputChars）
 const DEF_PER_CHAT_MIN = 150;       // 每会话保底
 const DEF_PER_CHAT_MAX = 1500;      // 每会话上限
 const RECENT_WINDOW = 3000;         // 每个会话最多捞多少条候选（够覆盖一天了）
@@ -64,6 +73,28 @@ function pickEvenly(len, n) {
     if (!out.length || out[out.length - 1] !== idx) out.push(idx);
   }
   return out;
+}
+
+/**
+ * 媒体占位串（2026-09-19 第七对话加）。
+ *
+ * 为什么：`onebot.js` 对图片只推一个 `media` 数组进存档，而正文里往往就是一个 `[图片]`。
+ * 实测当天 **637 条带 media（17.2%）**，其中 image 614 / face 65。
+ * 对"做梦"来说，"谁发了图、发了几张、是图还是表情"是有意义的信息，
+ * 而一个光秃秃的 `[图片]` 把这些都丢了。
+ *
+ * ⚠️ **刻意不带 url**：① 素材是给人看/给模型回想用的，url 又长又没用；
+ *    ② 带 url 等于把 QQ 的临时下载链写进提示词与留档，没必要。
+ */
+function mediaTag(media) {
+  if (!Array.isArray(media) || !media.length) return '';
+  const n = (k) => media.filter((x) => x && x.kind === k).length;
+  const parts = [];
+  if (n('image')) parts.push(`图片×${n('image')}`);
+  if (n('face')) parts.push(`表情×${n('face')}`);
+  const other = media.length - n('image') - n('face');
+  if (other > 0) parts.push(`其他×${other}`);
+  return parts.length ? `[${parts.join(' ')}]` : '';
 }
 
 const SYSTEM_PROMPT = [
@@ -249,14 +280,16 @@ export class Dreamer {
       const rows = [];
       for (const m of msgs) {
         const text = sanitize(m.text);
-        if (!text) continue;
+        const tag = mediaTag(m.media);          // [图片×2 表情×1]；没媒体就是空串
+        if (!text && !tag) continue;
         const t = new Date(m.ts);
         rows.push({
           self: !!m.self,
           hh: String(t.getHours()).padStart(2, '0'),
           mm: String(t.getMinutes()).padStart(2, '0'),
           who: m.self ? '我' : (sanitize(m.senderName) || String(m.senderId ?? '?')),
-          text: text.slice(0, PER_MSG_CUT)
+          // 正文与媒体标记拼在一起：`[图片×2] 配文…`
+          text: [tag, text].filter(Boolean).join(' ').slice(0, PER_MSG_CUT)
         });
       }
       if (!rows.length) continue;
