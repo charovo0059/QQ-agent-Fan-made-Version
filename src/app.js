@@ -178,6 +178,47 @@ export function createApp({ log = console.log } = {}) {
     });
   }
 
+  /**
+   * 端口占用预检（2026-09-19 第七对话新增）。
+   *
+   * 为什么要有它：这个应用要占四个端口，而**占了会怎样，四个端口各不相同**：
+   *   · 3210 控制台  —— 已经有 3210→3219 的顺延兜底，占用了也能起来（只是换了个端口）
+   *   · 3000/3001    —— SnowLuma 的 OneBot HTTP / WS，配在 `snowluma/` 里，**被占就是连不上**
+   *   · 5099         —— SnowLuma WebUI
+   * 后三个一旦没起来，用户看到的只是"OneBot 未连接"或某页打不开 ——
+   * **原因（端口被别人占了）完全看不出来**，只能靠猜。这正是本项目最忌讳的那类静默失败。
+   *
+   * 所以启动时把它们逐个探一遍，**明确说清每个端口是谁的、现在什么状态**。
+   * ⚠️ 本函数**只读探测，绝不改任何配置、不杀任何进程** —— 它只负责"把话说清楚"。
+   */
+  async function probePorts() {
+    const c = getConfig();
+    const consolePort = (() => { try { return server.address()?.port ?? null; } catch { return null; } })();
+    const wsPort = snowlumaWsPort();
+    const webuiUrl = snowlumaWebuiUrl();
+    const webuiPort = (() => { try { return Number(new URL(webuiUrl).port) || 5099; } catch { return 5099; } })();
+    const httpPort = (() => {
+      try { const u = new URL(String(c.snowluma?.httpUrl || '')); return Number(u.port) || 3000; } catch { return 3000; }
+    })();
+
+    const specs = [
+      { port: wsPort, who: 'SnowLuma OneBot WebSocket', critical: true, detail: 'OneBot 事件通道；连不上 = 机器人收不到消息' },
+      { port: httpPort, who: 'SnowLuma OneBot HTTP', critical: true, detail: '发消息/查询走的 API；连不上 = 发了也不出去' },
+      { port: webuiPort, who: 'SnowLuma WebUI', critical: false, detail: '登录 QQ 用的注入页；打不开就没法重新注入' },
+      { port: consolePort, who: 'QQ Agent 控制台', critical: false, detail: '本页面' }
+    ].filter((s) => Number.isFinite(s.port) && s.port > 0);
+
+    const seen = new Set();
+    const out = [];
+    for (const s of specs) {
+      if (seen.has(s.port)) continue;
+      seen.add(s.port);
+      const open = await isPortOpen('127.0.0.1', s.port, 600);
+      out.push({ ...s, open });
+    }
+    return { ports: out, checkedAt: Date.now() };
+  }
+
   // SnowLuma 内置控制台日志（环形缓冲，最近 500 行）
   // 内置 SnowLuma 状态与日志。未采用多进程方案：由 Electron 主进程提供 IPC 控制与日志转发，
   // 确保 SnowLuma 随 QQ Agent 退出、无需单独管理窗口。
@@ -1099,6 +1140,17 @@ export function createApp({ log = console.log } = {}) {
       // ── 「关于」页数据 ──
       if (pathname === '/api/about' && method === 'GET') {
         return json(res, 200, aboutPayload());
+      }
+
+      // 端口占用预检（2026-09-19 第七对话新增）。
+      // 单独开一个接口而不是塞进 /api/status：它是**主动探测**（要 connect 四次、约几百毫秒），
+      // 而 /api/status 是被前端每 15 秒轮询一次的热路径 —— 塞进去等于每 15 秒白探一次。
+      if (pathname === '/api/ports' && method === 'GET') {
+        try {
+          return json(res, 200, { ok: true, ...(await probePorts()) });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
       }
 
       // ── 一键导出诊断包 ──
@@ -2912,6 +2964,25 @@ export function createApp({ log = console.log } = {}) {
     // 空闲「梦」的定时器（每 5 分钟看一次该不该做；关着的话它自己会跳过）
     dreamer.start();
     log(`控制台已就绪：http://127.0.0.1:${port}`);
+    // 端口占用预检：把"哪个端口是谁的、现在通不通"写在日志里。
+    // 为什么值得花这几百毫秒：后三个端口一旦被占，症状只是"OneBot 未连接"或某页打不开，
+    // **原因完全看不出来** —— 这一行就是让人不用猜。（只读探测，不改配置、不杀进程。）
+    try {
+      const pr = await probePorts();
+      for (const p of pr.ports) {
+        const flag = p.open ? '✅ 在监听' : (p.critical ? '❌ 没人监听（这个必须通）' : '⏸ 没人监听');
+        log(`[端口] ${String(p.port).padStart(4)} ${flag} — ${p.who}：${p.detail}`);
+      }
+      const bad = pr.ports.filter((p) => p.critical && !p.open);
+      if (bad.length) {
+        log(`[端口] ⚠️ 有 ${bad.length} 个**必须通**的端口没在监听：`
+          + bad.map((p) => `${p.port}(${p.who})`).join('、')
+          + ' —— 常见原因：① 上一次的 SnowLuma 还没退干净；② 端口被别的程序占了。'
+          + ' 机器人会表现为"OneBot 未连接"，但根因在这里。');
+      }
+    } catch (error) {
+      log('[端口] 预检失败（不影响启动）:', error?.message ?? error);
+    }
     log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
     return port;  }
@@ -2932,7 +3003,7 @@ export function createApp({ log = console.log } = {}) {
     try { stopJm(); } catch { /* ignore */ }
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, probePorts };
 }
 
 /**
