@@ -675,7 +675,12 @@ export function createApp({ log = console.log } = {}) {
     }
   }
 
-  async function ingestMessage(kind, id, event) {
+  /**
+   * @param source 这条事件来自哪个平台（'qq' / 'wechat'）。
+   *   ⚠️ 必须由**调用方按"事件从哪个客户端来"传入**，不能从 chatKey 猜 ——
+   *      微信侧由桥派生的是**数字 id**，形态与 QQ 号无法区分（实测：某群友 = 1000000001）。
+   */
+  async function ingestMessage(kind, id, event, source = 'qq') {
     const cfgNow = getConfig();
     if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
 
@@ -732,7 +737,8 @@ export function createApp({ log = console.log } = {}) {
       senderName,
       text: text || '[图片]' ,
       media,
-      fwdId
+      fwdId,
+      source
     });
     emit('chat-update', `${kind}:${id}`);
     orchestrator.onIncoming(`${kind}:${id}`);
@@ -850,13 +856,20 @@ export function createApp({ log = console.log } = {}) {
     return true;
   }
 
-  async function handleOneBotEvent(event) {
+  /**
+   * 处理一个 OneBot v11 事件。
+   *
+   * `source` = 这个事件来自哪个平台的客户端（'qq' / 'wechat'），2026-09-20 加。
+   * 为什么需要参数而不是自己去猜：微信侧由桥派生的是**数字 id**（实测某群友 = 1000000001），
+   * 与 QQ 号形态**无法区分** ⇒ 平台只能由"事件从哪个 socket 来的"决定。
+   */
+  async function handleOneBotEvent(event, source = 'qq') {
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
       if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
-      if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event);
-      if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event);
+      if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event, source);
+      if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event, source);
       return;
     }
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {

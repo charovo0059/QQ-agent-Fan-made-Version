@@ -135,12 +135,50 @@ export class ChatStore {
     const st = this.#state(chatKey);
     const unread = st.messages.filter((m) => !m.read).length;
     const last = st.messages[st.messages.length - 1] || null;
-    return { chatKey, total: st.messages.length, unread, lastTs: last?.ts ?? 0, lastText: last?.text ?? '' };
+    // `source`（'qq' / 'wechat'）一并带出：前端要按它区分平台，发送路由也要按它选客户端。
+    // ⚠️ 老会话没有这个字段（接入微信之前建的）：那时只可能是 QQ ⇒ 兜底成 'qq'。
+    //    不兜底的话前端会把所有老会话当成"未知平台"、切到微信模式时全都不显示。
+    return {
+      chatKey,
+      total: st.messages.length,
+      unread,
+      lastTs: last?.ts ?? 0,
+      lastText: last?.text ?? '',
+      source: st.source || 'qq'
+    };
   }
 
-  /** 追加一条收到的消息（未读）。返回写入的条目。 */
-  appendIncoming(chatKey, { mid, ts, senderId, senderName, text, reply = null, media = [], fwdId = null }) {
+  /** 某个会话属于哪个平台（'qq' / 'wechat'）。给发送路由用。 */
+  chatSource(chatKey) {
     const st = this.#state(chatKey);
+    return st.source || 'qq';
+  }
+
+  /** 所有指定平台的会话（前端切换视图要用）。 */
+  chatsBySource(source) {
+    const want = String(source || '');
+    const out = [];
+    for (const key of this.listChats()) {
+      if (this.chatSource(key) === want) out.push(key);
+    }
+    return out;
+  }
+
+  /**
+   * 追加一条收到的消息（未读）。
+   *
+   * `source` = 这条会话属于哪个平台（`'qq'` / `'wechat'`），2026-09-20 加。
+   * 为什么要它：接入微信后同一个控制台要同时显示两个平台的会话，
+   * 而**QQ 与微信的 id 形态不保证可区分**（微信侧由桥派生数字 id ⇒ 看起来和 QQ 号一样）。
+   * ⇒ 只能由"事件从哪个客户端来的"记住，不能靠 chatKey 猜。
+   * 它同时是**发送路由的依据**：要发到哪个平台，就看这个会话记的是谁。
+   * ⚠️ 只在首次见到该会话时写入（后续不覆盖），避免"一次误标把整段历史改掉"。
+   */
+  appendIncoming(chatKey, { mid, ts, senderId, senderName, text, reply = null, media = [], fwdId = null, source = null }) {
+    const st = this.#state(chatKey);
+    if (source && !st.source) {
+      st.source = String(source);
+    }
     const entry = {
       id: st.nextLocalId++,
       mid: mid ?? null,
