@@ -678,7 +678,13 @@ export function buildUserPrompt(ctx) {
   //   要治的是"每次都用它"这一个点，所以措辞是"换个开头"而不是"不许说"。
   //   措辞过强有两个已知反效果（WrenWen 实证）：① 会变成 few-shot 范例，越禁越像；
   //   ② 角色会变得畏缩。所以这里只报"最高频的少数几个"，且用正向引导收尾。
-  const openerStat = recentSelfOpeners(ctx.recentSelfMessages);
+  //
+  // 开关：`config.skills.openerHint`（默认 on）。
+  //   为什么需要能关掉：**归因实验必须能单独隔离这一股力**。
+  //   2026-09-19 实测教训：人设卡与这个注入同时生效时两股力分不开，
+  //   上一棒按小窗口切数据得出了 p=0.006 的假显著（全量复核 p=0.090）。
+  const openerHintOn = getConfig()?.skills?.openerHint !== false;
+  const openerStat = openerHintOn ? recentSelfOpeners(ctx.recentSelfMessages) : { dominant: [] };
   if (openerStat.dominant.length) {
     const list = openerStat.dominant.map(([w, n]) => `「${w}」×${n}`).join('、');
     stateLines.push(`（换个开头）你最近开口总是先用这几个词：${list}。这次换一个开头 —— 直接从你要说的那件事、那个反应说起。`);
