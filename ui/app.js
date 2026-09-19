@@ -5294,16 +5294,28 @@ function renderAllowSection(c) {
  */
 function renderWechatContactsSection(c) {
   const list = state.wechatContacts;
-  // 🔴 「收到了、但白名单没放行」的提示（2026-09-20 补）。
-  //    为什么必须有：实测里用户在没放行的时候连发三条消息，界面上**一点反馈都没有**
-  //    ⇒ 只会以为"接微信坏了"，而其实它正常工作、只是没放行。
-  //    数据来自 `/api/status.wechat.blocked`（只含昵称/种类/时间，不含正文）。
-  const blocked = state.status?.wechat?.blocked || [];
-  const blockedHint = blocked.length
+  // 🔴 「有人发过消息、但没放行」的提示（2026-09-20 补，并**改成由联系人表派生**）。
+  //    为什么必须有：实测里用户在没放行时连发消息，界面上**一点反馈都没有**
+  //    ⇒ 只会以为"接微信坏了"，而它其实正常工作、只是没放行。
+  //    为什么**派生**而不是另存一份：第一版我在后端内存里记了"最近收到的未放行消息"，
+  //    结果 03:07 真收到一条、03:08 一重启就抹掉了 ⇒ 用户什么都看不到。
+  //    而联系人表（`wechat-contacts.json`）本来就落盘着 count / lastSeen / allowed ——
+  //    **提示要的东西它全有**；再从别处记一份，两份状态必然漂移。
+  //    ⚠️ 判据：`count > 0 && !allowed` = 有人敲过门、而且现在还没放行。
+  const pending = (Array.isArray(list) ? list : []).filter((x) => (x.count || 0) > 0 && !x.allowed);
+  const ago = (ts) => {
+    const d = Date.now() - Number(ts || 0);
+    if (!Number.isFinite(d) || d < 0) return '';
+    const m = Math.floor(d / 60000);
+    if (m < 1) return '刚刚';
+    if (m < 60) return `${m} 分钟前`;
+    return `${Math.floor(m / 60)} 小时前`;
+  };
+  const blockedHint = pending.length
     ? `<div class="hint" style="margin-bottom:10px;padding-left:8px;border-left:3px solid #e0a030">
-         ⚠️ <b>刚收到微信消息，但它不在白名单里 ⇒ 没有回。</b><br>
-         来自：${blocked.map((b) => esc(b.name || b.id)).join('、')}（共 ${blocked.length} 条待放行）
-         —— 在下面<b>勾选它</b>就会开始回话。
+         ⚠️ <b>收到过微信消息，但下面这些还没放行 ⇒ 机器人不会回它们。</b><br>
+         ${pending.map((x) => `${esc(x.name || x.id)}（${x.count} 条${x.lastSeen ? '，最后一条 ' + ago(x.lastSeen) : ''}）`).join('、')}
+         —— 在下面<b>勾选</b>即可开始回话。
        </div>`
     : '';
   const rows = (() => {
