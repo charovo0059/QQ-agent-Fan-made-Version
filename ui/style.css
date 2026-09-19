@@ -2162,6 +2162,14 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
   line-height: 1.75; font-size: 13.5px; color: var(--text);
 }
 
+/* 梦的「分章 + 总感想」（2026-09-19 加）。每一章一个小区块，总感想用左边条标出来 */
+.dream-seg { margin-top: 10px; padding-left: 10px; border-left: 2px solid var(--border); }
+.dream-seg--global { border-left-color: var(--accent); }
+.dream-seg__label {
+  font-size: 11px; color: var(--faint); margin-bottom: 3px;
+  font-family: var(--mono);
+}
+
 /* ══════════════════════════════════════════════════════════════════════
    技能 / 插件管理页（2026-09-19 第七对话新增）
    布局照上游 0.3.1 的技能页，但颜色一律用**我们自己的 token** ——

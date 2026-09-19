@@ -17,17 +17,22 @@ import { firstFrameOnly, countFrames } from './gif.js';
 // 技能工具（带 skillId）的可用性统一问 getToolAvailability()。
 import { registerTool, listTools, getToolAvailability } from './tool-registry.js';
 import { appendProposal, PROPOSAL_KINDS } from './proposals.js';
+import { splitDreamText } from './dream.js';
 
 /**
  * 读 `data/dreams.json` 并做筛选/裁剪 —— 供 `dream_recall` 工具用（2026-09-19 加）。
  *
- * ⚠️ 为什么在这里直接读文件、而不是拿 `ctx.dreamer`：工具上下文里**没有** dreamer
- *    （见 orchestrator 里 toolCtx 的字段清单），而为了一个只读工具去改 orchestrator 的传参
- *    不划算。dreams.json 很小（几十条笔记），每次读的代价可忽略。
- * ⚠️ 读不到文件时返回**空结构**而不是抛错：对模型来说"还没写过梦"是一个正常答案，
- *    不该变成一个工具错误（那会让它以为工具坏了、反复重试）。
+ * ⚠️ 2026-09-19 改：原来这里**自己复刻了一份** digest/裁剪逻辑，后来发现那是错的做法
+ *    （真代码一改，复刻件就安静地失真）。现在改成：
+ *      · 输出格式的解析用 dream.js 导出的 `splitDreamText`（**唯一实现**）；
+ *      · 「按会话分章 + 总感想」的取用规则也集中在那里，避免两份逻辑漂移。
+ *    这里只做"读文件 + 按 day/keyword/chatKey 筛 + 裁剪"。为什么读文件而不拿 `ctx.dreamer`：
+ *    工具上下文里没有 dreamer（见 orchestrator 的 toolCtx 字段清单），为一个只读工具改传参不划算；
+ *    dreams.json 很小，每次读的代价可忽略。
+ * ⚠️ 读不到文件时返回**空结构**而不是抛错：对模型来说"还没写过梦"是正常答案，
+ *    不该变成工具错误（那会让它以为工具坏了、反复重试）。
  */
-function readDreamsBrief({ day = '', keyword = '', limit = 5, text = false } = {}) {
+function readDreamsBrief({ day = '', keyword = '', limit = 5, text = false, chatKey = '' } = {}) {
   let all = [];
   try {
     const j = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'dreams.json'), 'utf8'));
@@ -42,16 +47,27 @@ function readDreamsBrief({ day = '', keyword = '', limit = 5, text = false } = {
     matched: items.length,
     oldest: all.length ? all[all.length - 1].day : '',
     newest: all.length ? all[0].day : '',
-    notes: items.slice(0, lim).map((n) => ({
-      day: n.day,
-      at: n.at,
-      // 这篇梦涉及哪几个会话 —— 模型据此判断"哪些事不该拿到别的群里说"
-      chatLabels: n.chatLabels || [],
-      messages: n.messages ?? null,
-      mine: n.mine ?? null,
-      chars: String(n.text || '').length,
-      text: text ? String(n.text || '') : String(n.text || '').slice(0, 600)
-    }))
+    // 传了 chatKey ⇒ **只给当前会话那一章 + 总感想**。
+    // 这就是"事实按会话过滤、感受全局可见"的落点：别的会话的章节**不返回**。
+    ...(chatKey ? { chatKey, why: '只列了当前会话那一章（chatsForYou）；global 是总感想，它本来就全局。别的会话的章节没有给你。' } : {}),
+    notes: items.slice(0, lim).map((n) => {
+      const seg = (Array.isArray(n.segments) || n.global !== undefined)
+        ? { segments: n.segments || [], global: String(n.global || '') }
+        : splitDreamText(n.text);
+      const mineSeg = chatKey ? seg.segments.filter((s) => s.key === String(chatKey)) : seg.segments;
+      const cut = (s) => (text ? s : String(s).slice(0, 600));
+      return {
+        day: n.day,
+        at: n.at,
+        chatLabels: n.chatLabels || [],
+        messages: n.messages ?? null,
+        mine: n.mine ?? null,
+        chars: String(n.text || '').length,
+        ...(chatKey
+          ? { chatsForYou: mineSeg.map((s) => cut(s.text)), global: cut(seg.global) }
+          : { segments: mineSeg.map((s) => ({ label: s.label, text: cut(s.text) })), global: cut(seg.global) })
+      };
+    })
   };
 }
 
@@ -889,15 +905,17 @@ export function buildToolDefs() {
       name: 'dream_recall',
       description: '翻你自己的「梦」—— 深夜安静时你回想当天写下的笔记（只给管理员看的那些）。'
         + '想看某一天就传 day；想找某个话题/某个人的事就传 keyword。'
-        + '不传参数时只给你**最近几篇的开头**（省 token）；要看全文，再调一次并传 day 或 text=true。'
-        + '⚠️ 每篇都会告诉你它涉及哪几个会话：涉及别的群/私聊的具体事，**别拿到当前这个会话来说**。',
+        + '**传 currentChat=true 时只给你当前这个会话那一章 + 你自己的总感想** —— '
+        + '这样你就不会看到别的群/私聊里的事（那些本来也不该拿到这里说）。'
+        + '不传参数时只给最近几篇的开头（省 token）；要看全文，再调一次并传 day 或 text=true。',
       parameters: {
         type: 'object',
         properties: {
           day: { type: 'string', description: '可选：只看这一天（格式 YYYY-MM-DD）' },
           keyword: { type: 'string', description: '可选：只在笔记正文里找包含这个词的' },
           limit: { type: 'integer', description: '最多返回几篇（默认 5，上限 30）' },
-          text: { type: 'boolean', description: 'true = 返回全文；默认 false 只给开头' }
+          text: { type: 'boolean', description: 'true = 返回全文；默认 false 只给开头' },
+          currentChat: { type: 'boolean', description: 'true = 只给当前会话那一章 + 总感想（推荐用它，避免把别处的事拿到这里说）' }
         }
       },
       async execute(ctx, args) {
@@ -905,7 +923,8 @@ export function buildToolDefs() {
           day: String(args.day ?? '').trim(),
           keyword: String(args.keyword ?? '').trim(),
           limit: Number(args.limit) || 5,
-          text: args.text === true
+          text: args.text === true,
+          chatKey: args.currentChat === true ? String(ctx.chatKey || '') : ''
         });
         if (!brief.total) {
           return ok({ notes: [], note: '你还没有写过任何梦（`data/dreams.json` 里是空的）。这不是错误，只是还没到能做的时候。' });
