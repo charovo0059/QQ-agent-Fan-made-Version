@@ -205,10 +205,10 @@ export class MemoryStore {
     try {
       for (const f of fs.readdirSync(MEMORY_DIR)) {
         if (fs.statSync(path.join(MEMORY_DIR, f)).isDirectory()) {
-          const m = /^(group|private)_(\d+)$/.exec(f);
+          const m = /^(group|private)_(\w+)$/.exec(f);
           if (m) out.add(`${m[1]}:${m[2]}`);
         } else {
-          const m = /^(group|private)_(\d+)\.json$/.exec(f);
+          const m = /^(group|private)_(\w+)\.json$/.exec(f);
           if (m) out.add(`${m[1]}:${m[2]}`);
         }
       }

@@ -483,7 +483,7 @@ export function storeConfigForChat(chatKey) {
   const store = getConfig().store || {};
   if (store.unifiedTier !== false) return store;
   const key = String(chatKey || '');
-  if (!/^(group|private):\d+$/.test(key)) return store;
+  if (!/^(group|private):\w+$/.test(key)) return store;
   const table = store.chatSliderPos || {};
   // 兜底：万一有人手写成裸群号（旧格式残留），群聊也认一下
   let pos = table[key];
