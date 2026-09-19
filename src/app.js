@@ -477,6 +477,58 @@ export function createApp({ log = console.log } = {}) {
     log(`[wechat] 已启用微信通道：${cfg.wechat?.wsUrl}`);
   }
 
+  // ── 微信通道的「上游」探针（2026-09-20 第八对话补，是**实测**出来的静默失败）──────
+  // 问题：`wechatOnebot.connected` 只表示"**agent 连上了中继**"。
+  //   实测（起中继+Bridge+隔离 agent，然后把 Bridge 杀掉）：
+  //     中继侧 `akasha.connected` → false（中继知道桥断了）
+  //     而 agent 侧 `/api/status.wechat.connected` **仍然是 true**，`self` 还一直是 0
+  //   ⇒ 界面显示"微信已连接"，而消息**永远进不来**。这正是本项目最忌的那种静默失败
+  //     —— "看着一切正常，就是没人说话"。
+  // 而中继其实**已经**按 OneBot 惯例用 `get_status` 回了 `online = akashaConnected`
+  //   （relay.mjs:184）—— **agent 从来没问过**。这里补的就是"问"这一步。
+  // 为什么用"缓存 + 后台刷新"而不是每次现问：`/api/status` 被前端轮询，
+  //   不能让它依赖一次网络往返（中继没起来就会把整个状态接口拖慢）。
+  const wechatUpstream = { online: null, checkedAt: 0, error: '', identityAt: 0 };
+
+  async function probeWechatUpstream() {
+    if (!wechatOnebot || !wechatOnebot.connected) {
+      wechatUpstream.online = null; wechatUpstream.error = ''; wechatUpstream.checkedAt = Date.now();
+      return;
+    }
+    try {
+      const st = await withTimeout(wechatOnebot.call('get_status', {}), 3000, 'get_status 超时');
+      // `online` 缺失时留 null（**未知**），不要当成 false —— 否则中继一升级就全变红。
+      wechatUpstream.online = st && st.online !== undefined ? !!st.online : null;
+      wechatUpstream.error = '';
+    } catch (e) {
+      wechatUpstream.online = null;
+      wechatUpstream.error = String(e?.message ?? e);
+    }
+    wechatUpstream.checkedAt = Date.now();
+
+    // 顺带补一次身份：agent 完全可能**先于** Bridge 连上中继，那时 `get_login_info` 还是 0/空，
+    // 而中继学到身份之后**不会主动告诉** agent ⇒ 不补的话 `self` 就一直停在 0（实测就是这样）。
+    if (!wechatOnebot.selfInfo?.user_id && Date.now() - wechatUpstream.identityAt > 10000) {
+      wechatUpstream.identityAt = Date.now();
+      try {
+        const info = await withTimeout(wechatOnebot.call('get_login_info', {}), 3000, 'get_login_info 超时');
+        if (info?.user_id) {
+          wechatOnebot.selfInfo = info;
+          log(`[wechat] 补到微信侧身份：${info.nickname}（${info.user_id}）`);
+        }
+      } catch { /* 拿不到就下次再说 */ }
+    }
+  }
+
+  /** 读上游状态；缓存过期就在后台刷一次（**不阻塞**调用方）。 */
+  function wechatUpstreamNow() {
+    if (Date.now() - wechatUpstream.checkedAt > 3000) {
+      wechatUpstream.checkedAt = Date.now();   // 先占位，避免并发重复探测
+      probeWechatUpstream().catch(() => {});
+    }
+    return wechatUpstream;
+  }
+
   const stickers = new StickerManager(onebot);
   // 群禁言状态（见 src/mutes.js）。三条来源都会往里写：
   //   · notice/group_ban 事件（见 handleOneBotEvent）
@@ -1306,10 +1358,16 @@ export function createApp({ log = console.log } = {}) {
           wechat: {
             enabled: !!cfgNow.wechat?.enabled,
             configuredUrl: cfgNow.wechat?.wsUrl || null,
+            // ⚠️ 这一条**只**说明"agent 连上了中继"。上游（中继↔Bridge↔微信）通不通看下面 `bridgeConnected`。
             connected: wechatOnebot ? wechatOnebot.connected : false,
             everConnected: wechatOnebot ? wechatOnebot.everConnected : false,
             error: wechatOnebot ? wechatOnebot.lastConnectError : '',
             self: wechatOnebot?.selfInfo ? { userId: wechatOnebot.selfId, nickname: wechatOnebot.selfNickname } : null,
+            // 🔴 上游真值（中继的 `get_status.online`，= 中继有没有连上 Bridge）：
+            //    false 表示**现在收不到也发不出**，界面不该说"已连接"（实测过：桥死了 connected 仍是 true）。
+            //    null = 还没问过/问不出来（**未知**，不要当成 false）。
+            bridgeConnected: (() => { const u = wechatUpstreamNow(); return wechatOnebot?.connected ? u.online : null })(),
+            upstreamError: wechatUpstreamNow().error || '',
             // 当前有几个会话被标成微信来源（前端切视图要用它判断"这边有没有东西"）
             chats: (() => { try { return store.chatsBySource('wechat').length } catch { return 0 } })()
           },

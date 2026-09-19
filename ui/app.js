@@ -628,8 +628,16 @@ function updatePlatformStatusLabel() {
   }
   const w = state.status?.wechat || null;
   const on = !!w?.connected;
-  dot.className = 'dot ' + (on ? 'dot-on' : 'dot-off');
-  if (on) {
+  // 🔴 「连上了中继」≠「收得到消息」（2026-09-20 实测补）：
+  //    `connected` 只表示 agent 连上了中继；中继有没有连上 Bridge 是另一回事。
+  //    实测把 Bridge 杀掉后 `connected` 仍然是 true ⇒ 那时候显示"微信已连接"就是在骗人
+  //    （消息永远进不来，而用户看到的是一切正常 —— 本项目最忌的静默失败）。
+  //    ⚠️ `bridgeConnected` 为 null 表示**还没问出来**，不能当成 false（否则中继刚起来时会误报）。
+  const upstreamDown = on && w?.bridgeConnected === false;
+  dot.className = 'dot ' + ((on && !upstreamDown) ? 'dot-on' : 'dot-off');
+  if (upstreamDown) {
+    label.textContent = '微信未接通（中继没连上 Bridge）';
+  } else if (on) {
     const nick = w?.self?.nickname ? ` ${w.self.nickname}` : '';
     label.textContent = `微信已连接${nick}`;
   } else if (!w?.enabled) {
@@ -638,7 +646,7 @@ function updatePlatformStatusLabel() {
   } else {
     label.textContent = '微信未连接（中继/Bridge 没起来？）';
   }
-  label.className = on ? '' : 'muted';
+  label.className = (on && !upstreamDown) ? '' : 'muted';
 }
 
 /** QQ 模式的顶栏文案（抽出来是为了让"切回 QQ"能恢复原样，而不是留着我改过的痕迹）。 */
