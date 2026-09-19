@@ -12,6 +12,9 @@ const CHAT_MSG_MORE = 200;    // 存档页：每次滚动追加
 
 const state = {
   tab: 'sessions',
+  // 当前看哪个平台（'qq' | 'wechat'）。初始化时以后端 config.ui.mode 为准。
+  // ⚠️ 只影响显示 —— 两个平台的后端都照常跑（见 applyPlatformMode 那段说明）。
+  platformMode: 'qq',
   sessions: [],          // 摘要列表
   currentSessionId: null,
   sessionDetail: null,   // 完整记录
@@ -500,6 +503,158 @@ async function resumePause({ skipBacklog = false } = {}) {
   }
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   平台切换：QQ / 微信（2026-09-20 第八对话新增）
+
+   用户 2026-09-20 拍板的语义（**别改**）：
+   · 这**只是前端切换显示** —— 两个平台的后端**都继续跑**，不是"停掉另一边"。
+   · 微信模式下：会话/存档/记忆**只看微信**；隐藏「表情包」页签、设置里的表情区、
+     以及「SnowLuma」页签（那是 QQ 专属的协议栈）。
+   · 「笔记」（梦）**不做**平台过滤 —— 梦本来就是全局回想，强行筛反而丢东西。
+   · 切换状态**存进配置**（`ui.mode`），刷新/重启后保持。
+
+   ⚠️ 为什么过滤放在**渲染**而不是放在接口：接口是给所有页面共用的，
+   而"这一步看哪边"是界面状态；放接口里会让"两边同时要看"的场景没法做。
+   ⚠️ `ui/app.js` 是**经典脚本**，不许出现 export（写了整个控制台白屏）。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/** 当前是不是在看微信。默认 qq（配置缺省时也是 qq）。 */
+function isWechatMode() { return state.platformMode === 'wechat'; }
+
+/** 某个会话条目属不属于当前平台。source 缺省当 qq（接入微信之前建的会话都是 QQ）。 */
+function matchPlatform(item) {
+  const src = String((item && (item.source || item.chatSource)) || 'qq');
+  return isWechatMode() ? src === 'wechat' : src !== 'wechat';
+}
+
+/**
+ * 按 chatKey 判断平台时用的映射表（`chatKey -> 'qq' | 'wechat'`）。
+ *
+ * ⚠️ 为什么需要它：`/api/sessions` 的条目**没有 source 字段**
+ * （只有 `/api/chats` 有）⇒ 会话列表只能靠 chatKey 去查这张表。
+ * 每次渲染都去请求一次 /api/chats 太浪费（列表是 4 秒轮询的），所以缓存住，
+ * 由 loadChats / loadSessions 顺手刷新。
+ */
+async function refreshSourceMap() {
+  try {
+    const data = await api('/api/chats');
+    const m = new Map();
+    for (const c of data.chats || []) m.set(c.key || c.chatKey, String(c.source || 'qq'));
+    state.sourceMap = m;
+  } catch { /* 拿不到就沿用旧表（宁愿显示多，也别把该显示的藏了） */ }
+}
+
+/** 会话（历史运行记录）属于哪个平台 —— 查表；查不到时**倾向显示**（默认 qq）。 */
+function sessionPlatform(item) {
+  const key = item && item.chatKey;
+  const fromMap = key && state.sourceMap ? state.sourceMap.get(key) : null;
+  return String(item?.source || fromMap || 'qq');
+}
+
+function matchPlatformSession(item) {
+  const src = sessionPlatform(item);
+  return isWechatMode() ? src === 'wechat' : src !== 'wechat';
+}
+
+/** 会话条目最终显示什么（微信模式下顺带把平台标出来，避免两个平台串味）。 */
+function platformIconOf(item) {
+  return String((item && item.source) || 'qq') === 'wechat' ? '（微信）' : '';
+}
+
+/**
+ * 把平台模式应用到界面：按钮态、页签显隐、当前页重载。
+ * 只碰 DOM 与 state，**不发任何影响后端行为的请求**（除了把偏好存回配置）。
+ */
+function applyPlatformMode({ reload = true } = {}) {
+  const wx = isWechatMode();
+  const box = $('#platform-switch');
+  if (box) {
+    box.classList.toggle('wechat-mode', wx);
+    $$('.plat-btn', box).forEach((b) => {
+      const on = b.dataset.platform === state.platformMode;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+  }
+  // 微信模式下藏掉 QQ 专属页签。用 hidden 而不是 display:none —— 与项目里其它地方一致。
+  const hideInWechat = ['stickers', 'snowluma'];
+  for (const name of hideInWechat) {
+    const btn = $(`.tab[data-tab="${name}"]`);
+    if (btn) btn.classList.toggle('hidden', wx);
+  }
+  // 如果当前正停在要被隐藏的页上，切回会话页（否则用户会停在一个"没有入口"的页）
+  if (wx && hideInWechat.includes(state.tab)) switchTab('sessions');
+
+  // 顶栏/底部状态跟着平台走 —— 否则切到微信还显示 QQ 的连接状态，会误导
+  updatePlatformStatusLabel();
+
+  if (!reload) return;
+  // 当前页重载一次，让过滤立即生效
+  if (state.tab === 'sessions') loadSessions();
+  else if (state.tab === 'chats') loadChats();
+  else if (state.tab === 'memory') loadMemoryView();
+}
+
+/** 切换平台并**记进配置**（下次打开还是这一边）。 */
+async function setPlatformMode(mode) {
+  const next = mode === 'wechat' ? 'wechat' : 'qq';
+  if (next === state.platformMode) return;
+  state.platformMode = next;
+  applyPlatformMode();
+  try {
+    // ⚠️ body 必须自己 JSON.stringify —— `api()` 只设 content-type，不做序列化。
+    //    第一版传了对象，服务端 readBody 解析失败当空 body ⇒ 偏好**静默没存上**
+    //    （界面照样切、只有下次打开才发现回到 QQ）。这类"看起来成功其实没生效"正是本项目最忌讳的。
+    await api('/api/config', { method: 'POST', body: JSON.stringify({ ui: { mode: next } }) });
+  } catch (e) {
+    // 存不上只是"下次打开回到 QQ"，不影响这次切换 —— 说出来但不打断
+    console.warn('[platform] 偏好没存上：', e);
+  }
+}
+
+/**
+ * 顶栏那行状态文案：微信模式下显示**微信通道**的状态。
+ * 为什么必须切：`OneBot 未连接` 在微信模式下指的是 QQ 那条线，
+ * 而用户此刻关心的是微信通没通 —— 显示错了比不显示更坏。
+ */
+function updatePlatformStatusLabel() {
+  const dot = $('#onebot-dot');
+  const label = $('#onebot-label');
+  if (!dot || !label) return;
+  if (!isWechatMode()) {
+    // QQ：恢复原有表现（由 updateStatus 那套逻辑驱动）
+    if (state.status) applyQqStatusLabel(state.status);
+    return;
+  }
+  const w = state.status?.wechat || null;
+  const on = !!w?.connected;
+  dot.className = 'dot ' + (on ? 'dot-on' : 'dot-off');
+  if (on) {
+    const nick = w?.self?.nickname ? ` ${w.self.nickname}` : '';
+    label.textContent = `微信已连接${nick}`;
+  } else if (!w?.enabled) {
+    // 常见误判：用户以为"接进来了"，其实 config.wechat.enabled 还是 false
+    label.textContent = '微信未启用（config.wechat.enabled）';
+  } else {
+    label.textContent = '微信未连接（中继/Bridge 没起来？）';
+  }
+  label.className = on ? '' : 'muted';
+}
+
+/** QQ 模式的顶栏文案（抽出来是为了让"切回 QQ"能恢复原样，而不是留着我改过的痕迹）。 */
+function applyQqStatusLabel(status) {
+  const dot = $('#onebot-dot');
+  const label = $('#onebot-label');
+  if (!dot || !label || !status) return;
+  const o = status.onebot || {};
+  // 三态与改动前保持一致（连上 / 连过但现在断了 / 从没连上）—— 别顺手简化成两态
+  dot.className = 'dot ' + (o.connected ? 'dot-on' : (o.everConnected ? 'dot-wait' : 'dot-off'));
+  label.textContent = o.connected
+    ? `OneBot 已连接${o.self ? `（${o.self.nickname}）` : ''}`
+    : 'OneBot 未连接';
+  label.className = o.connected ? '' : 'muted';
+}
+
 function switchTab(name) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
@@ -935,12 +1090,9 @@ async function refreshStatus() {
   try {
     state.status = await api('/api/status');
     const s = state.status;
-    const dot = $('#onebot-dot');
-    const label = $('#onebot-label');
-    dot.className = 'dot ' + (s.onebot.connected ? 'dot-on' : (s.onebot.everConnected ? 'dot-wait' : 'dot-off'));
-    label.textContent = s.onebot.connected
-      ? `OneBot 已连接${s.onebot.self ? `（${s.onebot.self.nickname}）` : ''}`
-      : 'OneBot 未连接';
+    // 顶栏那颗点与文案**跟着当前平台走**（见 updatePlatformStatusLabel 的注释：
+    // 在微信模式下显示 QQ 的连接状态会误导）。这里不再直接写死 OneBot 文案。
+    updatePlatformStatusLabel();
     $('#model-label').textContent = `模型：${s.orchestrator.model || '未设置'}`;
     const u = s.usage;
     // 成本：官方价匹配得上就显示；匹配不上（中转站常见）只显示 token，不显示误导性的 ¥0
@@ -1155,6 +1307,9 @@ async function loadSessions({ quiet = false } = {}) {
     // 一次全取：后端上限 2^20（约等于不限），前端靠分页渲染（SESSION_PAGE）避免卡顿
     const data = await api('/api/sessions?limit=1048576');
     state.sessions = data.sessions || [];
+    // 顺手刷新"chatKey → 平台"映射表：会话条目本身没有 source，只能靠它筛。
+    // 只在还没有表时取（它在 loadChats 里也会刷），免得每 4 秒多打一个接口。
+    if (!state.sourceMap) await refreshSourceMap();
     renderSessionList();
     // 自动跟随最新运行中的会话
     if (state.autoFollowRunning && !state.currentSessionId) {
@@ -1286,7 +1441,20 @@ function renderSessionList() {
   // 分页：一次只渲染 sessionLimit 条，滚到底部再加载下一批（见 SESSION_PAGE 常量）。
   // 会话可能积累到几百条，全量渲染会让列表变卡。
   state.sessionLimit = Math.max(SESSION_PAGE, Number(state.sessionLimit) || SESSION_PAGE);
-  const all = state.sessions || [];
+  // 平台过滤：只显示当前平台的历史运行记录。
+  // ⚠️ 会话条目没有 source 字段 ⇒ 用 chatKey 查 refreshSourceMap 那张表。
+  // ⚠️ 空列表要说清原因 —— "切到微信却什么都没有"与"被过滤掉了"是两种不同的状态，
+  //    不区分的话用户会以为坏了（这正是本项目反复踩的"静默失效"）。
+  const allPlatforms = state.sessions || [];
+  const all = allPlatforms.filter(matchPlatformSession);
+  if (!all.length) {
+    box.innerHTML = `<div class="list-head muted">${isWechatMode()
+      ? (allPlatforms.length
+        ? `这里只显示微信会话 —— 当前 ${allPlatforms.length} 条记录都属于 QQ。切回「QQ」能看到它们。`
+        : '还没有微信会话记录。中继与 Bridge 跑起来、且白名单放行之后才会有。')
+      : '还没有会话记录。'}</div>`;
+    return;
+  }
   const shown = all.slice(0, state.sessionLimit);
   const rest = all.length - shown.length;
   box.innerHTML = shown.map((s) => {
@@ -2078,6 +2246,8 @@ async function loadChats({ quiet = false } = {}) {
   try {
     const data = await api('/api/chats');
     state.chats = data.chats || [];
+    // 顺手重建"chatKey → 平台"映射表（它会随新会话出现而变化）
+    state.sourceMap = new Map((data.chats || []).map((c) => [c.key || c.chatKey, String(c.source || 'qq')]));
     renderChatList();
     if (state.currentChatKey) {
       // 打开着某群详情时也刷新该群消息。
@@ -2091,7 +2261,19 @@ async function loadChats({ quiet = false } = {}) {
 function renderChatList() {
   const box = $('#chat-items');
   state.seenChatKeys = state.seenChatKeys || new Set();
-  box.innerHTML = state.chats.map((c) => {
+  // 平台过滤（`/api/chats` **有** source 字段，直接用即可）
+  const allChats = state.chats || [];
+  const chats = allChats.filter(matchPlatform);
+  if (!chats.length) {
+    // 空的时候必须说清"是被过滤了"还是"真没有" —— 否则切到微信看到空白会以为坏了
+    box.innerHTML = `<div class="list-head muted">${isWechatMode()
+      ? (allChats.length
+        ? `这里只显示微信存档 —— 当前 ${allChats.length} 个都属于 QQ。切回「QQ」能看到它们。`
+        : '还没有微信存档。中继与 Bridge 跑起来、且白名单放行之后才会有。')
+      : '还没有消息存档（等白名单里的群/好友来消息）'}</div>`;
+    return;
+  }
+  box.innerHTML = chats.map((c) => {
     const name = formatChatTitle(c.key, chatNameOf(c.key));
     const isNew = !state.seenChatKeys.has(c.key);
     return `
@@ -7845,6 +8027,20 @@ $$('.tab').forEach((tab) => {
     if (THEME_VALUES.includes(t)) applyTheme(t);
     else if (cfg0 && !('ui' in cfg0)) { /* 后端还没这个字段，保持本地值 */ }
   } catch { /* 接口不可用就用本地的 */ }
+
+  // 平台模式：同样以后端配置为准（用户选了微信，下次打开还在微信）
+  // ⚠️ 用 reload:false —— 此刻页面还没加载任何列表，重载是白跑；
+  //    真正的首次加载由下面那几行 loadSessions / loadChats 按当前模式做。
+  try {
+    const cfg1 = await api('/api/config');
+    state.platformMode = cfg1?.ui?.mode === 'wechat' ? 'wechat' : 'qq';
+  } catch { state.platformMode = 'qq'; }
+  applyPlatformMode({ reload: false });
+
+  // 平台切换按钮：只切显示（后端两个平台都继续跑）
+  $$('#platform-switch .plat-btn').forEach((b) => {
+    b.addEventListener('click', () => setPlatformMode(b.dataset.platform));
+  });
 
   // 首启引导：关键配置（模型/白名单）没填就直接带去设置页
   try {

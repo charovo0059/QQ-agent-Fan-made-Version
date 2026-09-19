@@ -2326,3 +2326,31 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
 .proposal-accepted > summary:hover { color: var(--text); }
 /* 已采纳的卡片换个左边条颜色，跟待审区分开 */
 .proposal-card--accepted { border-left-color: var(--green); opacity: .92; }
+
+/* ── 平台切换（QQ / 微信，2026-09-20）───────────────────────────────
+   为什么放在顶栏：它决定"下面所有页看的是哪一边"，是全局上下文，不是某一页的筛选。
+   ⚠️ 它**只切显示** —— 两个平台的后端都照常跑（用户 2026-09-20 明确要的）。
+   样式刻意做小、贴着 sep，避免改动顶栏的布局节奏。 */
+.platform-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.platform-switch .plat-btn {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  line-height: 1.6;
+}
+.platform-switch .plat-btn + .plat-btn { border-left: 1px solid var(--border); }
+.platform-switch .plat-btn:hover { background: var(--hover); color: var(--text); }
+.platform-switch .plat-btn.active { background: var(--accent); color: #fff; }
+/* 微信模式下给顶栏一点视觉提示：状态点换成绿色（QQ 是蓝），一眼能看出在看哪边 */
+.platform-switch.wechat-mode .plat-btn.active { background: var(--green); }
