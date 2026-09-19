@@ -2341,7 +2341,7 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, { files, consolidating: [...busy], hiddenEmpty: [...hiddenEmpty] });
       }
 
-      const memoryFileMatch = /^\/api\/memory-files\/(group|private)_(\d+)$/.exec(pathname);
+      const memoryFileMatch = /^\/api\/memory-files\/(group|private)_(\w+)$/.exec(pathname);
       if (memoryFileMatch && method === 'GET') {
         const chatKey = `${memoryFileMatch[1]}:${memoryFileMatch[2]}`;
         return json(res, 200, {
@@ -2359,7 +2359,7 @@ export function createApp({ log = console.log } = {}) {
       }
 
       // 手动编辑某个群友的印象（PUT 编辑：QQ号必填，备注可同步保存 / DELETE 删除成员文件）
-      const memoryMemberMatch = /^\/api\/memory-files\/(group|private)_(\d+)\/members\/(\d+)$/.exec(pathname);
+      const memoryMemberMatch = /^\/api\/memory-files\/(group|private)_(\w+)\/members\/(\d+)$/.exec(pathname);
       if (memoryMemberMatch && method === 'PUT') {
         const chatKey = `${memoryMemberMatch[1]}:${memoryMemberMatch[2]}`;
         const body = await readBody(req).catch(() => ({}));
@@ -2388,7 +2388,7 @@ export function createApp({ log = console.log } = {}) {
         try {
           const body = await readBody(req).catch(() => ({}));
           const chatKey = String(body.chatKey || '');
-          if (!/^(group|private):\d+$/.test(chatKey)) return json(res, 400, { ok: false, error: 'chatKey 格式错误' });
+          if (!/^(group|private):\w+$/.test(chatKey)) return json(res, 400, { ok: false, error: 'chatKey 格式错误' });
 
           // 可选：只整理指定的群友（QQ 号数组）。不传 = 整理全群。
           // 传了但记忆里还没有此人时，会从聊天记录里新建印象。
@@ -2418,7 +2418,7 @@ export function createApp({ log = console.log } = {}) {
         }
       }
 
-      const chatMsgMatch = /^\/api\/chats\/(group|private)_(\d+)\/messages$/.exec(pathname);
+      const chatMsgMatch = /^\/api\/chats\/(group|private)_(\w+)\/messages$/.exec(pathname);
       if (chatMsgMatch && method === 'GET') {
         const chatKey = `${chatMsgMatch[1]}:${chatMsgMatch[2]}`;
         // 单群消息上限 2^20（Kondius 钦定）：约等于不限，存档一口气全给
@@ -2435,7 +2435,7 @@ export function createApp({ log = console.log } = {}) {
 
       // ── 删除存档（管理端「存档」页）──
       // 1) 删单条消息：/api/chats/<group|private>_<id>/messages/<本地消息 id>
-      const chatMsgDelMatch = /^\/api\/chats\/(group|private)_(\d+)\/messages\/(\d+)$/.exec(pathname);
+      const chatMsgDelMatch = /^\/api\/chats\/(group|private)_(\w+)\/messages\/(\d+)$/.exec(pathname);
       if (chatMsgDelMatch && method === 'DELETE') {
         const chatKey = `${chatMsgDelMatch[1]}:${chatMsgDelMatch[2]}`;
         const okDel = store.deleteMessage(chatKey, chatMsgDelMatch[3]);
@@ -2445,7 +2445,7 @@ export function createApp({ log = console.log } = {}) {
       }
 
       // 2) 清空某会话的整份存档：删磁盘文件 + 内存态，删完它就从存档列表消失
-      const chatDelMatch = /^\/api\/chats\/(group|private)_(\d+)$/.exec(pathname);
+      const chatDelMatch = /^\/api\/chats\/(group|private)_(\w+)$/.exec(pathname);
       if (chatDelMatch && method === 'DELETE') {
         const chatKey = `${chatDelMatch[1]}:${chatDelMatch[2]}`;
         const removed = store.deleteChat(chatKey);
@@ -2908,7 +2908,7 @@ export function createApp({ log = console.log } = {}) {
         }
       }
 
-      const chatWakeMatch = /^\/api\/chats\/(group|private)_(\d+)\/wake$/.exec(pathname);
+      const chatWakeMatch = /^\/api\/chats\/(group|private)_(\w+)\/wake$/.exec(pathname);
       if (chatWakeMatch && method === 'POST') {
         const chatKey = `${chatWakeMatch[1]}:${chatWakeMatch[2]}`;
         // 如实回报"会发生什么"，让界面区分"已开始处理 / 没有未读 / 正在处理 / 档位没命中"。
@@ -2920,7 +2920,7 @@ export function createApp({ log = console.log } = {}) {
       }
 
       // 手动发一条测试消息（不走模型，直接经 OneBot 发出，用于配置后验证链路）
-      const chatTestSendMatch = /^\/api\/chats\/(group|private)_(\d+)\/test-send$/.exec(pathname);
+      const chatTestSendMatch = /^\/api\/chats\/(group|private)_(\w+)\/test-send$/.exec(pathname);
       if (chatTestSendMatch && method === 'POST') {
         const body = await readBody(req);
         const text = String(body.text ?? '').trim();
@@ -2936,7 +2936,7 @@ export function createApp({ log = console.log } = {}) {
         }
       }
 
-      const chatReadMatch = /^\/api\/chats\/(group|private)_(\d+)\/mark-read$/.exec(pathname);
+      const chatReadMatch = /^\/api\/chats\/(group|private)_(\w+)\/mark-read$/.exec(pathname);
       if (chatReadMatch && method === 'POST') {
         const chatKey = `${chatReadMatch[1]}:${chatReadMatch[2]}`;
         const drained = store.drainUnread(chatKey);
