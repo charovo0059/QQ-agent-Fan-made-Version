@@ -570,7 +570,15 @@ export function watchPlugins({ log = console.log, onReload, roots: rootsOpt = nu
     }
   }
   log(`[skill] 热重载已启用（监听 ${roots.map((r) => path.basename(r)).join(' + ')}）`);
-  return { close: () => { for (const w of watchers) { try { w.close(); } catch { /* ignore */ } } } };
+  // ⚠️ 返回值把 watchers 也暴露出来（2026-09-19 第七对话加）：
+  //    fs.watch 的句柄是**活跃句柄**，会让 Node 事件循环一直不退出 ——
+  //    测试里开了热重载就会挂住不结束（实测：测试超时 120 秒）。
+  //    给调用方留一个"做完了就放手"的口子（unref 只停"吊住进程"，监听照旧在工作）。
+  return {
+    close: () => { for (const w of watchers) { try { w.close(); } catch { /* ignore */ } } },
+    unref: () => { for (const w of watchers) { try { w.unref(); } catch { /* ignore */ } } },
+    watchers
+  };
 }
 
 /** 卸载一个 Skill（含工具回收）。 */
