@@ -24,10 +24,47 @@ import { chatCompletionWithRetry } from './llm.js';
 import { todayKey } from './util.js';
 
 const DREAMS_FILE = path.join(DATA_DIR, 'dreams.json');
-const MAX_INPUT_CHARS = 8000;    // 当天消息进提示词的总字数上限
-const MAX_NOTE_CHARS = 2000;     // 笔记长度上限（超出截断）
-const MAX_NOTES = 120;           // 最多留多少条
-const TICK_MS = 5 * 60 * 1000;   // 每 5 分钟检查一次
+// 默认值；**权威值在 config.dream**（2026-09-19 挪进配置，以便按需调节）
+const DEF_MAX_INPUT_CHARS = 8000;   // 全局预算
+const DEF_PER_CHAT_MIN = 150;       // 每会话保底
+const DEF_PER_CHAT_MAX = 1500;      // 每会话上限
+const RECENT_WINDOW = 3000;         // 每个会话最多捞多少条候选（够覆盖一天了）
+const PER_MSG_CUT = 120;            // 单条截断
+const MAX_NOTE_CHARS = 2000;        // 笔记长度上限（超出截断）
+const MAX_NOTES = 120;              // 最多留多少条
+const TICK_MS = 5 * 60 * 1000;      // 每 5 分钟检查一次
+
+/**
+ * 剔除控制字符（2026-09-19 第七对话修的真 bug）。
+ *
+ * 为什么必须有：实测有位群友的**显示名**就是 `\n\u000B\u0012\t哈气了\n\u0005\n\u0003喵\u0010\u0000`
+ * （含 U+0000/0003/0005/0010/0012）。而原来的净化只用 `replace(/\s+/g,' ')`，
+ * 而 **`\s` 并不匹配** U+0003/U0005/U000B/U0010/U0012/U0000 这些 ⇒ 原样写进提示词，
+ * 把 `HH:MM 名：正文` 的格式撑成多行、还塞进一堆不可见字符。
+ * ⚠️ 而且**昵称（m.senderName）原来完全没净化**，只有正文过了一遍。
+ * 实测占比：正文含控制字符 9 条（0.26%）、**昵称 27 条（0.79%）**。
+ *
+ * 口径：保留 \t \n（后续会被折叠成空格），剔除其余 C0 控制字符与 DEL。
+ */
+function sanitize(s) {
+  return String(s ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')   // 剔控制字符
+    .replace(/\s+/g, ' ')                                            // 折叠空白（含 \t\n）
+    .trim();
+}
+
+/** 从一个数组里均匀取 n 个下标（保留时间顺序）。用于"在全天范围里取样"而不是只取尾部。 */
+function pickEvenly(len, n) {
+  if (n >= len) return Array.from({ length: len }, (_, i) => i);
+  if (n <= 0) return [];
+  if (n === 1) return [Math.floor((len - 1) / 2)];   // 只取一条时取正中间，最有代表性
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const idx = Math.round((i * (len - 1)) / (n - 1));
+    if (!out.length || out[out.length - 1] !== idx) out.push(idx);
+  }
+  return out;
+}
 
 const SYSTEM_PROMPT = [
   '现在是深夜，群里都安静了。没有人跟你说话，你也不用回复任何人。',
@@ -169,42 +206,117 @@ export class Dreamer {
     else if (result.reason !== '今天还没人说话，没什么可整理的') console.warn(`[dream] 今晚没写成：${result.reason}`);
   }
 
-  /** 当天消息摘要（每个会话一段，逐条裁到 120 字，总量封顶）。 */
+  /**
+   * 当天消息摘要（每个会话一段）。
+   *
+   * ── 2026-09-19 第七对话重写（治"赢者通吃 + 只取一天的开头"）────────────────
+   * 旧实现是：全局 8000 字预算 + `recent(key,{limit:400})` 后置过滤当天。实测后果：
+   *   · 11 个会话里**只有 2 个**进了提示词，其余 9 个（含 5 个私聊）**一条都没有**；
+   *   · 会话顺序由目录读出顺序决定 ⇒ **谁靠前谁吃光**，不是"今天谁更重要"；
+   *   · `recent(400)` 是"先取最后 400 条再筛今天" ⇒ 一天超 400 条的群
+   *     **当天更早的部分整个丢掉**（实测 group:1098345913 当天 2684 条，丢了 2284 条）；
+   *   · 于是素材变成"磁盘顺序前两个会话当天最早那一段"（实测是 00:07–00:19 的 12 分钟）。
+   *
+   * 现在的做法：
+   *   ① 候选窗口放到 RECENT_WINDOW 条，**按"当天"筛完之后**再取样；
+   *   ② 每个会话有自己的配额（perChatMin/Max），**会话内部在全天范围里均匀取样**
+   *      （不再是"取尾"）—— 这样一天的早/中/晚都有代表；
+   *   ③ **优先保证它自己的发言**：提示词要求写"我当时其实想说什么"，
+   *      而实测素材里它自己只占 3.4%，那样"第一人称回想"就成了复述别人；
+   *   ④ 最后按全局 maxInputChars 收敛，**收敛时优先丢别人的、尽量留它自己的**。
+   */
   #digest(dayStartTs) {
-    const chats = [];
-    let total = 0;
-    let mine = 0;
-    let chars = 0;
-    let keys = [];
-    try { keys = this.store.listChats() } catch { keys = [] }
+    const c = getConfig()?.dream || {};
+    const MAX_INPUT_CHARS = Math.max(200, Number(c.maxInputChars) || DEF_MAX_INPUT_CHARS);
+    const PER_MIN = Math.max(0, Number(c.perChatMinChars ?? DEF_PER_CHAT_MIN));
+    const PER_MAX = Math.max(PER_MIN, Number(c.perChatMaxChars) || DEF_PER_CHAT_MAX);
 
+    const chats = [];
+    let total = 0, mine = 0, chars = 0;
+    let keys = [];
+    try { keys = this.store.listChats(); } catch { keys = [] }
+
+    // ── 第一遍：每个会话各自选材（此时不判全局上限，避免"靠前的会话吃光"）──
+    const prepared = [];
     for (const key of keys) {
-      if (chars >= MAX_INPUT_CHARS) break;
       let msgs = [];
       try {
-        msgs = this.store.recent(key, { limit: 400 }).filter((m) => m.ts >= dayStartTs);
+        msgs = this.store.recent(key, { limit: RECENT_WINDOW }).filter((m) => m.ts >= dayStartTs);
       } catch { msgs = [] }
       if (!msgs.length) continue;
 
-      const lines = [];
+      // 归一到 {hh,mm,who,text}，顺便净化（正文与昵称**都要**净化，见 sanitize 的注释）
+      const rows = [];
       for (const m of msgs) {
-        if (chars >= MAX_INPUT_CHARS) break;
-        const text = String(m.text ?? '').replace(/\s+/g, ' ').trim();
+        const text = sanitize(m.text);
         if (!text) continue;
         const t = new Date(m.ts);
-        const hh = String(t.getHours()).padStart(2, '0');
-        const mm = String(t.getMinutes()).padStart(2, '0');
-        const cut = text.slice(0, 120);
-        lines.push(`${hh}:${mm} ${m.self ? '我' : (m.senderName || m.senderId)}：${cut}`);
-        chars += cut.length;
-        total += 1;
-        if (m.self) mine += 1;
+        rows.push({
+          self: !!m.self,
+          hh: String(t.getHours()).padStart(2, '0'),
+          mm: String(t.getMinutes()).padStart(2, '0'),
+          who: m.self ? '我' : (sanitize(m.senderName) || String(m.senderId ?? '?')),
+          text: text.slice(0, PER_MSG_CUT)
+        });
       }
-      if (lines.length) {
-        const label = key.startsWith('group:') ? `群 ${key.slice(6)}` : `私聊 ${key.slice(8)}`;
-        chats.push({ key, label, lines });
-      }
+      if (!rows.length) continue;
+      total += rows.length;
+      mine += rows.filter((r) => r.self).length;
+
+      // ── 选材：先保它自己的，再补别人的；两类都在**全天范围**里均匀取 ──
+      const selfIdx = rows.map((r, i) => (r.self ? i : -1)).filter((i) => i >= 0);
+      const otherIdx = rows.map((r, i) => (r.self ? -1 : i)).filter((i) => i >= 0);
+      const budgetForChat = Math.min(PER_MAX, Math.max(PER_MIN, Math.round(MAX_INPUT_CHARS / Math.max(1, keys.length))));
+
+      const chosen = new Set();
+      let used = 0;
+      const take = (idxArr, budget) => {
+        for (const i of pickEvenly(idxArr.length, idxArr.length)) {
+          const j = idxArr[i];
+          if (chosen.has(j)) continue;
+          const cost = rows[j].text.length + 12;
+          if (used + cost > budget) break;
+          chosen.add(j);
+          used += cost;
+        }
+      };
+      // ① 它自己的发言：这一半单独封顶，**不能占满整个会话配额**
+      //    （全是"我"的独白、没有别人的话，回想就没有上下文了）
+      take(selfIdx, Math.min(budgetForChat, Math.round(budgetForChat / 2)));
+      // ② 别人的补足到配额：**全天均匀取，不是取尾** —— 这是修掉"只看到一天开头"的关键
+      take(otherIdx, budgetForChat);
+
+      const picked = [...chosen].sort((a, b) => a - b);
+      if (!picked.length) continue;
+      prepared.push({
+        key,
+        label: key.startsWith('group:') ? `群 ${key.slice(6)}` : `私聊 ${key.slice(8)}`,
+        rows: picked.map((i) => rows[i]),
+        selfCount: picked.filter((i) => rows[i].self).length
+      });
     }
+
+    // ── 第二遍：全局收敛。**优先丢别人的**，尽量留它自己的（先放 self，再放 other）──
+    const takeSelfFirst = [];
+    for (const ch of prepared) for (const r of ch.rows) takeSelfFirst.push({ ch, r, self: r.self });
+    takeSelfFirst.sort((a, b) => (a.self === b.self) ? 0 : (a.self ? -1 : 1));
+
+    const keptByChat = new Map();
+    for (const item of takeSelfFirst) {
+      const cost = item.r.text.length + 12 + item.r.who.length;
+      if (chars + cost > MAX_INPUT_CHARS) continue;
+      if (!keptByChat.has(item.ch.key)) keptByChat.set(item.ch.key, []);
+      keptByChat.get(item.ch.key).push(item.r);
+      chars += cost;
+    }
+
+    for (const ch of prepared) {
+      const rows2 = (keptByChat.get(ch.key) || []).slice().sort((a, b) => (a.hh + a.mm) < (b.hh + b.mm) ? -1 : 1);
+      if (!rows2.length) continue;
+      const lines = rows2.map((r) => `${r.hh}:${r.mm} ${r.who}：${r.text}`);
+      chats.push({ key: ch.key, label: ch.label, lines, self: rows2.filter((r) => r.self).length });
+    }
+
     return { chats, total, mine, chars };
   }
 
