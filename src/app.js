@@ -19,7 +19,7 @@ import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
 // 群禁言状态表（2026-09-19 第八对话）：机器人被群禁言时**停止起编排**，别白烧模型调用。
 // 背景与证据链见 src/mutes.js 顶部注释，以及 待办与决策记录.md §30。
-import { GroupMutes } from './mutes.js';
+import { GroupMutes, reseedGroupMutes } from './mutes.js';
 // 微信联系人登记表（2026-09-20）：把桥派生的数字 id 与昵称对应起来，
 // 让白名单可以点选而不是手填数字。见该文件顶部注释（含"为什么必须有它"）。
 import { learnContact, listContacts } from './wechat-contacts.js';
@@ -514,7 +514,43 @@ export function createApp({ log = console.log } = {}) {
   initPriceFeed(cfg.api?.priceRemoteUrl || '');
 
   // OneBot 连接状态推送
-  onebot.onStatus((status) => emit('onebot-status', status));
+  onebot.onStatus((status) => {
+    emit('onebot-status', status);
+    // 🔴 一连上就**补种禁言表**（见下面 reseedMutesOnBoot 的说明）。
+    //    只在第一次成功连接时做一次；重连不重做（重连通常是网络抖动，表还在）。
+    if (status?.connected) {
+      reseedMutesOnBoot().catch((e) => log('[禁言] 启动补种出错：', e?.message ?? e));
+    }
+  });
+
+  /**
+   * 启动时按**权威查询**重建禁言表（2026-09-20 第八对话补，实测踩到）。
+   *
+   * `mutes` 是内存态（刻意不落盘），而 app 每次改代码都会重启 ⇒ 重启后表是空的。
+   * 此时若某个群**仍在禁言中**，群消息照常来、每轮都起一次完整模型调用，
+   * 直到发送被拒（result=120）才重新记起来 —— **代价是白烧一轮**。
+   * 实测：2026-09-20 02:3x 重启后 `/api/mutes` 空，而 `group:1098345913`
+   * 实际仍禁言至 19:28:58（还剩 17.1 小时）。
+   *
+   * 与"落盘"的区别：落盘会在"管理员提前解禁、而解禁事件没转发"时**假阳性**
+   * （`noticeSeen` 至今为空 ⇒ 事件转发从未被证实）；权威查询读的是当下真值。
+   */
+  let muteReseedDone = false;
+  async function reseedMutesOnBoot() {
+    if (muteReseedDone) return;
+    muteReseedDone = true;
+    // 只查"群 + 属于 QQ"的会话：微信那侧还没有群，且禁言是 QQ 的概念
+    const groups = store.listChats().filter((k) => k.startsWith('group:') && store.chatSource(k) === 'qq');
+    if (!groups.length) return;
+    const r = await reseedGroupMutes({
+      chatKeys: groups,
+      refreshOne: (k) => refreshMuteFromOneBot(k),
+      describe: (k) => mutes.describe(k),
+      log: (msg) => log('[禁言] ' + msg)
+    });
+    log(`[禁言] 启动补种完成：查了 ${r.checked} 个群，命中禁言 ${r.muted} 个`
+      + `${r.failed ? `，未能查询 ${r.failed} 个` : ''}`);
+  }
 
   // ── 从 SnowLuma 配置自动同步 OneBot 令牌 ──
   // SnowLuma 给每个登录过的账号生成独立随机 token（config/onebot_<uin>.json），

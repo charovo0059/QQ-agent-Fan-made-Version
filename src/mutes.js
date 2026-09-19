@@ -205,3 +205,55 @@ export class GroupMutes {
       + `（还剩约 ${mins >= 60 ? (mins / 60).toFixed(1) + ' 小时' : mins + ' 分钟'}，来源：${SOURCE_LABEL[rec.source] ?? rec.source}）`;
   }
 }
+
+/**
+ * 启动补种：对每个候选群**查一次权威禁言状态**，把重算出来的表填回去。
+ *
+ * ── 为什么需要（2026-09-20 第八对话实测踩到）──────────────────────────────
+ * 本表是**内存态**（刻意不落盘，理由见本文件开头）。而 app 每次改代码都会重启
+ * ⇒ 重启后表是空的。此时若某个群**仍在禁言中**：
+ *   · 群消息照常来 ⇒ 每轮都起一次完整的模型调用；
+ *   · 只有等发送被拒（result=120）才会重新记起来 —— **代价是白烧掉一轮**。
+ * 实测：2026-09-20 02:3x 重启后 `GET /api/mutes` 是空的，而 `group:1098345913`
+ * 实际仍禁言至 19:28:58（`/api/mutes/refresh` 查出的权威值，还剩 **17.1 小时**）。
+ * ⇒ 那一天里该群每来一条消息就白烧一轮。
+ *
+ * ── 为什么是"启动查一次"而不是"落盘"────────────────────────────────────
+ * 落盘会遇到"管理员提前解禁、而解禁事件没转发给我们"的假阳性
+ * （本项目 `noticeSeen` 至今是空的 ⇒ **事件转发从未被证实**）。
+ * 权威查询读的是**当下真值**，不可能假阳性；代价只是启动时每个群一次只读调用。
+ *
+ * 抽成独立函数（而不是留在 app.js 的闭包里）是为了**能被单测直接调** ——
+ * app.js 那层只负责接线（列出候选群 + 传 refreshMuteFromOneBot）。
+ *
+ * @param {object} o
+ * @param {string[]} o.chatKeys        候选群（app 侧已按"是群 + 属于 QQ"过滤）
+ * @param {(k:string)=>Promise<{ok?:boolean,muted?:boolean}>} o.refreshOne 查一个群的权威值
+ * @param {(k:string)=>string} [o.describe] 命中时的可读描述
+ * @param {(msg:string)=>void} [o.log]
+ * @returns {Promise<{checked:number,muted:number,failed:number,hits:string[]}>}
+ */
+export async function reseedGroupMutes({ chatKeys, refreshOne, describe = () => '', log = () => {} } = {}) {
+  const keys = Array.isArray(chatKeys) ? chatKeys : [];
+  const out = { checked: 0, muted: 0, failed: 0, hits: [] };
+  for (const key of keys) {
+    out.checked++;
+    try {
+      const r = await refreshOne(key);
+      if (r?.ok && r.muted) {
+        out.muted++;
+        out.hits.push(key);
+        log(`启动补种：${key} ${describe(key)}`);
+      } else if (r && r.ok === false) {
+        // 查不了（比如还没拿到自己的 QQ 号）—— 不是失败，但要说出来，别静默
+        out.failed++;
+        log(`启动补种跳过 ${key}：${r.error || '查询未成功'}`);
+      }
+    } catch (e) {
+      // 一个群查挂了不能拖累其余（否则一个坏群 = 整张表补不上）
+      out.failed++;
+      log(`启动补种失败 ${key}：${e?.message ?? e}`);
+    }
+  }
+  return out;
+}
