@@ -4677,6 +4677,7 @@ function renderSettingsSidebar() {
     ['memory', '记忆'],
     ['persona', '人设'],
     ['allow', '聊天白名单'],
+    ['wechat', '微信联系人'],
     ['chat', '聊天设置'],
     ['desktop', '桌面端'],
     ['onebot', 'OneBot（SnowLuma）']
@@ -4720,6 +4721,53 @@ function renderSettings() {
   //    于是它查不到 #proactive-status、静默什么都不做（界面上就永远停在"正在读当前状态…"）。
   //    第一版就是这么写错的。
   if ((state.settingsSection || 'api') === 'chat') loadProactiveStatus();
+  // 微信联系人同理：必须在 innerHTML 之后再去拉，拉到后再填进 #wx-contact-list。
+  // （第一版想直接在模板里同步渲染，但那是异步数据 —— 会永远停在"正在读取…"）
+  if ((state.settingsSection || 'api') === 'wechat') loadWechatContacts();
+}
+
+/**
+ * 拉微信联系人清单并填进设置页。
+ * 顺带把勾选框绑上：勾=放行、取消=移出（都打 /api/wechat-contacts/allow）。
+ */
+async function loadWechatContacts() {
+  const box = $('#wx-contact-list');
+  if (!box) return;
+  try {
+    const data = await api('/api/wechat-contacts');
+    state.wechatContacts = data.contacts || [];
+  } catch (e) {
+    state.wechatContacts = [];
+    box.innerHTML = `<div class="hint">读取失败：${esc(e.message)}</div>`;
+    return;
+  }
+  // 只重画这一个容器，不动整页 —— 免得把用户在别的输入框里敲的内容冲掉
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderWechatContactsSection(state.config).trim();
+  const fresh = tmp.querySelector('#wx-contact-list');
+  if (fresh) box.innerHTML = fresh.innerHTML;
+  $$('.wx-contact-cb', box).forEach((cb) => {
+    cb.addEventListener('change', async () => {
+      const id = cb.dataset.id;
+      const kind = cb.dataset.kind;
+      const allow = cb.checked;
+      cb.disabled = true;
+      try {
+        await api('/api/wechat-contacts/allow', {
+          method: 'POST',
+          body: JSON.stringify({ id, kind, allow })
+        });
+      } catch (e) {
+        cb.checked = !allow;   // 失败要回滚勾选状态，否则界面与配置不一致
+        alert('保存失败：' + e.message);
+      } finally {
+        cb.disabled = false;
+      }
+      // 白名单改了 ⇒ 让"聊天白名单"那页与顶栏状态下次打开时是新的
+      try { state.config = await api('/api/config'); } catch { /* ignore */ }
+      loadWechatContacts();
+    });
+  });
 }
 
 function renderSettingsSection(c) {
@@ -4730,6 +4778,7 @@ function renderSettingsSection(c) {
     memory: () => renderMemorySettingsSection(c),
     persona: () => renderPersonaSection(c),
     allow: () => renderAllowSection(c),
+    wechat: () => renderWechatContactsSection(c),
     chat: () => renderChatSection(c),
     desktop: () => renderDesktopSection(c),
     onebot: () => renderOnebotSection(c)
@@ -5221,6 +5270,53 @@ function renderAllowSection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-allowallwhenempty" ${c.allowAllWhenEmpty === true ? 'checked' : ''} />
       <label for="cfg-allowallwhenempty">白名单留空时允许所有会话</label></div>
     <div class="hint">说明：勾选后，若上方两个列表都为空，机器人会在<b>所有</b>群聊和私聊中运行；只要填了任意一项，就只按名单过滤。</div>`;
+}
+
+/**
+ * 微信联系人（2026-09-20 第八对话新增）
+ *
+ * 为什么需要这一节：微信侧的会话 id 是桥**派生出来的数字**（实测某群友 = 1000000001），
+ * 而白名单装的就是这个数字；用户在微信里看到的是**昵称** ⇒
+ * 不放这个清单出来，想放行某人只能猜数字，而且配错了**没有任何报错**
+ * （消息就是静静地不回 —— 本项目最忌讳的那种静默失效）。
+ *
+ * 数据来源：/api/wechat-contacts（从**收到的微信消息**里学来的）。
+ * ⚠️ 第一次放行有"先有鸡还是先有蛋"：没放行 ⇒ 消息进不来 ⇒ 学不到 ⇒ 看不到。
+ *    界面必须把这句话说出来，否则用户会以为功能坏了。
+ */
+function renderWechatContactsSection(c) {
+  const list = state.wechatContacts;
+  const rows = (() => {
+    if (list === null || list === undefined) {
+      return '<div class="hint">正在读取…（如果一直这样，说明 /api/wechat-contacts 没通）</div>';
+    }
+    if (!list.length) {
+      return `<div class="hint">还没有学到任何微信联系人。<br>
+        <b>这是正常的"第一次"状态</b>：这些条目是从<b>收到的微信消息</b>里学来的，
+        而白名单没放行时消息不会进来 ⇒ 第一次放行需要：<b>让别人给这个小号发一条消息</b>
+        （那条消息会被挡下，但联系人会被记下来），然后回到这里勾选放行。</div>`;
+    }
+    return list.map((x) => `
+      <div class="checkbox-row" style="align-items:center">
+        <input type="checkbox" class="wx-contact-cb" data-id="${esc(x.id)}" data-kind="${esc(x.kind)}" ${x.allowed ? 'checked' : ''} />
+        <label style="flex:1">
+          ${esc(x.name || '(没拿到昵称)')}
+          <span class="muted">· ${x.kind === 'group' ? '群' : '私聊'} · <code>${esc(x.id)}</code>${x.count ? ` · 收到过 ${x.count} 条` : ''}</span>
+        </label>
+      </div>`).join('');
+  })();
+  return `
+    <h3 id="settings-wechat">微信联系人</h3>
+    <div class="hint" style="margin-bottom:10px">
+      勾选 = 放进白名单（与「聊天白名单」是<b>同一份</b>配置：私聊进 <code>allow.private</code>、群进 <code>allow.groups</code>）。
+      <br>这里显示的是<b>从收到的微信消息里学到</b>的 id 与昵称 —— 微信侧的会话 id 是桥派生的<b>数字</b>，
+      光看微信是看不到的，所以请在这里点选，别去手填。
+    </div>
+    <div class="field"><label>已知的微信联系人 / 群（勾选即放行）</label>
+      <div id="wx-contact-list" style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
+        ${rows}
+      </div></div>
+    <div class="hint">排障：微信通道通没通，看顶栏那个状态点（切到「微信」模式）。</div>`;
 }
 
 // 表情包积极程度档位：[值, 显示名]
