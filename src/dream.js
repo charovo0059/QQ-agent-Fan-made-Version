@@ -80,19 +80,31 @@ function pickEvenly(len, n) {
  *
  * 为什么：`onebot.js` 对图片只推一个 `media` 数组进存档，而正文里往往就是一个 `[图片]`。
  * 实测当天 **637 条带 media（17.2%）**，其中 image 614 / face 65。
- * 对"做梦"来说，"谁发了图、发了几张、是图还是表情"是有意义的信息，
- * 而一个光秃秃的 `[图片]` 把这些都丢了。
+ * 对"做梦"来说，"谁发了图、发了几张、是图还是表情"是有意义的信息。
+ *
+ * ⚠️ **只在能补充信息时才加**：正文里本来就有 `[图片]`/`[表情]` 占位符时，
+ *    再加一个 `[图片×1]` 就变成 `[图片×1] [图片]` —— 纯啰嗦，还占预算。
+ *    （实测第一版就是这样，43 行重复。）所以：
+ *      · 正文已声明该类型 → 不再重复声明；
+ *      · 只有"数量 > 1"这种正文表达不出来的信息，才额外补一个 `×N`。
  *
  * ⚠️ **刻意不带 url**：① 素材是给人看/给模型回想用的，url 又长又没用；
  *    ② 带 url 等于把 QQ 的临时下载链写进提示词与留档，没必要。
  */
-function mediaTag(media) {
+function mediaTag(media, text = '') {
   if (!Array.isArray(media) || !media.length) return '';
   const n = (k) => media.filter((x) => x && x.kind === k).length;
+  const t = String(text);
   const parts = [];
-  if (n('image')) parts.push(`图片×${n('image')}`);
-  if (n('face')) parts.push(`表情×${n('face')}`);
-  const other = media.length - n('image') - n('face');
+  const img = n('image'), face = n('face');
+  // 正文里已经有 [图片] 之类的占位符 ⇒ 类型已知，只在"不止一张"时补数量
+  const saidImg = /\[图片/.test(t);
+  const saidFace = /\[表情/.test(t);
+  if (img && !saidImg) parts.push(img > 1 ? `图片×${img}` : '图片');
+  else if (img > 1) parts.push(`图片×${img}`);
+  if (face && !saidFace) parts.push(face > 1 ? `表情×${face}` : '表情');
+  else if (face > 1) parts.push(`表情×${face}`);
+  const other = media.length - img - face;
   if (other > 0) parts.push(`其他×${other}`);
   return parts.length ? `[${parts.join(' ')}]` : '';
 }
@@ -280,7 +292,7 @@ export class Dreamer {
       const rows = [];
       for (const m of msgs) {
         const text = sanitize(m.text);
-        const tag = mediaTag(m.media);          // [图片×2 表情×1]；没媒体就是空串
+        const tag = mediaTag(m.media, text);    // 只在能补充信息时才加，见 mediaTag 注释
         if (!text && !tag) continue;
         const t = new Date(m.ts);
         rows.push({
