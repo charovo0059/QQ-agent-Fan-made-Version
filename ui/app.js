@@ -1687,9 +1687,45 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
       hintColor: box.querySelector('#sl-notify-hint')?.style?.color || ''
     };
 
-    box.innerHTML = `
-      <div class="snowluma-page-card">
-        <h2>SnowLuma（OneBot 网关）</h2>
+    // 🔴 2026-09-19 结构性修复（用户报"群发打字打一半经常被打断"）：
+    //    根因 —— `startListPoller()` 每 15 秒（`ui.refreshMs`）走 `loadSnowlumaPage({quiet:true})`，
+    //    而它**整页重建 `#snowluma-page` 的 innerHTML**；「自定义内容」那个 textarea 是死在里面的 DOM
+    //    ⇒ 元素被销毁重造。之前的 `keepNotify` 补偿有三个真漏洞：
+    //      ① **capture 发生在两个 `await` 之后** —— 你在拉 status/logs 那段时间里打的字还没进 textarea，
+    //         capture 到的是旧的，重建后 `t.value = keepNotify.text` **把它整段覆盖掉**
+    //         （症状就是"打一半突然没了"）；
+    //      ② **完全没管中文输入法组词** —— 拼音还在组字框里没上屏时元素被销毁，组字被打断/丢字；
+    //      ③ 只还原了 textarea，别的输入没管。
+    //    ⇒ **补丁式还原治不了根**（13 个输入点要逐个还原，而且永远有第 14 个）。
+    //      改成**结构上让它重建不到这一块**：群发那块单独放一个**常驻容器** `#sl-notify-block`，
+    //      页面重建时只重建 `#sl-dyn`（状态 + 按钮 + 日志），**输入元素根本不是新造的** ——
+    //      焦点、光标、输入法组词、拖出来的尺寸、选中的范围**全部天然保留**，不需要任何还原代码。
+    const notifyBlockHtml = `
+        <div class="snowluma-actions">
+          <span class="muted" style="font-size:12.5px">通知白名单：</span>
+          <select id="sl-notify-scope" class="btn btn-small" style="padding:2px 6px" title="发给谁：只群聊 / 只私聊 / 两者都发">
+            <option value="groups">只群聊</option>
+            <option value="privates">只私聊</option>
+            <option value="both">群聊 + 私聊</option>
+          </select>
+          <button class="btn btn-small" id="sl-notify-on-btn" title="按上面的范围，各发一条「开机」。建议在 SnowLuma 启动、OneBot 连上之后再点。">发「开机」</button>
+          <button class="btn btn-small" id="sl-notify-off-btn" title="按上面的范围，各发一条「关机」。建议在关闭 SnowLuma 之前点。">发「关机」</button>
+        </div>
+        <div class="snowluma-actions">
+          <span class="muted" style="font-size:12.5px">自定义内容：</span>
+          <div class="notify-composer">
+            <textarea id="sl-notify-text" rows="3" spellcheck="false"
+              placeholder="支持多行 —— 直接粘贴即可（Enter 换行，Ctrl+Enter 发送）。最多 200 字，右下角能拖大。"></textarea>
+            <div class="notify-actions">
+              <span id="sl-notify-count" class="muted">0 / 200</span>
+              <button class="btn btn-small" id="sl-notify-send-btn">发送</button>
+              <span id="sl-notify-hint" class="muted" style="font-size:12px"></span>
+            </div>
+          </div>
+        </div>`;
+
+    // 动态区（状态 + 三步指引 + 按钮 + 日志）—— **每轮重建**，里面全是只读展示，没有任何输入元素。
+    const dynHtml = () => `
         <div class="snowluma-state-row">
           <span class="dot ${running ? 'dot-on' : 'dot-off'}"></span>
           <span>SnowLuma：<strong>${running ? '运行中' : '未运行'}</strong></span>
@@ -1740,33 +1776,26 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
           <button class="btn btn-small" id="sl-open-folder-btn">打开文件夹</button>
           <span id="sl-hint" class="muted" style="font-size:12px"></span>
         </div>
-        <div class="snowluma-actions">
-          <span class="muted" style="font-size:12.5px">通知白名单：</span>
-          <select id="sl-notify-scope" class="btn btn-small" style="padding:2px 6px" title="发给谁：只群聊 / 只私聊 / 两者都发">
-            <option value="groups">只群聊</option>
-            <option value="privates">只私聊</option>
-            <option value="both">群聊 + 私聊</option>
-          </select>
-          <button class="btn btn-small" id="sl-notify-on-btn" title="按上面的范围，各发一条「开机」。建议在 SnowLuma 启动、OneBot 连上之后再点。">发「开机」</button>
-          <button class="btn btn-small" id="sl-notify-off-btn" title="按上面的范围，各发一条「关机」。建议在关闭 SnowLuma 之前点。">发「关机」</button>
-        </div>
-        <div class="snowluma-actions">
-          <span class="muted" style="font-size:12.5px">自定义内容：</span>
-          <div class="notify-composer">
-            <textarea id="sl-notify-text" rows="3" spellcheck="false"
-              placeholder="支持多行 —— 直接粘贴即可（Enter 换行，Ctrl+Enter 发送）。最多 200 字，右下角能拖大。"></textarea>
-            <div class="notify-actions">
-              <span id="sl-notify-count" class="muted">0 / 200</span>
-              <button class="btn btn-small" id="sl-notify-send-btn">发送</button>
-              <span id="sl-notify-hint" class="muted" style="font-size:12px"></span>
-            </div>
-          </div>
-        </div>
         <div>
           <div class="hint" style="margin-bottom:6px">运行日志（仅保留最近 500 行）</div>
           <pre class="snowluma-logs-view">${esc(logText)}</pre>
-        </div>
-      </div>`;
+        </div>`;
+
+    // ① 常驻容器已经在 ⇒ **只重建动态区**，输入元素一个都不动（这就是根治点）
+    if (box.querySelector('#sl-notify-block')) {
+      const dyn = box.querySelector('#sl-dyn');
+      const html = dynHtml();
+      if (dyn) dyn.innerHTML = html;
+      else box.innerHTML = `<div class="snowluma-page-card"><div id="sl-dyn">${html}</div><div id="sl-notify-block">${notifyBlockHtml}</div></div>`;
+      bindSnowlumaDynamic();
+      applySnowlumaInputs(keepNotify);
+      return;
+    }
+
+    // ② 首次渲染：常驻容器只搭这一次
+    box.innerHTML = `<div class="snowluma-page-card"><div id="sl-dyn">${dynHtml()}</div><div id="sl-notify-block">${notifyBlockHtml}</div></div>`;
+    bindSnowlumaDynamic();
+    applySnowlumaInputs(keepNotify);
 
     // 恢复日志滚动：贴底跟随新日志；否则回到原阅读位置；首次渲染贴底
     const newPre = box.querySelector('.snowluma-logs-view');
@@ -1792,79 +1821,125 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
       if (h) { h.textContent = keepNotify.hint; if (keepNotify.hintColor) h.style.color = keepNotify.hintColor; }
     }
 
-    $('#sl-start-btn').addEventListener('click', async () => {
-      const btn = $('#sl-start-btn');
-      btn.disabled = true; btn.textContent = '启动中…';
-      $('#sl-hint').textContent = '';
-      try {
-        const r = await api('/api/snowluma/launch', { method: 'POST', body: '{}' });
-        $('#sl-hint').textContent = r.alreadyRunning ? 'SnowLuma 已经在运行 ✓' : (r.ok ? '已启动，日志见下方。首次 QQ 登录需要几秒到几十秒。' : `启动失败：${r.error}`);
-      } catch (e) {
-        $('#sl-hint').textContent = `启动失败：${e.message}`;
-      }
-      setTimeout(() => loadSnowlumaPage({ quiet: true }), 2500);
-    });
-    $('#sl-stop-btn').addEventListener('click', async () => {
-      const btn = $('#sl-stop-btn');
-      btn.disabled = true; btn.textContent = '关闭中…';
-      $('#sl-hint').textContent = '';
-      try {
-        await api('/api/snowluma/stop', { method: 'POST', body: '{}' });
-        $('#sl-hint').textContent = '已请求关闭 SnowLuma。';
-      } catch (e) {
-        $('#sl-hint').textContent = `关闭失败：${e.message}`;
-      }
-      setTimeout(() => loadSnowlumaPage({ quiet: true }), 1500);
-    });
-    $('#sl-refresh-btn').addEventListener('click', () => loadSnowlumaPage());
-    // 给白名单里的会话群发（范围可选：群聊 / 私聊 / 两者）。开机、关机是快捷按钮，另有自定义文本。
-    for (const [btnId, text] of [['#sl-notify-on-btn', '开机'], ['#sl-notify-off-btn', '关机']]) {
-      $(btnId).addEventListener('click', () => broadcastSend(text, btnId));
-    }
-    // 自定义内容框的实时字数：接口硬上限 200 字，超了直接被 400 拦下，所以提前说清楚
-    const NOTIFY_MAX = 200;
-    const syncNotifyCount = () => {
-      const el = $('#sl-notify-text');
-      const c = $('#sl-notify-count');
-      if (!el || !c) return;
-      const n = el.value.length;
-      c.textContent = `${n} / ${NOTIFY_MAX}`;
-      c.classList.toggle('over', n > NOTIFY_MAX);
-      c.title = n > NOTIFY_MAX ? `超过 ${NOTIFY_MAX} 字，发不出去（接口上限）` : '';
-    };
-    $('#sl-notify-text').addEventListener('input', syncNotifyCount);
-    syncNotifyCount();   // 还原草稿之后也要刷一次
-    $('#sl-notify-send-btn').addEventListener('click', () => {
-      const input = $('#sl-notify-text');
-      const text = String(input?.value || '').trim();
-      const h = $('#sl-notify-hint');
-      const bad = (msg) => { if (h) { h.textContent = msg; h.style.color = 'var(--orange)'; } input?.focus(); };
-      if (!text) return bad('先写点内容');
-      // 超长必须自己拦：接口会 400，但这里的提示能说清"超了多少"
-      if (text.length > NOTIFY_MAX) return bad(`超长 ${text.length - NOTIFY_MAX} 字（上限 ${NOTIFY_MAX}）—— 删掉一些再发`);
-      broadcastSend(text, '#sl-notify-send-btn', { clearInput: true });
-    });
-    // ⚠️ 这里**不能**再让 Enter 直接发送：这是个多行输入框，Enter 是"换行"。
-    //    改成 Ctrl+Enter / Cmd+Enter 发送（并在 placeholder 里写明）。
-    $('#sl-notify-text').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $('#sl-notify-send-btn').click(); }
-    });
-    $('#sl-open-folder-btn').addEventListener('click', async () => {
-      try { await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); }
-      catch (e) { $('#sl-hint').textContent = `失败：${e.message}`; }
-    });
-    const webuiBtn = $('#sl-open-webui-btn');
-    if (webuiBtn) webuiBtn.addEventListener('click', async () => {
-      try {
-        const r = await api('/api/snowluma/open-webui', { method: 'POST', body: '{}' });
-        if (!r.ok) $('#sl-hint').textContent = r.error;
-      } catch (e) {
-        $('#sl-hint').textContent = `打开失败：${e.message}`;
-      }
-    });
   } catch (e) {
     if (!quiet) console.error(e);
   }
+}
+
+function bindSnowlumaDynamic() {
+  // 启动/关闭/刷新/打开文件夹/打开WebUI —— 这五个按钮住在 #sl-dyn 里，每次重建都会变成新元素，
+  // 所以每次重建后都必须重绑（用 ?. 兜底，防止某个按钮这一轮不存在时整页报错）。
+  $('#sl-start-btn')?.addEventListener('click', async () => {
+    const btn = $('#sl-start-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '启动中…'; }
+    if ($('#sl-hint')) $('#sl-hint').textContent = '';
+    try {
+      const r = await api('/api/snowluma/launch', { method: 'POST', body: '{}' });
+      if ($('#sl-hint')) $('#sl-hint').textContent = r.alreadyRunning ? 'SnowLuma 已经在运行 ✓' : (r.ok ? '已启动，日志见下方。首次 QQ 登录需要几秒到几十秒。' : `启动失败：${r.error}`);
+    } catch (e) {
+      if ($('#sl-hint')) $('#sl-hint').textContent = `启动失败：${e.message}`;
+    }
+    setTimeout(() => loadSnowlumaPage({ quiet: true }), 2500);
+  });
+  $('#sl-stop-btn')?.addEventListener('click', async () => {
+    const btn = $('#sl-stop-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '关闭中…'; }
+    if ($('#sl-hint')) $('#sl-hint').textContent = '';
+    try {
+      await api('/api/snowluma/stop', { method: 'POST', body: '{}' });
+      if ($('#sl-hint')) $('#sl-hint').textContent = '已请求关闭 SnowLuma。';
+    } catch (e) {
+      if ($('#sl-hint')) $('#sl-hint').textContent = `关闭失败：${e.message}`;
+    }
+    setTimeout(() => loadSnowlumaPage({ quiet: true }), 1500);
+  });
+  $('#sl-refresh-btn')?.addEventListener('click', () => loadSnowlumaPage());
+  $('#sl-open-folder-btn')?.addEventListener('click', async () => {
+    try { await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); }
+    catch (e) { if ($('#sl-hint')) $('#sl-hint').textContent = `失败：${e.message}`; }
+  });
+  $('#sl-open-webui-btn')?.addEventListener('click', async () => {
+    try {
+      const r = await api('/api/snowluma/open-webui', { method: 'POST', body: '{}' });
+      if (!r.ok && $('#sl-hint')) $('#sl-hint').textContent = r.error;
+    } catch (e) {
+      if ($('#sl-hint')) $('#sl-hint').textContent = `打开失败：${e.message}`;
+    }
+  });
+  bindNotifyBlockOnce();
+}
+
+const NOTIFY_MAX = 200;   // 接口硬上限；超了会被 400 拦下，所以前端提前说清楚
+let _notifyBound = false;
+
+// 群发的**常驻区**：只绑一次。第一版每 15 秒连元素一起重造、再重绑一次，
+// 结果把"打字打一半被打断"这类问题掩盖成了偶发现象。
+function bindNotifyBlockOnce() {
+  if (_notifyBound) return;
+  const ta = $('#sl-notify-text');
+  if (!ta || !$('#sl-notify-send-btn')) return;   // 结构还没搭好，等下一轮
+  _notifyBound = true;
+
+  // 给白名单里的会话群发（范围可选：群聊 / 私聊 / 两者）。开机、关机是快捷按钮，另有自定义文本。
+  for (const [btnId, text] of [['#sl-notify-on-btn', '开机'], ['#sl-notify-off-btn', '关机']]) {
+    $(btnId)?.addEventListener('click', () => broadcastSend(text, btnId));
+  }
+
+  const syncNotifyCount = () => {
+    const el = $('#sl-notify-text');
+    const c = $('#sl-notify-count');
+    if (!el || !c) return;
+    const n = el.value.length;
+    c.textContent = `${n} / ${NOTIFY_MAX}`;
+    c.classList.toggle('over', n > NOTIFY_MAX);
+    c.title = n > NOTIFY_MAX ? `超过 ${NOTIFY_MAX} 字，发不出去（接口上限）` : '';
+  };
+  ta.addEventListener('input', syncNotifyCount);
+  syncNotifyCount();
+
+  // 中文输入法：组词期间一律不响应 Enter。
+  // 否则选词/上屏的那个回车会被当成"发送"，把没写完的内容发出去（这也是"打字被打断"的一种）。
+  ta.addEventListener('compositionstart', () => { state._imeComposing = true; });
+  ta.addEventListener('compositionend', () => { state._imeComposing = false; });
+  // 多行输入框：Enter 换行，Ctrl/Cmd+Enter 才发送（placeholder 里已写明）
+  ta.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || e.isComposing || state._imeComposing) return;
+    e.preventDefault();
+    $('#sl-notify-send-btn')?.click();
+  });
+
+  $('#sl-notify-send-btn').addEventListener('click', () => {
+    const input = $('#sl-notify-text');
+    const text = String(input?.value || '').trim();
+    const h = $('#sl-notify-hint');
+    const bad = (msg) => { if (h) { h.textContent = msg; h.style.color = 'var(--orange)'; } input?.focus(); };
+    if (!text) return bad('先写点内容');
+    if (text.length > NOTIFY_MAX) return bad(`超长 ${text.length - NOTIFY_MAX} 字（上限 ${NOTIFY_MAX}）—— 删掉一些再发`);
+    broadcastSend(text, '#sl-notify-send-btn', { clearInput: true });
+  });
+}
+
+// 把草稿/尺寸/焦点/范围/hint 还原回**常驻**的输入元素。
+// ⚠️ 这个版本**不是"先备份再重造"**：输入元素根本不会被销毁，所以这里只在
+//    "首次渲染"或"被别处整页重建过"时才起作用。这正是能彻底修掉打断的原因。
+function applySnowlumaInputs(keep) {
+  if (!keep) return;
+  const t = $('#sl-notify-text');
+  if (t) {
+    if (keep.text && t.value !== keep.text) t.value = keep.text;
+    // 用户自己拖出来的宽高：还原，否则被打回默认尺寸
+    if (keep.w) t.style.width = keep.w;
+    if (keep.h) t.style.height = keep.h;
+    if (typeof keep.scrollTop === 'number' && keep.scrollTop > 0) t.scrollTop = keep.scrollTop;
+    if (keep.focused && document.activeElement !== t) {
+      t.focus();
+      try { t.setSelectionRange(keep.start ?? t.value.length, keep.end ?? t.value.length); } catch { /* 某些类型不支持 */ }
+    }
+  }
+  const sc = $('#sl-notify-scope');
+  if (sc && keep.scope) sc.value = keep.scope;
+  const h = $('#sl-notify-hint');
+  if (h && keep.hint) { h.textContent = keep.hint; if (keep.hintColor) h.style.color = keep.hintColor; }
 }
 
 /**
