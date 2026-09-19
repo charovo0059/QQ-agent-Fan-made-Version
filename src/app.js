@@ -20,6 +20,9 @@ import { Orchestrator } from './orchestrator.js';
 // 群禁言状态表（2026-09-19 第八对话）：机器人被群禁言时**停止起编排**，别白烧模型调用。
 // 背景与证据链见 src/mutes.js 顶部注释，以及 待办与决策记录.md §30。
 import { GroupMutes } from './mutes.js';
+// 微信联系人登记表（2026-09-20）：把桥派生的数字 id 与昵称对应起来，
+// 让白名单可以点选而不是手填数字。见该文件顶部注释（含"为什么必须有它"）。
+import { learnContact, listContacts } from './wechat-contacts.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { jmRequest, jmPaths, jmPing, stopJm } from './jm-bridge.js';
 import { createZip } from './zip.js';
@@ -710,7 +713,30 @@ export function createApp({ log = console.log } = {}) {
    */
   async function ingestMessage(kind, id, event, source = 'qq') {
     const cfgNow = getConfig();
-    if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
+
+    // 🔴 微信联系人"学习"必须在**白名单判定之前**。
+    //    为什么（踩过一次）：一开始我把它放在入库那一步（allowed 之后），
+    //    于是白名单没放行的对象**永远学不到** ⇒ 用户看不到"谁在找我" ⇒
+    //    白名单还是只能猜数字 —— 而那正是这张表存在的全部理由。
+    //    ⇒ 顺序必须是：先记下"谁在敲门"，再决定放不放行。
+    //    ⚠️ 它仍然**不参与放行判定**（判定只看 config.allow），所以不存在"学一下就被放进来"。
+    if (source === 'wechat') {
+      try {
+        const sId = String(event?.sender?.user_id ?? event?.user_id ?? '');
+        const sName = String(event?.sender?.card || event?.sender?.nickname || '');
+        if (kind === 'private') {
+          learnContact('private', id, sName);
+        } else {
+          // 群聊：会话对象是群、发言人是另一个人 ⇒ **两个都记**
+          learnContact('group', id, event?.group_name || '');
+          if (sId) learnContact('private', sId, sName);
+        }
+      } catch (e) {
+        log('[wechat-contacts] 记录失败（不影响消息处理）：' + (e?.message ?? e));
+      }
+    }
+
+    if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天不记录、不触发会话
 
     const segments = Array.isArray(event.message) ? event.message : null;
     const senderId = String(event.sender?.user_id ?? event.user_id ?? '');
@@ -1311,6 +1337,55 @@ export function createApp({ log = console.log } = {}) {
       if (pathname === '/api/ports' && method === 'GET') {
         try {
           return json(res, 200, { ok: true, ...(await probePorts()) });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
+      // ── 微信联系人（2026-09-20）───────────────────────────────────────
+      // 为什么需要这个接口：微信会话 id 是桥**派生出来的数字**（实测某群友 = 1000000001），
+      // 而白名单装的就是这个数字；用户在微信里看到的是昵称 ⇒ 不放这个清单出来，
+      // 用户想放行某人只能**猜数字**，配错了也没有任何报错（最典型的静默失效）。
+      if (pathname === '/api/wechat-contacts' && method === 'GET') {
+        let list = [];
+        try { list = listContacts({}); } catch (e) { log('[wechat-contacts] 读取失败：' + (e?.message ?? e)); }
+        const cfgNow = getConfig();
+        const allowedPrivate = (cfgNow.allow?.private || []).map(String);
+        const allowedGroup = (cfgNow.allow?.groups || cfgNow.allow?.group || []).map(String);
+        return json(res, 200, {
+          ok: true,
+          contacts: list.map((c) => ({
+            ...c,
+            // 直接告诉前端"这条放行了没" —— 免得前端自己再拼一次白名单逻辑、日后走岔
+            allowed: c.kind === 'group' ? allowedGroup.includes(String(c.id)) : allowedPrivate.includes(String(c.id))
+          })),
+          count: list.length,
+          allowed: { private: allowedPrivate, groups: allowedGroup },
+          note: '这些是从**收到的微信消息**里学到的。没收到过消息的对象不会出现在这里 —— '
+            + '而白名单没放行的话消息进不来 ⇒ 第一次放行需要先发一条消息进来（或手填 id）。'
+        });
+      }
+
+      // 一键把某个微信联系人加进白名单（或移出）。
+      // 只动 allow.private / allow.groups 这两处 —— 白名单的判定逻辑一行都不改。
+      if (pathname === '/api/wechat-contacts/allow' && method === 'POST') {
+        try {
+          const body = await readBody(req);
+          const id = String(body?.id ?? '').trim();
+          const kind = body?.kind === 'group' ? 'group' : 'private';
+          const allow = body?.allow !== false;   // 默认是"加进去"
+          if (!id) return json(res, 400, { ok: false, error: '需要 id' });
+          if (!/^[\w.-]+$/.test(id)) return json(res, 400, { ok: false, error: 'id 形态可疑（只允许字母数字下划线点横线）' });
+
+          const c = getConfig();
+          const cur = { ...(c.allow || {}) };
+          const key = kind === 'group' ? 'groups' : 'private';
+          const arr = new Set((cur[key] || []).map(String));
+          if (allow) arr.add(id); else arr.delete(id);
+          cur[key] = [...arr];
+          updateConfig({ allow: cur });
+          log(`[wechat-contacts] ${allow ? '放行' : '取消放行'} ${kind} ${id}`);
+          return json(res, 200, { ok: true, kind, id, allow, list: cur[key] });
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
         }
