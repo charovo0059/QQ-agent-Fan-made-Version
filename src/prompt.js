@@ -522,8 +522,52 @@ export function buildTriggerBlock(triggerEntries, ctx) {
 }
 
 /**
+ * 统计"我自己最近开口爱用什么词"。
+ *
+ * 为什么需要这个（2026-09-19，实测数据驱动）：
+ *   统计 449 个会话 / 731 条真实发言，**38.2% 以接话词开头**，其中
+ *   「唔…」×119 + 「诶…」×62 + 「呜…」×45 —— 两种开头就占 24.8%。
+ *   人设卡里**没有**这些词（personas.js 搜"唔/诶/呜/口头禅"零命中）⇒ 不是被教的。
+ *
+ * 机制假设（自增强）：历史里每一条「唔…」开头的助手发言，都成了下一轮的示范 ——
+ *   模型从自己的旧输出里学自己的口癖。所以要治的不是采样参数，是**打断这个循环**：
+ *   把它自己的高频开口词摆到它面前，要求换一个。
+ *   依据：jiwen GUIDE 记录 —— 小模型对"具体反例"的响应远强于抽象规则。
+ *
+ * ⚠️ 与 WrenWen 那个"客服腔"案例的区别：我们**没有**四步骨架病
+ *   （实测确认 0.8% / 0.4% / 0% / 0.1%），字数中位只有 11 字 —— 所以不要动 temperature。
+ *
+ * 返回 { dominant: [[词, 次数], ...] }，没有明显习惯时返回空数组（此时不注入任何提示）。
+ */
+export function recentSelfOpeners(selfMessages, { scan = 24, minCount = 3, maxReport = 3 } = {}) {
+  const picked = [];
+  if (!selfMessages || typeof selfMessages[Symbol.iterator] !== 'function') return { dominant: [] };
+  for (const m of selfMessages) {
+    if (!m || !m.self) continue;
+    // 用与历史行完全相同的口径，保证"看到的"和"统计的"是同一份文本
+    const line = formatEntry(m, { withId: false });
+    const text = String(line || '').replace(/^\[[^\]]*\]\s*/, '').replace(/^我[:：]\s*/, '');
+    // 引用前缀（[引用 谁：...]）去掉 —— 真正决定"看起来像不像开口"的是它后面那句
+    const body = text.replace(/^\[引用[^\]]*\]\s*/, '').trim();
+    if (!body || /^\[(表情|图片|视频|语音|文件|合并转发)/.test(body)) continue;
+    const head = body.slice(0, 2).replace(/[\s，,。.！!？?~～…·、；;：:"'“”‘’()（）]/g, '');
+    if (head) picked.push(head);
+    if (picked.length >= scan) break;
+  }
+  if (picked.length < minCount) return { dominant: [] };
+  const counts = new Map();
+  for (const p of picked) counts.set(p, (counts.get(p) || 0) + 1);
+  const dominant = [...counts.entries()]
+    .filter(([, n]) => n >= minCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, maxReport);
+  return { dominant };
+}
+
+/**
  * 组装一次运行的用户消息（不携带任何 LLM 对话历史）。
- * ctx: { chatKey, kind, chatId, chatName, triggerEntries, trigger, selfLastMessageAt, selfNickname }
+ * ctx: { chatKey, kind, chatId, chatName, triggerEntries, trigger, selfLastMessageAt, selfNickname,
+ *        recentSelfMessages }
  */
 export function buildUserPrompt(ctx) {
   const cfg = getConfig();
@@ -582,7 +626,18 @@ export function buildUserPrompt(ctx) {
   for (const m of (past?.messages || [])) {
     if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
   }
-  const memText = ctx.memory.formatForPrompt(ctx.chatKey, { userIds: [...relevantUserIds] });
+  // 门槛制召回（2026-09-19）：把"这一轮在聊什么"作为查询传进去，
+  // 让 memory 按相关度打分、过线才进（低于门槛宁可零条）。
+  // 依据：调研报告 M4b —— 原来是配额制（每人最近 3 条），会"凑数"：
+  //   不相关的印象被硬塞进上下文充场面。WrenWen 的原话：
+  //   "一道绝对相关度门槛，过线才进，低于门槛宁可零条"（"错的不如空着"）。
+  const queryText = [...sameTurn, ...(ctx.triggerEntries || [])]
+    .map((m) => String(m?.text ?? '')).filter(Boolean).join('\n').slice(0, 600);
+  const memText = ctx.memory.formatForPrompt(ctx.chatKey, {
+    userIds: [...relevantUserIds],
+    queryText,
+    now
+  });
   const memBlock = memText ? `【记忆】\n${memText}` : '';
 
   // ④ 此刻状态（档位/活跃度，每次运行都可能不同）
@@ -611,6 +666,22 @@ export function buildUserPrompt(ctx) {
   if (swept && Number(swept.count) > 0) {
     const agoMin = Math.max(0, Math.round((now - (Number(swept.lastTs) || now)) / 60000));
     stateLines.push(`（提醒）你不在的这段时间里有 ${Number(swept.count)} 条消息没有单独叫醒你，已经并进上方的聊天记录（最后一条 ${agoMin === 0 ? '刚刚' : `${agoMin} 分钟前`}）。你当时不在场，看到什么想接就接，不接也正常。`);
+  }
+  // 开场多样性：把"我自己最近开口爱用什么词"摆给它看，要求换一个。
+  //
+  // 为什么放在【此刻状态】而不是【角色设定】或系统提示：
+  //   ① 这一段本来就每次都变，加一行不影响上面那些稳定块的缓存顺序（见本段开头说明）；
+  //   ② 它是"这一轮的事实"，不是"你这个人的设定"——写进人设卡会变成永久约束，
+  //      而口癖是随聊天变化的，不该固化。
+  //
+  // ⚠️ 刻意**不禁止**这些词：人设本来就是软萌口吻，"唔/诶"本身不算错。
+  //   要治的是"每次都用它"这一个点，所以措辞是"换个开头"而不是"不许说"。
+  //   措辞过强有两个已知反效果（WrenWen 实证）：① 会变成 few-shot 范例，越禁越像；
+  //   ② 角色会变得畏缩。所以这里只报"最高频的少数几个"，且用正向引导收尾。
+  const openerStat = recentSelfOpeners(ctx.recentSelfMessages);
+  if (openerStat.dominant.length) {
+    const list = openerStat.dominant.map(([w, n]) => `「${w}」×${n}`).join('、');
+    stateLines.push(`（换个开头）你最近开口总是先用这几个词：${list}。这次换一个开头 —— 直接从你要说的那件事、那个反应说起。`);
   }
   const stateBlock = `【此刻状态】\n${stateLines.join('\n')}`;
 

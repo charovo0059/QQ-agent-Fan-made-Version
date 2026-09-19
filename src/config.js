@@ -213,12 +213,33 @@ export const DEFAULT_CONFIG = {
     hardSplitAt: 4000       // QQ 硬限制切分（0 = 不限制）
   },
   // 主动开话题（可选）
+  //
+  // ⚠️ 2026-09-19 加了三道闸（调研报告 M2 / §10）：
+  //   原来只有 enabled / 两个间隔 / idleThreshold / probability ——
+  //   **没有安静时段、没有连发上限** ⇒ 凌晨 3 点也可能主动开口；没人搭理也会一直开口。
+  //   对标 lingxi 的注释记着真实事故："没有这个上限的话，用户静默 24 小时、冷却 3 小时
+  //   = 8 条主动消息 —— 像跟踪狂。"
+  //
+  // ⚠️ 默认值刻意保守：改的是"多话"那一侧，不是"沉默"那一侧。
+  //    宁可少说，也不要做出一个半夜吵人、或追着人说话的东西。
   proactive: {
     enabled: false,
     checkIntervalMinMs: 1800000,
     checkIntervalMaxMs: 5400000,
     idleThresholdMs: 1800000,   // 群里静默多久才算"冷场"
-    probability: 0.25
+    probability: 0.25,
+    // ① 安静时段：这段时间内绝不主动开口（默认 23 点 → 次日 8 点）。
+    //    跨零点由 start > end 表达，见 orchestrator 的 #quietHours()。
+    quietHoursStart: 23,
+    quietHoursEnd: 8,
+    // ② 连发上限：连续主动开口这么多条、对方一条都没回 ⇒ 收手，老实等对方先说话。
+    //    ⚠️ "开口"不等于"被回应"：只有对方真的回话才清零（在 store.appendIncoming 里清）。
+    maxConsecutive: 2,
+    // ③ 退避：被晾久了允许"再戳一次"，但之后每多一条没回应，等待就翻倍，且有上限。
+    //    14h → 28h → 2.3天 → 4.7天 …… 封顶 14 天（像"淡了的朋友"，不是定时器）。
+    reengageAfterHours: 14,
+    reengageBackoff: 2,
+    reengageMaxHours: 336
   },
   // 表情包
   sticker: {
