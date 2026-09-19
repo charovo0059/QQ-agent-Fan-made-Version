@@ -26,7 +26,7 @@ import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from './price-feed.j
 import { startTelemetryLoop } from './telemetry.js';
 // Skills 基础设施（上游 0.3.1）：启动时扫 skills/ 与 plugins/ 两个目录。
 // 位置锚点用的是本文件自己的路径（plugin-loader.js 里 APP_ROOT = src/..），不是 cwd。
-import { loadPlugins } from './plugin-loader.js';
+import { loadPlugins, watchPlugins } from './plugin-loader.js';
 import { skillManager } from './skills/manager.js';
 // 技能/插件管理页（2026-09-19 第七对话）用：开关唯一入口与"已配置但未安装"的枚举。
 import { setSkillEnabled, setSkillConfig, listConfiguredSkillIds } from './skills/config.js';
@@ -412,6 +412,9 @@ export function createApp({ log = console.log } = {}) {
   // 空闲「梦」：夜里没人说话时把当天的事整理成一条笔记。
   // 只读 —— 那次模型调用一个工具都不给（见 src/dream.js 开头）。
   const dreamer = new Dreamer({ store, sessions, emit });
+  // 扩展目录的热重载监视器（watchPlugins 的返回值，只有 close() 有用）。
+  // 2026-09-19 用户批准开启，见 core.start() 里那段注释。
+  let skillWatcher = null;
 
   // 远程价格表：启动即初始化（内部幂等；URL 为空则完全不动）
   initPriceFeed(cfg.api?.priceRemoteUrl || '');
@@ -1423,12 +1426,40 @@ export function createApp({ log = console.log } = {}) {
           skills,
           summary: { ...skillManager.summary(), uninstalledCount: uninstalled.length },
           capabilities: skillManager.capabilities.list().sort(),
-          uninstalled
+          uninstalled,
+          // 热重载开关（config.skills.hotReload，默认 on）：页面要显示它，
+          // 因为它决定"放了新扩展要不要手动点刷新"。
+          hotReload: getConfig()?.skills?.hotReload !== false
         };
       };
 
       if (pathname === '/api/skills' && method === 'GET') {
         return json(res, 200, skillStatusPayload());
+      }
+
+      // 热重载开关。⚠️ 必须动手**重建** watcher，而不是只改配置 ——
+      // 配置只在 core.start() 里读一次，光改它要重启才生效，那就等于这个按钮没用。
+      if (pathname === '/api/skills/hotreload' && method === 'POST') {
+        const body = await readBody(req).catch(() => ({}));
+        const want = body?.enabled !== false;   // 缺省打开
+        updateConfig({ skills: { hotReload: want } });
+        // 重开前先关掉旧的，否则会有两个 watcher 同时看着同一批目录（重复加载）
+        try { skillWatcher?.close?.(); } catch { /* 旧 watcher 可能已经死了 */ }
+        skillWatcher = null;
+        if (want) {
+          skillWatcher = watchPlugins({
+            log,
+            onReload: () => {
+              orchestrator.toolDefs = buildToolDefs();
+              log(`[skill] 热重载后工具集已刷新：${orchestrator.toolDefs.length} 个工具`);
+            }
+          });
+          log('[skill] 热重载已打开（放进 skills/ 或 plugins/ 的 .js 会被自动执行）');
+        } else {
+          log('[skill] 热重载已关闭 —— 新增扩展请点技能页的「刷新」');
+        }
+        emit('status', { configUpdated: true });
+        return json(res, 200, { ok: true, ...skillStatusPayload() });
       }
 
       // 手动重扫磁盘：技能页「刷新」按钮的后端动作。
@@ -2810,8 +2841,14 @@ export function createApp({ log = console.log } = {}) {
     //   所以必须"先加载技能、再重建 toolDefs"，否则开关打开了工具却不在列表里。
     //   Orchestrator 构造时那次 buildToolDefs() 抓不到技能工具，这里重赋一次即可
     //   （orchestrator.js 一行都不用改）。
-    // 不做热重载（watchPlugins）：那等于"放进目录的 JS 会被自动执行"，是行为变化，
-    // 用户没批；要热重载再说。
+    // 热重载（watchPlugins）：**2026-09-19 用户明确批准开启**（默认 on，可用
+    // config.skills.hotReload=false 关掉）。
+    // ⚠️ 这条是真行为变化，别当成普通的便利功能看：**放进 skills/ 或 plugins/ 的任何 .js
+    //   都会被自动 import 执行**。所以：
+    //   ① 只监听这两个目录（watchPlugins 内部就是），不监听 UI / 源码目录；
+    //   ② 带 500ms 防抖 + 重入保护（一次 reload 期间又变化会补跑一轮）；
+    //   ③ 重载后必须刷新 orchestrator.toolDefs —— 否则"技能装上了但模型看不到它的工具"。
+    // 用户当初没批、第七对话问过之后才批的，改动前请先读这段。
     try {
       const pluginResult = await loadPlugins({ log });
       log(`[skill] 已加载 ${pluginResult.loaded.length} 个 Skill`
@@ -2824,6 +2861,17 @@ export function createApp({ log = console.log } = {}) {
       }
       orchestrator.toolDefs = buildToolDefs();
       log(`[skill] 工具集已刷新：${orchestrator.toolDefs.length} 个工具`);
+      if (getConfig().skills?.hotReload !== false) {
+        skillWatcher = watchPlugins({
+          log,
+          onReload: () => {
+            orchestrator.toolDefs = buildToolDefs();
+            log(`[skill] 热重载后工具集已刷新：${orchestrator.toolDefs.length} 个工具`);
+          }
+        });
+      } else {
+        log('[skill] 热重载已关闭（config.skills.hotReload=false）—— 新增扩展请点技能页的「刷新」');
+      }
     } catch (error) {
       log('[skill] 加载失败:', error?.message ?? error);
     }
@@ -2858,8 +2906,7 @@ export function createApp({ log = console.log } = {}) {
     log(`控制台已就绪：http://127.0.0.1:${port}`);
     log(`OneBot（SnowLuma）: ws=${getConfig().snowluma?.wsUrl} http=${getConfig().snowluma?.httpUrl}`);
     log(`模型: ${getConfig().api.model || '（未设置，请在设置里选择）'} @ ${getConfig().api.baseUrl}`);
-    return port;
-  }
+    return port;  }
 
   async function stop() {
     await orchestrator.abortAll();

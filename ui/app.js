@@ -475,6 +475,7 @@ function switchTab(name) {
 if (!state.skills) state.skills = [];
 if (!state.skillsSummary) state.skillsSummary = {};
 if (!state.uninstalledSkills) state.uninstalledSkills = [];
+if (state.skillsHotReload === undefined) state.skillsHotReload = true;
 
 /**
  * 拉取列表（不含磁盘重扫）。**失败时保持原值**，不要覆盖成空数组 ——
@@ -486,6 +487,7 @@ async function loadSkillsStatus() {
     state.skills = data.skills || [];
     state.skillsSummary = data.summary || {};
     state.uninstalledSkills = data.uninstalled || [];
+    state.skillsHotReload = data.hotReload !== false;
   } catch (e) {
     console.warn('[skill] 拉取技能列表失败：', e?.message || e);
   }
@@ -537,6 +539,20 @@ function skillCardHtml(s) {
   const loadedOk = !!s.loaded;
   const stateText = !loadedOk ? '加载失败' : (!s.enabled ? '已关闭' : (s.active ? '生效中' : '依赖未就绪'));
   const badge = !loadedOk ? 'status-error' : (!s.enabled ? 'status-noreply' : (s.active ? 'status-done' : 'status-waiting'));
+  // 后端给的错误码（src/skills/errors.js 的 SKILL_ERROR）翻成人话。
+  // 为什么要多显示这一行：徽章只说"依赖未就绪"，而"我该去开开关"和"我该去装个东西"
+  // 是两件完全不同的事 —— 后端已经把 code 给了，前端不显示就等于让用户猜。
+  const CODE_TEXT = {
+    'skill-not-found': '这个扩展不在目录里',
+    'skill-not-loaded': '扩展加载失败',
+    'skill-disabled': '被开关关掉了',
+    'skill-unavailable': '依赖不满足（缺 Key / 缺可执行文件 / 模型不支持）',
+    'skill-timeout': '扩展执行超时（已跳过，防止卡死整轮对话）',
+    'capability-missing': '缺少它需要的能力'
+  };
+  const codeText = (!s.active && s.code && CODE_TEXT[s.code]) ? CODE_TEXT[s.code] : '';
+  const codeHtml = codeText
+    ? `<div class="hint" style="color:var(--muted)">原因：${esc(codeText)} <code>${esc(s.code)}</code></div>` : '';
   // 加载失败的原因必须亮出来 —— 否则用户看到的是"它不存在"
   const loadErr = (!loadedOk && s.loadError)
     ? `<div class="hint" style="color:var(--red)">加载失败：${esc(s.loadError)}</div>` : '';
@@ -546,12 +562,26 @@ function skillCardHtml(s) {
   const reason = (!s.active && s.reason)
     ? `<div class="hint" style="color:${s.loaded && s.enabled ? 'var(--orange)' : 'var(--muted)'}">${esc(s.reason)}</div>` : '';
   const err = s.lastError ? `<div class="hint" style="color:var(--red)">上次出错：${esc(s.lastError)}</div>` : '';
+  // ── 声明 vs 实现在代码里的对账（后端 status() 特意把两个都给了）──
+  // 两类静默故障，光看"已启用"永远发现不了：
+  //   · 声明了但没实现 → 别人按能力名来取，拿到空数组，功能悄悄失效
+  //   · 实现了但没声明 → 用户看不出它提供什么，也可能被别人重复实现
+  const declared = s.capabilities || [];
+  const impl = s.implementedCapabilities || [];
+  const notImpl = declared.filter((c) => !impl.includes(c));
+  const notDecl = impl.filter((c) => !declared.includes(c));
+  const capWarn = (notImpl.length || notDecl.length)
+    ? `<div class="hint" style="color:var(--orange)">⚠️ 能力对账不一致：${
+        notImpl.length ? `声明了但代码里没实现 —— ${esc(notImpl.join('、'))}` : ''
+      }${notImpl.length && notDecl.length ? '；' : ''}${
+        notDecl.length ? `实现了但没声明 —— ${esc(notDecl.join('、'))}` : ''
+      }</div>` : '';
   // ⚠️ 开关另有真实去处时（本子查询用 config.doujinLookup.enabled），必须写在卡片上 ——
   //    否则用户会以为这个勾选框就是那个功能的开关，关不掉时无从查起。
   const ovNote = s.enabledOverride
     ? `<div class="hint" style="color:var(--muted)">开关位置：<code>${esc(s.enabledOverride.label)}</code>（这个功能不用 config.skills，用上面那个键；本页的勾选框写的就是它）</div>` : '';
-  const caps = (s.capabilities || []).length
-    ? `<div class="tool-meta">${s.capabilities.map((x) => `<span class="tool-dep">${esc(x)}</span>`).join('')}</div>` : '';
+  const caps = declared.length
+    ? `<div class="tool-meta">${declared.map((x) => `<span class="tool-dep">${esc(x)}</span>`).join('')}</div>` : '';
   // 只有声明了设置项的条目才给按钮，否则一排"设置"点开是空的，纯噪音
   const allFields = Object.keys(s.configSchema || {});
   const renderable = allFields.filter((k) => s.configSchema[k]?.type !== 'internal');
@@ -583,7 +613,7 @@ function skillCardHtml(s) {
       ${(s.hooks || []).length ? `<span class="tool-dep">${s.hooks.length} 个钩子</span>` : ''}
       ${settingsBtn ? `<span style="margin-left:auto">${settingsBtn}</span>` : ''}
     </div>
-    ${caps}${missing}${reason}${loadErr}${err}${ovNote}
+    ${caps}${missing}${codeHtml}${capWarn}${reason}${loadErr}${err}${ovNote}
   </div>`;
 }
 
@@ -631,18 +661,24 @@ function renderSkillsPage() {
 
   const total = all.length;
   const activeAll = all.filter((s) => s.active).length;
+  // 热重载状态（config.skills.hotReload，默认 on）。显示出来是因为它决定了
+  // "放了新扩展要不要手动点刷新"—— 这是用户最需要知道的一件事，不该藏在配置里。
+  const hot = state.skillsHotReload !== false;
   const html = `<div class="usage-wrap">
     <div class="usage-head">
       <h2>技能 / 插件</h2>
       <div class="usage-days">
         <span class="uc-tag" title="生效中 / 全部条目">${activeAll} / ${total} 生效</span>
+        <span class="uc-tag" title="${hot ? '放进 skills/ 或 plugins/ 的扩展会被自动加载（约 0.5 秒后生效）' : '新扩展要手动点「刷新」才会加载'}">热重载：${hot ? '开' : '关'}</span>
+        <button class="btn btn-small" id="skills-hotreload-btn" title="切换热重载（放进目录的 .js 会被自动执行，这是它的代价）">${hot ? '关掉热重载' : '打开热重载'}</button>
         <button class="btn btn-small" id="skills-refresh-btn" title="重新扫描 skills/ 与 plugins/ 目录">刷新</button>
       </div>
     </div>
     <div class="hint" style="margin-bottom:14px">
       <b>开关只有这一处</b> —— 关闭后它注册的工具、提供的能力、提示词片段会<b>同时</b>失效。
       状态徽章与"为什么没生效"的说明都由后端判定，界面不自己猜。<br />
-      放新扩展：在 <code>skills/&lt;id&gt;/</code> 或 <code>plugins/&lt;id&gt;/</code> 放清单与入口文件，然后点「刷新」。
+      放新扩展：在 <code>skills/&lt;id&gt;/</code> 或 <code>plugins/&lt;id&gt;/</code> 放清单与入口文件${hot ? '，约 0.5 秒后自动加载' : '，然后点「刷新」'}。<br />
+      ⚠️ 热重载开着时，<b>放进这两个目录的任何 <code>.js</code> 都会被自动执行</b> —— 别把不信任的代码丢进去。
     </div>
     ${sectionOf(SKILL_KINDS.skill)}
     ${sectionOf(SKILL_KINDS.plugin)}
@@ -659,6 +695,20 @@ function bindSkillsPageEvents() {
     if (btn) { btn.disabled = true; btn.textContent = '重扫中…'; }
     await rescanSkills();
     renderSkillsPage();   // 重绘会重建按钮，不必再手动恢复文案
+  });
+  $('#skills-hotreload-btn')?.addEventListener('click', async () => {
+    const want = state.skillsHotReload === false;   // 当前关着 → 点它就是打开
+    const btn = $('#skills-hotreload-btn');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api('/api/skills/hotreload', { method: 'POST', body: JSON.stringify({ enabled: want }) });
+      state.skills = r.skills || state.skills;
+      state.skillsHotReload = r.hotReload !== false;
+      renderSkillsPage();
+    } catch (e) {
+      alert(`切换热重载失败：${e.message}`);
+      if (btn) btn.disabled = false;
+    }
   });
   $$('#skills-page .skill-toggle').forEach((cb) => {
     cb.addEventListener('change', () => toggleSkill(cb.dataset.skillId, cb.checked));
