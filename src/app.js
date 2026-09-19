@@ -1402,6 +1402,12 @@ export function createApp({ log = console.log } = {}) {
       const ENABLED_BY_PATH = {
         'doujin-lookup': { path: ['doujinLookup', 'enabled'], label: 'config.doujinLookup.enabled' }
       };
+      // `config.skills` 下的**保留键**：它们是扩展系统的全局设置，不是某个扩展的 id。
+      // ⚠️ 2026-09-19 第七对话踩到并修：加了 `hotReload` 之后，它被"已配置但未安装"的逻辑
+      //    当成一个"装过又删掉的扩展"，页面上真的显示成「已配置但未安装（1）· hotReload」；
+      //    更糟的是 `/api/skills/cleanup` 会把它**删掉**（它不在注册表里 ⇒ 判定为可清理）。
+      //    ⇒ 以后**每加一个扩展全局开关，都要同步加进这个集合**。
+      const RESERVED_SKILL_KEYS = new Set(['hotReload']);
       const readByPath = (obj, p) => p.reduce((o, k) => (o == null ? undefined : o[k]), obj);
       const enabledSwitchOf = (id, st) => {
         const ov = ENABLED_BY_PATH[id];
@@ -1417,7 +1423,7 @@ export function createApp({ log = console.log } = {}) {
         });
         const installedIds = new Set(skills.map((s) => s.id));
         const uninstalled = listConfiguredSkillIds()
-          .filter((id) => !installedIds.has(id))
+          .filter((id) => !installedIds.has(id) && !RESERVED_SKILL_KEYS.has(id))
           .map((id) => {
             const c = getConfig()?.skills?.[id] || {};
             return { id, enabled: c.enabled !== false, hasSettings: Object.keys(c).some((k) => k !== 'enabled') };
@@ -1491,8 +1497,10 @@ export function createApp({ log = console.log } = {}) {
         const ids = Array.isArray(body?.ids) ? body.ids.map(String).filter(Boolean) : [];
         if (!ids.length) return json(res, 400, { ok: false, error: '缺少 ids' });
         const installed = new Set(skillManager.list().map((s) => s.id));
-        const removable = ids.filter((id) => !installed.has(id));
-        if (!removable.length) return json(res, 400, { ok: false, error: '没有可清理的条目（都处于已安装状态）' });
+        // ⚠️ 保留键（hotReload 等全局设置）**永远不可清理** —— 它们不在注册表里，
+        //    照"未安装即可清理"的规则会被误删（踩过一次，见 RESERVED_SKILL_KEYS 的注释）。
+        const removable = ids.filter((id) => !installed.has(id) && !RESERVED_SKILL_KEYS.has(id));
+        if (!removable.length) return json(res, 400, { ok: false, error: '没有可清理的条目（都处于已安装状态，或属于全局设置）' });
         const next = { ...(getConfig()?.skills || {}) };
         for (const id of removable) delete next[id];
         // deepMerge 传 {} 删不掉已有键，必须用 __replace__ 整体替换
