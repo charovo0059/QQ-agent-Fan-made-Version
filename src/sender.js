@@ -13,10 +13,14 @@ const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
 const DEFAULT_MAX_PER_HOUR = DEFAULT_CONFIG.send.maxPerHour;
 
 export class SendQueue {
-  constructor({ onebot, store, onSent = null }) {
+  constructor({ onebot, store, onSent = null, onSendError = null }) {
     this.onebot = onebot;
     this.store = store;
     this.onSent = onSent;
+    // 发送失败的回调（2026-09-19 第八对话新增）。
+    // 用途：认群禁言 —— QQ 拒绝群发言时只回报 `result=120`，这是**不依赖任何事件转发**的兜底信号。
+    // 见 src/mutes.js 顶部注释与 待办与决策记录.md §30。
+    this.onSendError = onSendError;
     this.chains = new Map();      // chatKey -> enqueue fn
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
@@ -106,7 +110,12 @@ export class SendQueue {
       if (r.status === 'fulfilled') sent.push(r.value);
       // 带上 index 和原文：调用方需要知道"哪一条"失败了（才能重发或告知模型）。
       // 原先 failed 里只有 error，没有任何定位信息。
-      else failed.push({ index: i, text: parts[i], error: String(r.reason?.message ?? r.reason) });
+      else {
+        const errText = String(r.reason?.message ?? r.reason);
+        failed.push({ index: i, text: parts[i], error: errText });
+        // 通知上层（认群禁言用；回调自身出错不能影响发送结果）
+        try { this.onSendError?.({ chatKey, text: parts[i], error: errText }); } catch { /* ignore */ }
+      }
     }
     // 部分成功也要让调用方知道：原先只在"全败"时抛错，部分成功会静默丢消息
     if (failed.length > 0) {

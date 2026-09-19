@@ -17,6 +17,9 @@ import { StickerManager } from './sticker-manager.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
 import { Orchestrator } from './orchestrator.js';
+// 群禁言状态表（2026-09-19 第八对话）：机器人被群禁言时**停止起编排**，别白烧模型调用。
+// 背景与证据链见 src/mutes.js 顶部注释，以及 待办与决策记录.md §30。
+import { GroupMutes } from './mutes.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { jmRequest, jmPaths, jmPing, stopJm } from './jm-bridge.js';
 import { createZip } from './zip.js';
@@ -447,11 +450,28 @@ export function createApp({ log = console.log } = {}) {
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
   const stickers = new StickerManager(onebot);
+  // 群禁言状态（见 src/mutes.js）。三条来源都会往里写：
+  //   · notice/group_ban 事件（见 handleOneBotEvent）
+  //   · 发送被 QQ 拒 result=120（见 sender.onSendError 那条线）
+  //   · get_group_member_info 的 shut_up_timestamp（事件到达时顺手查一次权威值）
+  const mutes = new GroupMutes();
+  // 收到过哪几种 notice（`notice_type/sub_type` -> 次数）。
+  // 用途：回答"某种事件到底有没有转发给我们"—— 这次踩的坑正是"禁言事件有没有转发，事前不知道"。
+  // 只留计数不留正文，且只增不删，够用且不占地方。
+  const noticeSeen = new Map();
   const sender = new SendQueue({
     onebot, store,
-    onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`)
+    onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
+    // 发送被拒 ⇒ 若像是"群发言被拒"，先按禁言记下来（兜底，不依赖任何事件转发）
+    onSendError: ({ chatKey, error }) => {
+      if (!String(chatKey).startsWith('group:')) return;
+      if (mutes.recordFromSendError(chatKey, error)) {
+        log(`[禁言] ${chatKey} 发送被拒，按禁言处理：${mutes.describe(chatKey)}`);
+        refreshMuteFromOneBot(chatKey).catch(() => {});
+      }
+    }
   });
-  const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit });
+  const orchestrator = new Orchestrator({ store, memory, stickers, sender, sessions, onebot, emit, mutes });
   // 空闲「梦」：夜里没人说话时把当天的事整理成一条笔记。
   // 只读 —— 那次模型调用一个工具都不给（见 src/dream.js 开头）。
   const dreamer = new Dreamer({ store, sessions, emit });
@@ -762,6 +782,74 @@ export function createApp({ log = console.log } = {}) {
     orchestrator.onIncoming(`${isGroup ? 'group' : 'private'}:${id}`);
   }
 
+  /**
+   * 查一次"我们在某个群到底被禁言到什么时候"（权威值）。
+   * 用 OneBot 的 get_group_member_info → `shut_up_timestamp`（**秒**；0 = 没被禁言）。
+   *
+   * 为什么要有这条：禁言事件**可能根本没被转发给我们**（不同 OneBot 实现转发面不同），
+   * 所以不能把"识别禁言"全押在事件上。发送被拒（result=120）是可靠的兜底信号，
+   * 但它只告诉我们"被拒了"，不知道**解禁时刻** —— 这一步负责把粗粒度换成精确值：
+   * 这样在禁言期满时能自然恢复，而不是靠一个猜的冷却时间。
+   */
+  async function refreshMuteFromOneBot(chatKey) {
+    const m = /^group:(\d+)$/.exec(String(chatKey || ''));
+    if (!m) return { ok: false, error: '只支持群会话' };
+    const groupId = Number(m[1]);
+    const selfId = Number(onebot.selfId || getConfig()?.onebot?.selfId || 0);
+    if (!selfId) return { ok: false, error: '还不知道机器人自己的 QQ 号（OneBot 未连接？）' };
+    const info = await withTimeout(
+      onebot.call('get_group_member_info', { group_id: groupId, user_id: selfId, no_cache: true }),
+      5000,
+      'get_group_member_info 超时'
+    );
+    const muted = mutes.recordFromMemberInfo(chatKey, info);
+    return { ok: true, muted, shutUpTimestamp: Number(info?.shut_up_timestamp ?? 0) || 0 };
+  }
+
+  /** 给可能挂住的 OneBot 查询加个上限 —— 事件处理路径上不能无限等。 */
+  function withTimeout(promise, ms, message) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(message)), ms);
+      promise.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); }
+      );
+    });
+  }
+
+  /**
+   * 处理群禁言类 notice（OneBot v11 的 notice/group_ban 及其变体）。
+   *
+   * 🔴 判据的核心在 GroupMutes.parseBanNotice 里，要点是**不能靠 sub_type 区分**
+   *    "整群禁言"和"某人被禁言"（实测两者 sub_type 都是 'ban'），要看**有没有 user_id**。
+   *    实测那次群里一批人各被禁言 86400 秒 —— 判据写松就会平白冻住一个本来正常的群。
+   */
+  function ingestBanNotice(event) {
+    const parsed = GroupMutes.parseBanNotice(event, onebot.selfId || getConfig()?.onebot?.selfId || '');
+    // 别人被禁言：与我们能不能说话无关，**特意不记**（记了就是误伤）
+    if (!parsed) return false;
+
+    if (parsed.lifting) {
+      mutes.clear(parsed.chatKey);
+      log(`[禁言] ${parsed.chatKey} 禁言已解除，恢复处理`);
+      emit('mutes-update', { chatKey: parsed.chatKey, muted: false });
+      // 解禁后把积压的消息补处理掉（禁言期间消息照样落 store，只是没叫醒）
+      try { orchestrator.onIncoming(parsed.chatKey); } catch { /* ignore */ }
+      return true;
+    }
+
+    mutes.record(parsed.chatKey, parsed.untilMs, 'event');
+    log(`[禁言] ${parsed.chatKey} 检测到禁言：${mutes.describe(parsed.chatKey)}`
+      + ` —— 解禁前不再为这个群起编排（省掉注定发不出去的模型调用）`);
+    emit('mutes-update', { chatKey: parsed.chatKey, muted: true });
+    // 顺手查一次权威值，把"事件给的 duration"换成 OneBot 的 shut_up_timestamp。
+    // 两者正常一致；不一致时以查询为准（失败就算了，事件那份已经够用）。
+    refreshMuteFromOneBot(parsed.chatKey)
+      .then((r) => { if (r?.ok && r.muted) log(`[禁言] ${parsed.chatKey} 权威解禁时刻：${mutes.describe(parsed.chatKey)}`); })
+      .catch(() => {});
+    return true;
+  }
+
   async function handleOneBotEvent(event) {
     if (!event || typeof event !== 'object') return;
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
@@ -774,7 +862,16 @@ export function createApp({ log = console.log } = {}) {
     if (event.post_type === 'notice' && event.notice_type === 'notify' && event.sub_type === 'poke') {
       return ingestPoke(event);
     }
-    // meta/心跳等事件忽略
+    // ⚠️ 所有 notice 都先计数，**再**分流 —— 否则最想知道的"禁言事件到底有没有转发给我们"
+    //    恰好会被分流吃掉、在 noticeSeen 里看不到（第一版就是这么写的，等于白记）。
+    if (event.post_type === 'notice') {
+      const key = `${event.notice_type ?? '?'}/${event.sub_type ?? '-'}`;
+      noticeSeen.set(key, (noticeSeen.get(key) || 0) + 1);
+    }
+    // 群禁言：让机器人"知道自己开不了口"，见 src/mutes.js
+    if (event.post_type === 'notice' && ingestBanNotice(event)) return;
+    // 其它 notice 忽略（计数已经记过）。
+    // meta/心跳等事件同样忽略。
   }
 
   // ── HTTP API ──
@@ -1160,6 +1257,40 @@ export function createApp({ log = console.log } = {}) {
       if (pathname === '/api/ports' && method === 'GET') {
         try {
           return json(res, 200, { ok: true, ...(await probePorts()) });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
+      // 群禁言状态（2026-09-19 第八对话新增）。
+      // 单独一个接口的理由与 /api/ports 相同：它是**按需查看**的排障信息，
+      // 而 /api/status 是每 15 秒轮询的热路径。
+      //
+      // 为什么必须能查到：禁言的表现是"这个群突然一句话都不说"，
+      // 而它在本项目里**长得像"刻意保留的漏发（人味）"** ⇒ 不看这个接口根本分辨不出来。
+      if (pathname === '/api/mutes' && method === 'GET') {
+        const list = mutes.list();
+        return json(res, 200, {
+          ok: true,
+          mutes: list,
+          count: list.length,
+          lastBlocked: mutes.lastBlocked,
+          // 实测过的 notice 种类，用来回答"禁言事件到底有没有转发给我们"
+          noticeSeen: [...noticeSeen.entries()].map(([kind, count]) => ({ kind, count })),
+          // 主动查一次权威值：能让用户当场确认"到底解禁没有"，不用等下一个事件
+          hint: '禁言期间该群**仍会收消息**（不丢），只是不再起编排 —— 因为发言注定失败，而起一轮就是一次完整的模型调用。',
+          note: '若某个群一直不说话，先看这里：禁言会让它"听得见、说不出"，而现象与"刻意漏发"一模一样。'
+        });
+      }
+
+      // 手动刷新某个群的禁言状态（排障用；解禁后不必等事件，直接确认一次）
+      if (pathname === '/api/mutes/refresh' && method === 'POST') {
+        try {
+          const body = await readBody(req);
+          const chatKey = String(body?.chatKey || '');
+          if (!chatKey) return json(res, 400, { ok: false, error: '需要 chatKey，例如 group:1098345913' });
+          const r = await refreshMuteFromOneBot(chatKey);
+          return json(res, r.ok ? 200 : 400, { ok: !!r.ok, ...r, describe: mutes.describe(chatKey) });
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
         }
@@ -3035,7 +3166,7 @@ export function createApp({ log = console.log } = {}) {
     try { stopJm(); } catch { /* ignore */ }
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, probePorts };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, probePorts, mutes, handleOneBotEvent };
 }
 
 /**
