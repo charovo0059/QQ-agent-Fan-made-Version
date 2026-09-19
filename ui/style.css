@@ -2161,3 +2161,117 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
   white-space: pre-wrap; word-break: break-word;
   line-height: 1.75; font-size: 13.5px; color: var(--text);
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   技能 / 插件管理页（2026-09-19 第七对话新增）
+   布局照上游 0.3.1 的技能页，但颜色一律用**我们自己的 token** ——
+   上游那套 --layer-1/--layer-2/--on-accent/--lift-sm/--paper-edge/--inset-edge
+   我们没有（我们是自改版 + 换了皮肤），直接抄会得到"变量未定义 = 样式静默失效"。
+   ══════════════════════════════════════════════════════════════════════ */
+.tool-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* 空组提示：不能沿用全局 .empty-hint 的"整页空状态"体量。
+   ⚠️ 2026-09-19 实测踩到：全局 .empty-hint 是 display:flex + min-height:240px + padding:60px 20px，
+   那是为**整页没有内容**设计的；技能页里有两个组（技能/插件），插件组为空时就变成
+   330px 高的一大块空白 + 一个虚线方框图标。**看代码完全正常，是截图才看出来的。**
+   ⇒ 这里把它降级成一行安静的提示。 */
+#skills-page .empty-hint {
+  display: block;
+  min-height: 0;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+  max-width: 720px;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+}
+#skills-page .empty-hint::before { display: none; }
+
+/* 卡片：启用=绿左边条，关闭=红左边条，依赖/加载失败=灰虚线 */
+.tool-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left-width: 2px;
+  border-radius: 7px;
+  padding: 8px 10px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--dur-base) var(--ease-in-out), background var(--dur-base) var(--ease-in-out), opacity var(--dur-base) var(--ease-in-out);
+}
+.tool-card.enabled { border-left-color: var(--green); }
+.tool-card.disabled { border-left-color: var(--red); opacity: 0.75; }
+.tool-card.dep-disabled { opacity: 0.5; border-left-style: dashed; }
+
+.tool-header { display: flex; align-items: center; gap: 8px; }
+.tool-title { flex: 1; min-width: 0; }
+
+.skill-card__name { font-size: 13px; font-weight: 600; display: flex; align-items: baseline; gap: 6px; }
+.skill-card__ver { font-size: 10.5px; color: var(--faint); font-weight: 400; }
+.skill-card__desc { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.6; }
+
+/* 方块勾选框：未开=空框，开=绿底✓，关=红底✕ */
+.tool-checkbox-square { position: relative; width: 20px; height: 20px; flex-shrink: 0; }
+.tool-checkbox-square input { opacity: 0; width: 0; height: 0; position: absolute; }
+.tool-checkbox-box {
+  display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px;
+  border: 2px solid var(--border);
+  border-radius: 5px;
+  font-size: 13px; font-weight: bold;
+  cursor: pointer;
+  background: var(--bg-3);
+  color: var(--muted);
+  transition: all var(--dur-base) var(--ease-in-out);
+}
+.tool-card.enabled .tool-checkbox-box { border-color: var(--green); background: var(--green); color: #fff; }
+.tool-card.disabled .tool-checkbox-box { border-color: var(--red); background: var(--red); color: #fff; }
+.tool-checkbox-square input:disabled + .tool-checkbox-box { opacity: 0.5; cursor: not-allowed; }
+
+.tool-meta { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.tool-dep {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  background: var(--bg-3); color: var(--muted);
+}
+.tool-dep-warn { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--red); color: #fff; }
+
+/* 技能设置弹窗：字段按 manifest 的 configSchema 渲染，两列自适应 */
+.skill-modal {
+  width: min(720px, 92vw); max-height: 86vh; display: flex; flex-direction: column;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.skill-modal__head {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+}
+.skill-modal__titles { flex: 1; min-width: 0; }
+.skill-modal__name { font-size: 15px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+.skill-modal__ver { font-size: 11px; color: var(--faint); font-weight: 400; }
+.skill-modal__id { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 2px; }
+.skill-modal__desc { font-size: 12.5px; color: var(--muted); margin-top: 6px; line-height: 1.7; }
+.skill-modal__body { padding: 14px 16px; overflow: auto; }
+.skill-modal__note { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.skill-modal__note code { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.skill-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.skill-form .field { min-width: 0; margin: 0; }
+.skill-form .field--wide { grid-column: 1 / -1; }
+.skill-form input, .skill-form select, .skill-form textarea { width: 100%; box-sizing: border-box; }
+.skill-toggle-row {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-3);
+}
+.skill-toggle-row input { width: auto; margin: 0; flex-shrink: 0; }
+.skill-toggle-row .st-text { font-size: 12.5px; color: var(--muted); }
+.skill-toggle-row input:checked + .st-text { color: var(--green); font-weight: 600; }
+.skill-modal__internal {
+  margin-top: 14px; padding: 10px 12px; border: 1px dashed var(--border);
+  border-radius: 8px; background: var(--bg-3);
+}
+.skill-modal__internal-head { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+.skill-modal__internal-item { font-size: 11.5px; color: var(--muted); line-height: 1.7; margin-top: 4px; }
+.skill-modal__internal-item b { color: var(--text); font-weight: 600; }
+.skill-modal__foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; border-top: 1px solid var(--border);
+}
+.skill-modal__foot .spacer { flex: 1; }
+.skill-modal__foot-tip { font-size: 11.5px; color: var(--faint); }

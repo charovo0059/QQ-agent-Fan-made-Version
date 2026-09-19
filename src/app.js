@@ -28,6 +28,8 @@ import { startTelemetryLoop } from './telemetry.js';
 // 位置锚点用的是本文件自己的路径（plugin-loader.js 里 APP_ROOT = src/..），不是 cwd。
 import { loadPlugins } from './plugin-loader.js';
 import { skillManager } from './skills/manager.js';
+// 技能/插件管理页（2026-09-19 第七对话）用：开关唯一入口与"已配置但未安装"的枚举。
+import { setSkillEnabled, setSkillConfig, listConfiguredSkillIds } from './skills/config.js';
 import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
@@ -1379,6 +1381,150 @@ export function createApp({ log = console.log } = {}) {
         const next = (getConfig().customPersonas || []).filter((_, i) => i !== idx);
         updateConfig({ customPersonas: next });
         return json(res, 200, { ok: true });
+      }
+
+      // ── 技能 / 插件管理页（2026-09-19 第七对话新增）─────────────────────
+      // 为什么要有这一页：装了 send-forward 之后发现**没有任何界面能开关扩展**，
+      // 只能手改 config.json，而那条路有个静默坑（改了会被内存态覆盖回去）。
+      // 设计照抄上游 0.3.1 的技能页（我们只回移了 skills 基础设施，界面没跟着回移）。
+      //
+      // ⚠️ 开关的权威来源是 `config.skills[id].enabled`（skills/manager.js 写明的唯一开关），
+      //   但**有一个明知的例外**：`doujin-lookup` 继续用 `config.doujinLookup.enabled` 当开关
+      //   （2026-09-18 用户拍板，理由见 skills/doujin-lookup/index.js 文件头）。
+      //   那个技能靠 skill.json 的 `enabledByDefault: true` 绕过上游 isEnabled 短路，
+      //   真正判定在它自己的 available() 里 —— 所以**通用开关对它无效**：
+      //   页面若照通用逻辑渲染，关闭本子查询后它仍会显示"开"，点了也没反应。
+      //   ⇒ 用下面的 ENABLED_BY_PATH 声明式地覆盖，读和写都走真实的那个键，
+      //     避免出现"两套口径"或"写一个不起作用的影子开关"。
+      const ENABLED_BY_PATH = {
+        'doujin-lookup': { path: ['doujinLookup', 'enabled'], label: 'config.doujinLookup.enabled' }
+      };
+      const readByPath = (obj, p) => p.reduce((o, k) => (o == null ? undefined : o[k]), obj);
+      const enabledSwitchOf = (id, st) => {
+        const ov = ENABLED_BY_PATH[id];
+        if (!ov) return { enabled: !!st.enabled, override: null };
+        const raw = readByPath(getConfig(), ov.path);
+        return { enabled: raw === true, override: { path: ov.path.join('.'), label: ov.label } };
+      };
+      const skillStatusPayload = () => {
+        const list = skillManager.list();
+        const skills = list.map((st) => {
+          const sw = enabledSwitchOf(st.id, st);
+          return { ...st, enabled: sw.enabled, enabledOverride: sw.override };
+        });
+        const installedIds = new Set(skills.map((s) => s.id));
+        const uninstalled = listConfiguredSkillIds()
+          .filter((id) => !installedIds.has(id))
+          .map((id) => {
+            const c = getConfig()?.skills?.[id] || {};
+            return { id, enabled: c.enabled !== false, hasSettings: Object.keys(c).some((k) => k !== 'enabled') };
+          });
+        return {
+          skills,
+          summary: { ...skillManager.summary(), uninstalledCount: uninstalled.length },
+          capabilities: skillManager.capabilities.list().sort(),
+          uninstalled
+        };
+      };
+
+      if (pathname === '/api/skills' && method === 'GET') {
+        return json(res, 200, skillStatusPayload());
+      }
+
+      // 手动重扫磁盘：技能页「刷新」按钮的后端动作。
+      // loadPlugins 本身幂等（重扫 + 覆盖同 id + 清孤儿工具），所以这里只是包一层日志与刷新工具集。
+      if (pathname === '/api/skills/reload' && method === 'POST') {
+        try {
+          const result = await loadPlugins({ log });
+          orchestrator.toolDefs = buildToolDefs();
+          log(`[skill] 手动重扫：成功 ${result.loaded.length}、失败 ${result.failed.length}`
+            + (result.pruned.length ? `、卸载 ${result.pruned.length}` : '')
+            + `；工具集 ${orchestrator.toolDefs.length} 个`);
+          return json(res, 200, {
+            ok: true,
+            loaded: result.loaded.map((r) => r.id),
+            failed: result.failed.map((r) => ({ id: r.id, error: r.error })),
+            pruned: result.pruned,
+            toolCount: orchestrator.toolDefs.length,
+            ...skillStatusPayload()
+          });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: `重扫失败：${String(error?.message ?? error)}` });
+        }
+      }
+
+      // 清理"已配置但未安装"的残留配置段（删掉目录后 config.skills.<id> 还留着）。
+      // 只删传入的 id，且要求它**当前确实不在注册表里**，防止误删正在运行的技能配置。
+      if (pathname === '/api/skills/cleanup' && method === 'POST') {
+        const body = await readBody(req).catch(() => ({}));
+        const ids = Array.isArray(body?.ids) ? body.ids.map(String).filter(Boolean) : [];
+        if (!ids.length) return json(res, 400, { ok: false, error: '缺少 ids' });
+        const installed = new Set(skillManager.list().map((s) => s.id));
+        const removable = ids.filter((id) => !installed.has(id));
+        if (!removable.length) return json(res, 400, { ok: false, error: '没有可清理的条目（都处于已安装状态）' });
+        const next = { ...(getConfig()?.skills || {}) };
+        for (const id of removable) delete next[id];
+        // deepMerge 传 {} 删不掉已有键，必须用 __replace__ 整体替换
+        updateConfig({ skills: { __replace__: next } });
+        emit('status', { configUpdated: true });
+        return json(res, 200, { ok: true, removed: removable, skipped: ids.filter((id) => installed.has(id)), ...skillStatusPayload() });
+      }
+
+      // 单个技能：切开关 / 改设置。两个动作分开处理，避免"改了设置顺手把我开着的关了"。
+      const skillItemMatch = /^\/api\/skills\/([^/]+)$/.exec(pathname);
+      if (skillItemMatch && method === 'POST') {
+        const id = decodeURIComponent(skillItemMatch[1]);
+        const body = await readBody(req).catch(() => ({}));
+        const skill = skillManager.registry.get(id);
+        if (!skill) return json(res, 404, { ok: false, error: `技能不存在：${id}` });
+
+        // 1) 开关：先写配置、再跑生命周期 —— 顺序不能反，
+        //    activate 里读配置时必须是已生效的值，否则技能会以为自己是关着的。
+        if (body.enabled !== undefined) {
+          const ov = ENABLED_BY_PATH[id];
+          if (ov) {
+            // 走真实开关（本子查询那条例外），**不写 config.skills 影子开关**
+            const cfg = getConfig();
+            const path2 = ov.path.slice(0, -1);
+            const leaf = ov.path[ov.path.length - 1];
+            const parent = path2.length ? { ...(readByPath(cfg, path2) || {}) } : null;
+            if (parent) updateConfig({ [path2[0]]: { ...parent, [leaf]: !!body.enabled } });
+            else updateConfig({ [leaf]: !!body.enabled });
+          } else {
+            setSkillEnabled(id, !!body.enabled);
+          }
+          if (body.enabled) skillManager.activate(id);
+          else skillManager.deactivate(id);
+        }
+
+        // 2) 设置：只允许改 manifest 声明过的键，防止前端塞垃圾字段进配置
+        if (body.settings && typeof body.settings === 'object') {
+          const allowed = new Set([
+            ...Object.keys(skill.manifest.settings || {}),
+            ...Object.keys(skill.manifest.configSchema || {})
+          ]);
+          const schema = skill.manifest.configSchema || {};
+          const patch = {};
+          for (const [k, v] of Object.entries(body.settings)) {
+            if (!allowed.has(k)) continue;
+            // 密文字段：收到脱敏占位符或空串 = "不修改"。
+            // 不这么做的话，用户只是打开表单点了保存，Cookie/Key 就被覆盖成 '******'。
+            if (schema[k]?.secret && (v === '******' || String(v ?? '').trim() === '')) continue;
+            patch[k] = v;
+          }
+          if (Object.keys(patch).length) setSkillConfig(id, patch);
+        }
+
+        // 开关可能让工具集变化（模型看到的 function 列表），必须重算一次
+        orchestrator.toolDefs = buildToolDefs();
+        emit('status', { configUpdated: true });
+        const st = skillStatusPayload().skills.find((s) => s.id === id) || null;
+        return json(res, 200, {
+          ok: true,
+          skill: st,
+          settings: skillManager.settingsOf(id),
+          toolCount: orchestrator.toolDefs.length
+        });
       }
 
       // ── 多提供商模型目录 ──

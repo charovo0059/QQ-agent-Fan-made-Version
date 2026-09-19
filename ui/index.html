@@ -58,6 +58,7 @@
     <button class="tab" data-tab="dreams" id="tab-dreams">笔记</button>
     <button class="tab" data-tab="stickers" id="tab-stickers">表情包</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
+    <button class="tab" data-tab="skills" id="tab-skills">技能</button>
     <button class="tab" data-tab="snowluma" data-page-node-id="xFOx4aoCGOuX8g3AXNrBPj">SnowLuma</button>
     <button class="tab" data-tab="settings" data-page-node-id="4cXbRBtGmcpcL272eKvHPV">设置</button>
     <!-- 社区功能（右侧）：金句上传 / 意见收集。金句勾选模式下「确认金句」出现在最左 -->
@@ -127,6 +128,14 @@
     <!-- 用量视图 -->
     <section id="view-usage" class="view" data-page-node-id="At5AHGr3EpuOFlDyc7dES4">
       <div id="usage-page" class="usage-pane" data-page-node-id="1AXcokyh5yiXqQgwn6X2gu"></div>
+    </section>
+
+    <!-- 技能 / 插件管理页（2026-09-19 第七对话新增）
+         为什么放一个页签：装了扩展之后没有任何界面能开关它（原先只能改 config.json）。
+         技能（LLM 型，模型决定用不用）与插件（确定性型，核心代码必调）分两页 ——
+         两型的区别正是使用者最关心的一件事，混在一页里既看不出类型也数不清各有多少。 -->
+    <section id="view-skills" class="view">
+      <div id="skills-page" class="usage-pane"></div>
     </section>
 
     <!-- 设置视图 -->
