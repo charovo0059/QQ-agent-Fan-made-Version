@@ -177,6 +177,22 @@ export const DEFAULT_CONFIG = {
     accessToken: '',           // WebSocket 令牌
     httpAccessToken: ''        // HTTP API 令牌（SnowLuma 可与 WS 不同；留空沿用 accessToken）
   },
+  // 微信接入（2026-09-20 第八对话加）—— 走"中继"这条 OneBot v11 通道。
+  //
+  // 链路（详见 工具-中继/README.md 与 事件映射实测结论.md）：
+  //   微信 ⇄ WeFlow(读) + AstrWeChat Bridge(读+UIA 发送) ──反向 WS──→ 中继 ──→ 本应用
+  // 本应用只是**再连一个 OneBot 客户端**到中继：WS 收事件、HTTP 调 API。
+  // 为什么能这么接：Bridge 推的就是标准 OneBot v11（实测事件形状见上面那份文档），
+  //   所以事件顺着现成的 handleOneBotEvent 流进同一套 store / 编排器，不用改架构。
+  //
+  // ⚠️ 默认关闭。开启前必须先把中继与 Bridge 跑起来，否则会不断重连（有退避，无害但刷日志）。
+  wechat: {
+    enabled: false,                        // 总开关
+    wsUrl: 'ws://127.0.0.1:11230/ws',      // 中继给 agent 的事件口
+    httpUrl: 'http://127.0.0.1:11230',     // 中继给 agent 的 API 口
+    accessToken: '',                       // 中继不校验（本机回环）；留作将来收紧
+    autoLaunchRelay: false                 // 是否由本应用拉起中继（暂未实现，留位）
+  },
   // 人设与行为
   persona: {
     botName: '小鲸鱼',

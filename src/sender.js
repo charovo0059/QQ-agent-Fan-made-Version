@@ -13,7 +13,16 @@ const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
 const DEFAULT_MAX_PER_HOUR = DEFAULT_CONFIG.send.maxPerHour;
 
 export class SendQueue {
-  constructor({ onebot, store, onSent = null, onSendError = null }) {
+  /**
+   * @param registry 可选：按平台登记更多客户端，`{ bySource: { wechat: onebotClient } }`。
+   *   为什么需要（2026-09-20 接入微信）：同一个控制台要同时管两个平台，
+   *   而**发到哪个平台不能靠 chatKey 猜** —— 实测微信侧由桥派生的是**数字 id**
+   *   （某群友 = 1000000001），形态与 QQ 号无法区分。
+   *   ⇒ 由 `sourceOf(chatKey)`（store 记的来源）决定用哪个客户端。
+   *   ⚠️ 不传 registry 时行为与以前**逐字节一致**（一律走 this.onebot）——
+   *      这是为了不让 QQ 侧受这次改动影响。
+   */
+  constructor({ onebot, store, onSent = null, onSendError = null, registry = null, sourceOf = null }) {
     this.onebot = onebot;
     this.store = store;
     this.onSent = onSent;
@@ -21,9 +30,26 @@ export class SendQueue {
     // 用途：认群禁言 —— QQ 拒绝群发言时只回报 `result=120`，这是**不依赖任何事件转发**的兜底信号。
     // 见 src/mutes.js 顶部注释与 待办与决策记录.md §30。
     this.onSendError = onSendError;
+    /** 平台客户端登记表：source -> OneBotClient */
+    this.registry = registry && registry.bySource ? registry.bySource : {};
+    /** 取某个会话属于哪个平台；由上层注入（通常就是 store.chatSource）。 */
+    this.sourceOf = typeof sourceOf === 'function' ? sourceOf : null;
     this.chains = new Map();      // chatKey -> enqueue fn
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
+  }
+
+  /**
+   * 选出发送用的客户端。
+   * 只有"登记了该平台"且"这个会话确实属于该平台"时才换；
+   * 其它情况一律回落到默认客户端 ⇒ 未接入微信时行为不变。
+   */
+  clientFor(chatKey) {
+    try {
+      const src = this.sourceOf ? this.sourceOf(chatKey) : null;
+      if (src && this.registry[src]) return this.registry[src];
+    } catch { /* 取来源失败就用默认，不让发送因此失败 */ }
+    return this.onebot;
   }
 
   #chain(chatKey) {
@@ -83,6 +109,19 @@ export class SendQueue {
     if (!parts.length) throw new Error('消息内容为空');
 
     const chain = this.#chain(chatKey);
+    // 按会话来源选客户端（不传 registry 时就是 this.onebot，行为不变）
+    const client = this.clientFor(chatKey);
+    // 多平台之后"发错平台"是最难查的一类错（两边都报成功、对方却没收到）。
+    // 默认只在**真的换了平台**时记一行；想看每次选择就把 send.verboseRoute 打开。
+    // ⚠️ 不要改成无条件 console.log：发送是热路径，QQ 侧每次发消息都会走到这里。
+    const routeLog = getConfig().send?.verboseRoute === true;
+    const viaDefault = client === this.onebot;
+    if (routeLog || !viaDefault) {
+      let src = '(未配来源)';
+      try { src = this.sourceOf ? this.sourceOf(chatKey) : src } catch { src = '(取来源出错)' }
+      console.log(`[sender] ${chatKey} → 发往平台 ${viaDefault ? 'default' : src}`
+        + `（${viaDefault ? '默认客户端' : 'registry 命中'}，http=${client?.httpUrl || '?'}）`);
+    }
     const promises = [];
     for (let i = 0; i < parts.length; i++) {
       const text = parts[i];
@@ -91,7 +130,7 @@ export class SendQueue {
       promises.push(chain(async () => {
         this.#checkRate(chatKey);
         if (gap > 0) await sleep(gap);
-        const data = await this.onebot.sendText(kind, id, text, {
+        const data = await client.sendText(kind, id, text, {
           replyToMessageId: i === 0 ? options.replyToMessageId : null, // 引用挂在第一条上：回的就是那条
           atUserId: i === 0 ? options.atUserId : null
         });
