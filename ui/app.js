@@ -476,6 +476,9 @@ if (!state.skills) state.skills = [];
 if (!state.skillsSummary) state.skillsSummary = {};
 if (!state.uninstalledSkills) state.uninstalledSkills = [];
 if (state.skillsHotReload === undefined) state.skillsHotReload = true;
+// 待审提案（记忆页顶部那块）。取不到时保持原值，别清空成"没有提案"的假象。
+if (!Array.isArray(state.proposals)) state.proposals = [];
+if (!state.proposalCounts) state.proposalCounts = {};
 
 /**
  * 拉取列表（不含磁盘重扫）。**失败时保持原值**，不要覆盖成空数组 ——
@@ -2680,6 +2683,93 @@ function openUsageBreakdown(dim, key) {
 }
 
 // ── 记忆视图 ──
+/**
+ * 待审提案区（渲染进「记忆」页顶部）。
+ *
+ * 设计边界：**只展示与打标记，不执行**。理由见 src/proposals.js 顶部（注入通道 + 无审核点）。
+ * 位置选在记忆页顶部而不是新开页签：提案里最多的就是"想改记忆方式"，
+ * 放在记忆旁边最容易被看到；也不必再写一个页面的骨架。
+ */
+function renderProposalReview() {
+  const box = $('#proposal-review');
+  if (!box) return;
+  const items = state.proposals || [];
+  const counts = state.proposalCounts || {};
+  const pending = counts.pending ?? items.length;
+
+  if (!items.length) {
+    box.innerHTML = `<div class="proposal-head">
+      <span class="proposal-title">改进提案</span>
+      <span class="uc-tag">暂无待审</span>
+    </div>
+    <div class="hint" style="margin-bottom:10px">她可以在聊天里用 <code>submit_proposal</code> 提议改自己（记忆/人设/功能/底层都行）。
+      提议只会出现在这里，<b>不会自动生效</b> —— 由你看过之后决定怎么做。</div>`;
+    return;
+  }
+
+  const kindCls = { memory: 'ok', persona: 'warn', feature: 'info', code: 'err', other: '' };
+  const card = (p) => {
+    const when = p.at ? new Date(p.at).toLocaleString('zh-CN', { hour12: false }) : '';
+    const from = p.fromChat ? `　来自 ${esc(p.fromChat)}` : '';
+    return `<div class="proposal-card" data-id="${esc(p.id)}">
+      <div class="proposal-card__head">
+        <span class="proposal-kind ${kindCls[p.kind] || ''}">${esc(p.kindLabel || p.kind)}</span>
+        <span class="proposal-card__title">${esc(p.title)}</span>
+        <span class="spacer"></span>
+        <span class="muted" style="font-size:11px">${esc(when)}${from}</span>
+      </div>
+      <div class="proposal-card__detail">${esc(p.detail)}</div>
+      ${p.rationale ? `<div class="hint">理由：${esc(p.rationale)}</div>` : ''}
+      <div class="proposal-card__foot">
+        <span class="hint" style="margin:0">提案只是文字，勾选不会执行任何改动</span>
+        <span class="spacer"></span>
+        <button class="btn btn-small" data-proposal="rejected" data-id="${esc(p.id)}">不采纳</button>
+        <button class="btn btn-small btn-primary" data-proposal="accepted" data-id="${esc(p.id)}">采纳（待办）</button>
+      </div>
+    </div>`;
+  };
+
+  box.innerHTML = `<div class="proposal-head">
+      <span class="proposal-title">改进提案</span>
+      <span class="uc-tag">待审 ${pending}</span>
+      <span class="spacer"></span>
+      <button class="btn btn-small" id="proposal-refresh">刷新</button>
+    </div>
+    <div class="hint" style="margin-bottom:8px">这里只记她想改什么，<b>任何一项都不会被自动执行</b> ——
+      采纳只是打个标记，真正动手由人来做（见 <code>src/proposals.js</code> 顶部）。</div>
+    ${items.map(card).join('')}`;
+
+  $('#proposal-refresh')?.addEventListener('click', () => loadProposals().then(() => renderProposalReview()));
+  $$('#proposal-review [data-proposal]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const status = b.dataset.proposal;
+      b.disabled = true;
+      try {
+        await api(`/api/proposals/${encodeURIComponent(b.dataset.id)}`, {
+          method: 'POST',
+          body: JSON.stringify({ status })
+        });
+        await loadProposals();
+        renderProposalReview();
+      } catch (e) {
+        alert(`标记失败：${e.message}`);
+        b.disabled = false;
+      }
+    });
+  });
+}
+
+async function loadProposals() {
+  try {
+    const r = await api('/api/proposals?status=pending');
+    state.proposals = r.items || [];
+    state.proposalCounts = r.counts || {};
+  } catch (e) {
+    // 取不到就保持原值，别清空成"没有提案"的假象
+    console.warn('[proposal] 拉取失败：', e?.message || e);
+  }
+}
+
 async function loadMemoryView() {
   try {
     const [cfg, chats] = await Promise.all([api('/api/config'), api('/api/chats')]);
@@ -2687,6 +2777,7 @@ async function loadMemoryView() {
     const files = await api('/api/memory-files');
     state.memoryFiles = files.files || [];
     state.chats = chats.chats || [];
+    await loadProposals();   // 待审提案（记忆页顶部那块）
     // 用后端状态校正本地记录：覆盖"页面刚刷新""SSE 断连期间状态变化"两种情况。
     // 后端 consolidating 是唯一可信来源（它在 orchestrator 里真实维护）。
     for (const f of state.memoryFiles) {
@@ -2837,6 +2928,13 @@ function renderMemoryList() {
   const files = state.memoryFiles || [];
   const names = {};
   for (const c of state.chats || []) names[c.key] = formatChatTitle(c.key, chatNameOf(c.key));
+
+  // ── 待审提案区（2026-09-19 第七对话加）────────────────────────────────
+  // ⚠️ 这是**只读展示 + 打标记**，这一页**不会执行任何提案内容**。
+  //    为什么坚持不自动执行：她的上下文混着群友说的话，而"待审条目本身"就是一条注入通道；
+  //    只要自动执行存在，"诱导她提一条看起来无害的改动 + 管理员瞟一眼点同意"就能被利用。
+  //    详见 src/proposals.js 顶部的边界说明。
+  renderProposalReview();
 
   // 列表头的「显示空记忆」开关（常驻元素，只绑一次；状态记在 localStorage 里）
   const showEmptyBox = $('#mem-show-empty');
