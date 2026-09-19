@@ -366,6 +366,25 @@ export class Orchestrator {
     this.runSeq.set(chatKey, seq);
     const [kind, chatId] = String(chatKey).split(':');
 
+    // 🔴 2026-09-19 第七对话修（proactive 拿不到历史的真 bug）：
+    //    主动开口时 `triggerEntries` 是**空数组**（这就是它"不打扰、无触发批"的定义），
+    //    而 `resolveContextTier` 是**从触发批里**找 @/关键词/随机命中的 ⇒ 空数组必然走到底部
+    //    返回 `{ tier: 0, count: 0, reason: '未触发' }`。
+    //    于是 `contextLimit = 0` ⇒ `buildPastState` 直接返回 `skipped: true` ⇒
+    //    **【过去状态】里一条历史都没有**，只写"本次档位设定为不带历史"。
+    //    后果：它要"开话题"，手里却没有任何这个群最近聊了什么 —— **只能瞎编或说空话**。
+    //    ⚠️ 实测证据（真跑提示词构建）：proactive 下 tier=0/count=0，
+    //       【过去状态】长度 0 字且不含任何历史行；对照"被 @"时 503 字 / tier=1/count=20。
+    //
+    //    修法：**主动开口没有触发批可依据，就该按"全读档"给它历史**（相当于 tier 4 的 allCount）。
+    //    为什么不是"给它一套独立的条数"：那会多一个没人调的旋钮；而 `allCount` 是用户
+    //    已经在「设置」里调过的"全读档读多少条"，语义正好对得上。
+    //    ⚠️ 注意：这**不会**让机器人更爱插嘴 —— 它只影响主动开口那一次带多少上下文，
+    //       与"要不要回应某条消息"的判定无关（那个走 gateToolDefs/档位门控，本函数没碰）。
+    const contextLimit = proactive
+      ? Math.max(1, Number(storeConfigForChat(chatKey)?.allCount) || 80)
+      : tierResult.count;
+
     // 触发摘要
     const first = triggerEntries[0];
     const triggerSummary = proactive
@@ -441,7 +460,7 @@ export class Orchestrator {
     try {
       for (let attempt = 1; attempt <= MAX_SESSION_ATTEMPTS; attempt++) {
         try {
-          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit: tierResult.count, tierInfo: tierResult, sameTurnContext });
+          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit, tierInfo: tierResult, sameTurnContext });
           lastError = null;
           break;
         } catch (error) {
