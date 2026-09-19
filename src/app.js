@@ -449,6 +449,31 @@ export function createApp({ log = console.log } = {}) {
     httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
+
+  // ── 第二个平台：微信（2026-09-20 第八对话加）─────────────────────────────
+  // 只是**再连一个 OneBot 客户端**到本地"中继"（工具-中继/），因为 Bridge 推的就是标准 OneBot v11
+  // （实测事件形状见 工具-中继/事件映射实测结论.md）⇒ 事件顺着同一个 handleOneBotEvent 流进来，
+  // store / 编排器 / 记忆 / 梦 / 提案**一律不用改**。这就是选 OneBot 当平台边界的好处。
+  //
+  // ⚠️ 两处关键：
+  //   ① `handleOneBotEvent(event, 'wechat')` —— 平台是**按事件来源**标注的，
+  //      不能靠 chatKey 猜：实测微信侧的数字 id（某群友 = 1000000001）与 QQ 号形态无法区分。
+  //   ② 注册进 sender 的 registry，发送时按会话来源选客户端。
+  //      不注册/未启用时 sender 一律走 this.onebot ⇒ QQ 侧行为零变化。
+  const platformClients = { bySource: {} };
+  let wechatOnebot = null;
+  if (cfg.wechat?.enabled) {
+    wechatOnebot = new OneBotClient({
+      wsUrl: cfg.wechat?.wsUrl,
+      httpUrl: cfg.wechat?.httpUrl,
+      accessToken: cfg.wechat?.accessToken,
+      httpToken: cfg.wechat?.accessToken,
+      onEvent: (event) => handleOneBotEvent(event, 'wechat').catch((error) => log('[ingest:wechat] 处理事件出错:', error?.message ?? error))
+    });
+    platformClients.bySource.wechat = wechatOnebot;
+    log(`[wechat] 已启用微信通道：${cfg.wechat?.wsUrl}`);
+  }
+
   const stickers = new StickerManager(onebot);
   // 群禁言状态（见 src/mutes.js）。三条来源都会往里写：
   //   · notice/group_ban 事件（见 handleOneBotEvent）
@@ -461,6 +486,9 @@ export function createApp({ log = console.log } = {}) {
   const noticeSeen = new Map();
   const sender = new SendQueue({
     onebot, store,
+    // 平台路由：发送时按会话来源选客户端（见 sender.clientFor）
+    registry: platformClients,
+    sourceOf: (chatKey) => store.chatSource(chatKey),
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
     // 发送被拒 ⇒ 若像是"群发言被拒"，先按禁言记下来（兜底，不依赖任何事件转发）
     onSendError: ({ chatKey, error }) => {
@@ -1209,6 +1237,19 @@ export function createApp({ log = console.log } = {}) {
             everConnected: onebot.everConnected,
             error: onebot.lastConnectError,
             self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
+          },
+          // 微信通道（第二平台）的状态。
+          // 为什么必须暴露：它没接上时的症状是"给它发微信不回"，**原因完全看不出来** ——
+          // 跟端口预检同一个道理：把"通没通、连的哪个地址"直接写在能查到的地方。
+          wechat: {
+            enabled: !!cfgNow.wechat?.enabled,
+            configuredUrl: cfgNow.wechat?.wsUrl || null,
+            connected: wechatOnebot ? wechatOnebot.connected : false,
+            everConnected: wechatOnebot ? wechatOnebot.everConnected : false,
+            error: wechatOnebot ? wechatOnebot.lastConnectError : '',
+            self: wechatOnebot?.selfInfo ? { userId: wechatOnebot.selfId, nickname: wechatOnebot.selfNickname } : null,
+            // 当前有几个会话被标成微信来源（前端切视图要用它判断"这边有没有东西"）
+            chats: (() => { try { return store.chatsBySource('wechat').length } catch { return 0 } })()
           },
           snowluma: {
             dir: snowlumaDir(),
@@ -3136,6 +3177,12 @@ export function createApp({ log = console.log } = {}) {
       // accessToken/httpToken 已由 applyTokens 直接挂到实例（候选[0]）
     }
     await onebot.connect();
+    // 微信通道：与 QQ 并排连（各自独立重连，互不影响）。
+    // ⚠️ 刻意**不 await 它的连接成功** —— 中继没起来时它只是反复退避重连，
+    //    不该因此拖住控制台启动（QQ 侧照常可用）。
+    if (wechatOnebot) {
+      wechatOnebot.connect().catch((e) => log(`[wechat] 连接失败（会自行重试）：${e?.message ?? e}`));
+    }
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     // 空闲「梦」的定时器（每 5 分钟看一次该不该做；关着的话它自己会跳过）
     dreamer.start();
