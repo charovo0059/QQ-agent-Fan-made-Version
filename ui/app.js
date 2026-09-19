@@ -2843,6 +2843,23 @@ async function loadDreams() {
   }
 
   const notes = Array.isArray(data.notes) ? data.notes : [];
+  // 渲染一篇笔记：现在是「按会话分章 + 总感想」，所以按章节分段显示而不是糊成一大块。
+  // ⚠️ 老笔记没有 segments 字段（改造前写的）⇒ 退回显示整篇 text，别让它变空白。
+  const noteBody = (n) => {
+    const segs = Array.isArray(n.segments) ? n.segments : [];
+    if (!segs.length && !n.global) return `<div class="dream-text">${esc(n.text || '')}</div>`;
+    const parts = segs.map((s) => `<div class="dream-seg">
+        <div class="dream-seg__label">${esc(s.label || s.key || '（未标会话）')}</div>
+        <div class="dream-text">${esc(s.text || '')}</div>
+      </div>`).join('');
+    const g = String(n.global || '').trim()
+      ? `<div class="dream-seg dream-seg--global">
+          <div class="dream-seg__label">总感想（全局可见）</div>
+          <div class="dream-text">${esc(n.global)}</div>
+        </div>`
+      : '';
+    return parts + g;
+  };
   const listHtml = notes.length
     ? notes.map((n) => `
       <div class="dream-card">
@@ -2851,7 +2868,7 @@ async function loadDreams() {
           <span class="muted">${esc(fmtClock(n.at))}</span>
           <span class="muted" style="margin-left:auto">${Number(n.messages) || 0} 条消息 · ${Number(n.chats) || 0} 个会话${n.model ? ` · ${esc(n.model)}` : ''}</span>
         </div>
-        <div class="dream-text">${esc(n.text)}</div>
+        ${noteBody(n)}
       </div>`).join('')
     : `<div class="empty-hint">还没有笔记。${data.enabled ? '等夜里安静下来，它就会写一条。' : '「夜里做『梦』」现在是关着的。'}</div>`;
 

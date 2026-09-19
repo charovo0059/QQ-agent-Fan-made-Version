@@ -133,8 +133,95 @@ function buildUserContent({ botName, day, digest }) {
     lines.push(...chat.lines);
     lines.push('');
   }
-  lines.push('写一条 200~400 字的笔记。直接写正文，不要加标题，不要写"笔记："。');
+  // ⚠️ 2026-09-19 改成「按会话分章 + 末尾一段总感想」。为什么这么改（用户拍板，查过同类做法）：
+  //    一篇把好几个会话揉在一起的日记，**没有任何办法在文本层面把"事实"和"感受"分开**，
+  //    于是隐私边界只能靠叮嘱（实测那段日记 5 段里 4 段是事实与感受揉在同一句）。
+  //    同类项目的教训很一致：nanobot 的 session-level memory isolation PR 就是
+  //    因为"dream/consolidation 把不同会话的事实混起来"才做的隔离；
+  //    dsh-memento 则是给每条记录带 `scope: user-global | workspace`。
+  //    ⇒ 我们的对应做法：**事实按会话分章（各自 scope），感受单独一段（全局 scope）**。
+  //    ⚠️ 这仍是提示词约束，不是结构保证 —— 但"要守格式"的范围从"整篇"缩到"一段"。
+  lines.push('写的时候分成两部分：');
+  lines.push('');
+  lines.push('一、**按会话分段**：上面每个 ── 段落 ── 各写一小段，只写那个会话里发生的事与你的反应。');
+  lines.push('   段首原样照抄那个分隔标题（例如 `【群 1000000007】`），这样程序能认出每段属于谁。');
+  lines.push('   某个会话你实在没什么想说的，就整段略过，不用硬写。');
+  lines.push('');
+  lines.push('二、**最后写一段【总感想】**：今天整体上你怎么样了 —— 心情、变化、学到的东西、对自己的看法。');
+  lines.push('   ⚠️ **这一段里不许出现任何具体的人名、群名、群号、私聊内容或可辨认的具体事件** ——');
+  lines.push('   它是你自己的心里话，不该带着别人的事。');
+  lines.push('');
+  lines.push('不要加别的标题，不要写"笔记："，不要分点罗列，不要总结"今天共收到 N 条消息"。');
   return lines.join('\n');
+}
+
+/**
+ * 把模型的输出切成「按会话的章节」+「总感想」（2026-09-19 加）。
+ *
+ * ⚠️ **容错优先**：模型不一定守格式。解析不出来时**整篇当作 global**，
+ *    也就是**退化回改造前的行为** —— 宁可不分章，也不要因为格式没写对就丢掉整篇笔记。
+ *
+ * 识别规则（宽松）：
+ *   · 同时接受 `【群 123】` / `【私聊 123】` / `【群123】` 与 `── 群 123 ──` 两种写法；
+ *   · `【总感想】` 起进入全局段；
+ *   · 章节没有匹配到会话标签 → 保留 `key: ''`，不算错（模型可能改了群名）。
+ */
+export function splitDreamText(text) {
+  const t = String(text || '');
+  const out = { segments: [], global: '' };
+  if (!t.trim()) return out;
+  // 行首的章节标题：中文书名号或长破折号包裹、内含"群/私聊 + 数字"
+  const HEAD = /^[ \t]*(?:【\s*(群|私聊)\s*[:：]?\s*(\d+)\s*】|──\s*(群|私聊)\s*(\d+)\s*──)[ \t]*$/;
+  const TOTAL = /^[ \t]*【\s*总感想\s*】[ \t]*$/;
+  const lines = t.split('\n');
+  let cur = null;
+  const push = () => { if (cur && cur.text.trim()) out.segments.push({ key: cur.key, label: cur.label, text: cur.text.trim() }); };
+  let inGlobal = false;
+  for (const line of lines) {
+    const m = HEAD.exec(line);
+    if (m) {
+      push();
+      inGlobal = false;
+      const kind = m[1] || m[3];
+      const id = m[2] || m[4];
+      cur = { key: `${kind === '群' ? 'group' : 'private'}:${id}`, label: `${kind} ${id}`, text: '' };
+      continue;
+    }
+    if (TOTAL.test(line)) {
+      push();
+      inGlobal = true;
+      cur = { key: '', label: '', text: '' };   // 全局段也用 cur 暂存，最后搬到 out.global
+      continue;
+    }
+    if (cur) cur.text += line + '\n';
+    else out.global += line + '\n';            // 标题之前的文字：归到全局
+  }
+  // 收尾：最后一个 cur 可能是"总感想"段
+  if (cur && !cur.key) out.global = ((out.global || '') + '\n' + cur.text).trim();
+  else push();
+  out.global = String(out.global || '').trim();
+  return out;
+}
+
+/**
+ * 取一条笔记的「章节 + 总感想」，带**懒解析兜底**（2026-09-19 加）。
+ *
+ * 为什么要兜底：`segments`/`global` 是这次改造才写进笔记的新字段，
+ * **之前写下的老笔记没有**。工具/界面/探针都可能读到它们，所以：
+ *   · 有 `segments` 字段（哪怕是空数组）→ 直接用（空数组是"真的没分章"，不是"缺字段"）；
+ *   · 没有该字段 → 现场用 `splitDreamText` 解析一次，并**写回对象**（同一进程内只用解析一次）。
+ * ⚠️ 判据必须是 `Array.isArray(n.segments)` 而不是 `n.segments?.length` ——
+ *    后者会把"解析出来确实没有章节"跟"老笔记缺字段"混为一谈，前者会白解析、甚至覆盖掉真实结果。
+ */
+export function segmentsOf(note) {
+  if (!note || typeof note !== 'object') return { segments: [], global: '' };
+  if (Array.isArray(note.segments)) {
+    return { segments: note.segments, global: String(note.global || '') };
+  }
+  const r = splitDreamText(note.text);
+  note.segments = r.segments;
+  note.global = r.global;
+  return r;
 }
 
 export class Dreamer {
@@ -196,7 +283,7 @@ export class Dreamer {
    *   · 想看全文就再调一次并指定 `day`（或 `text: true`）。
    *   ⇒ 默认省、按需细 —— 与"prefix cache 敏感"这个成本规律一致。
    */
-  brief({ day = '', keyword = '', limit = 10, text = false, maxChars = 600 } = {}) {
+  brief({ day = '', keyword = '', limit = 10, text = false, maxChars = 600, chatKey = '' } = {}) {
     const all = this.state.notes || [];
     let items = all;
     if (day) items = items.filter((n) => String(n.day) === String(day));
@@ -211,16 +298,28 @@ export class Dreamer {
       matched: items.length,
       oldest: all.length ? all[all.length - 1].day : '',
       newest: all.length ? all[0].day : '',
-      notes: picked.map((n) => ({
-        day: n.day,
-        at: n.at,
-        // 这篇梦涉及哪几个会话 —— 模型据此判断"哪些事不该拿到别的群里说"
-        chatLabels: n.chatLabels || [],
-        messages: n.messages ?? null,
-        mine: n.mine ?? null,
-        chars: String(n.text || '').length,
-        text: text ? String(n.text || '') : String(n.text || '').slice(0, Math.max(60, Number(maxChars) || 600))
-      }))
+      // 传了 chatKey 时，只给"这个会话那一章" + 总感想 —— 这就是两级可见（事实按会话、感受全局）的落点
+      ...(chatKey ? { chatKey, note: 'chatsForYou 只给当前会话那一章；global 是总感想（全局）。别的会话的章节没有给你。' } : {}),
+      notes: picked.map((n) => {
+        const seg = segmentsOf(n);
+        const mineSeg = chatKey ? seg.segments.filter((s) => s.key === String(chatKey)) : seg.segments;
+        return {
+          day: n.day,
+          at: n.at,
+          // 这篇梦涉及哪几个会话 —— 模型据此判断"哪些事不该拿到别的群里说"
+          chatLabels: n.chatLabels || [],
+          messages: n.messages ?? null,
+          mine: n.mine ?? null,
+          chars: String(n.text || '').length,
+          ...(chatKey
+            ? { chatsForYou: mineSeg.map((s) => s.text), global: text ? seg.global : String(seg.global).slice(0, Math.max(60, Number(maxChars) || 600)) }
+            : {
+              segments: mineSeg.map((s) => ({ label: s.label, text: text ? s.text : String(s.text).slice(0, Math.max(60, Number(maxChars) || 600)) })),
+              global: text ? seg.global : String(seg.global).slice(0, Math.max(60, Number(maxChars) || 600)),
+              text: text ? String(n.text || '') : String(n.text || '').slice(0, Math.max(60, Number(maxChars) || 600))
+            })
+        };
+      })
     };
   }
 
@@ -447,11 +546,18 @@ export class Dreamer {
 
       const text = String(res?.message?.content ?? '').trim().slice(0, MAX_NOTE_CHARS);
       if (!text) return { ok: false, reason: '模型没写出内容' };
+      const parts = splitDreamText(text);   // 只解析一次（下面 segments/global 都用它）
 
       const note = {
         day,
         at: Date.now(),
         text,
+        // 「按会话分章 + 总感想」的解析结果（2026-09-19 加）。
+        // ⚠️ 在**写入时**解析一次并落盘，而不是读的时候每次解析 —— 探针/工具/界面都要用，
+        //    解析一次省事；而老笔记（这条之前写的）没有这个字段，读的时候会懒解析兜底。
+        // `segments[].key` 是会话 id（`group:123`），**这是"事实按会话过滤"的依据**。
+        segments: parts.segments,
+        global: parts.global,
         // 素材统计 + **这篇梦涉及哪几个会话**（2026-09-19 加）。
         // 为什么要记 chats：白天的 `dream_recall` 工具要能按会话/日期筛，
         // 或至少告诉模型"这篇里有几个会话的事、是哪些"——否则它不知道哪些内容不该拿到别的群里说。
