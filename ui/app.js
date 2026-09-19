@@ -238,6 +238,25 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/**
+ * 毫秒 ↔ 分钟（2026-09-19 加）。
+ *
+ * 为什么只在这里换算、不改存储单位：那几个键的名字就是 `checkIntervalMinMs` / `…MaxMs`
+ * （带 `Ms`），**值也一直是毫秒**。若把存储改成分钟，键名与值就不符了，
+ * 而且**已有的配置文件里存的是毫秒**，会被按"分钟"读成天文数字（1800000 分钟 ≈ 3.4 年）——
+ * 那是静默出错（配置看着有值、行为全错）。⇒ 存储保持毫秒，只在界面 ×/÷ 60000。
+ */
+function msToMin(ms, fallbackMin = 30) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return fallbackMin;
+  return Math.max(1, Math.round(n / 60000));
+}
+function minToMs(min, fallbackMs = 1800000) {
+  const n = Number(min);
+  if (!Number.isFinite(n) || n <= 0) return fallbackMs;
+  return Math.max(60000, Math.round(n * 60000));   // 下限 1 分钟，与原来 min="60000" 一致
+}
+
 const STATUS_LABEL = { waiting: '等待中', done: '已发言', noreply: '未回复', running: '运行中', error: '出错', aborted: '中止' };
 
 // ── 启动 loading 壳：页面先渲染，等服务可用后自动隐藏 ──
@@ -4999,10 +5018,16 @@ return `
     <div class="checkbox-row"><input type="checkbox" id="cfg-proactive" ${c.proactive.enabled ? 'checked' : ''} />
       <label for="cfg-proactive">冷场时按概率主动开话题</label></div>
     <div class="field-row">
-      <div class="field"><label>检查间隔下限（毫秒）</label><input type="number" id="cfg-pro-min" min="60000" value="${esc(c.proactive.checkIntervalMinMs)}" /></div>
-      <div class="field"><label>检查间隔上限（毫秒）</label><input type="number" id="cfg-pro-max" min="120000" value="${esc(c.proactive.checkIntervalMaxMs)}" /></div>
+      <!-- ⚠️ 界面用**分钟**，存储仍是**毫秒**（proactive.checkIntervalMinMs/MaxMs）。
+           为什么不改存储单位：那几个键的名字里就带 Ms、值也一直是毫秒；改成分钟会让键名与值不符，
+           而且已有配置文件里存的是毫秒，会被按"分钟"读成天文数字（1800000 分钟 ≈ 3.4 年）—— 静默出错。
+           ⚠️ 注意：本段注释在**模板字符串里面**，所以**不能出现反引号**（会提前结束字符串）。
+           ⇒ 只在渲染与保存两处 ×/÷ 60000，见 msToMin / minToMs。 -->
+      <div class="field"><label>检查间隔下限（分钟）</label><input type="number" id="cfg-pro-min" min="1" step="1" value="${esc(msToMin(c.proactive.checkIntervalMinMs, 30))}" /></div>
+      <div class="field"><label>检查间隔上限（分钟）</label><input type="number" id="cfg-pro-max" min="1" step="1" value="${esc(msToMin(c.proactive.checkIntervalMaxMs, 90))}" /></div>
       <div class="field"><label>触发概率 0~1</label><input type="number" id="cfg-pro-prob" step="0.05" min="0" max="1" value="${esc(c.proactive.probability)}" /></div>
     </div>
+    <div class="hint" style="margin:-4px 0 8px">间隔是"隔多久检查一次冷场"，不是"多久必说一次" —— 每次检查还要过安静时段、连发上限、退避三道闸，再掷一次概率。</div>
 
     <h3>表情包</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-sticker" ${c.sticker.enabled ? 'checked' : ''} />
@@ -6947,8 +6972,9 @@ async function saveConfig({ quiet = false } = {}) {
     patch.proactive = {
       ...c.proactive,
       enabled: chk('#cfg-proactive', !!c.proactive?.enabled),
-      checkIntervalMinMs: Number(val('#cfg-pro-min', c.proactive?.checkIntervalMinMs)) || 1800000,
-      checkIntervalMaxMs: Number(val('#cfg-pro-max', c.proactive?.checkIntervalMaxMs)) || 5400000,
+      // 界面是分钟 ⇒ 存盘前 ×60000 换回毫秒（键名带 Ms，见上面 HTML 里的注释）
+      checkIntervalMinMs: minToMs(val('#cfg-pro-min', msToMin(c.proactive?.checkIntervalMinMs, 30)), 1800000),
+      checkIntervalMaxMs: minToMs(val('#cfg-pro-max', msToMin(c.proactive?.checkIntervalMaxMs, 90)), 5400000),
       probability: Number(val('#cfg-pro-prob', c.proactive?.probability)) || 0.25
     };
     patch.sticker = {
