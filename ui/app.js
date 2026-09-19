@@ -5294,6 +5294,18 @@ function renderAllowSection(c) {
  */
 function renderWechatContactsSection(c) {
   const list = state.wechatContacts;
+  // 🔴 「收到了、但白名单没放行」的提示（2026-09-20 补）。
+  //    为什么必须有：实测里用户在没放行的时候连发三条消息，界面上**一点反馈都没有**
+  //    ⇒ 只会以为"接微信坏了"，而其实它正常工作、只是没放行。
+  //    数据来自 `/api/status.wechat.blocked`（只含昵称/种类/时间，不含正文）。
+  const blocked = state.status?.wechat?.blocked || [];
+  const blockedHint = blocked.length
+    ? `<div class="hint" style="margin-bottom:10px;padding-left:8px;border-left:3px solid #e0a030">
+         ⚠️ <b>刚收到微信消息，但它不在白名单里 ⇒ 没有回。</b><br>
+         来自：${blocked.map((b) => esc(b.name || b.id)).join('、')}（共 ${blocked.length} 条待放行）
+         —— 在下面<b>勾选它</b>就会开始回话。
+       </div>`
+    : '';
   const rows = (() => {
     if (list === null || list === undefined) {
       return '<div class="hint">正在读取…（如果一直这样，说明 /api/wechat-contacts 没通）</div>';
@@ -5320,6 +5332,7 @@ function renderWechatContactsSection(c) {
       <br>这里显示的是<b>从收到的微信消息里学到</b>的 id 与昵称 —— 微信侧的会话 id 是桥派生的<b>数字</b>，
       光看微信是看不到的，所以请在这里点选，别去手填。
     </div>
+    ${blockedHint}
     <div class="field"><label>已知的微信联系人 / 群（勾选即放行）</label>
       <div id="wx-contact-list" style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
         ${rows}
