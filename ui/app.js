@@ -4816,6 +4816,9 @@ function wechatPageShell() {
       <button class="btn btn-small" id="wx-contacts-btn" title="放行谁能收她的消息 —— 在「设置 → 微信联系人」里勾选">微信联系人（放行）</button>
     </div>
     <div id="wx-verdict" class="hint" style="margin-bottom:8px"></div>
+    <!-- 「一键自检」的结论区：只在点了之后填，**不参与 15 秒轮询** ——
+         自检是"用户主动要一份完整体检"，每次轮询都重跑它既没必要也会冲掉用户正在看的结论。 -->
+    <div id="wx-check"></div>
     <!-- 开机自动启动的两个开关。为什么要放在这个页签而不是「设置」：
          它们管的就是这一页在管的那条链，放一起用户才找得到（SnowLuma 那个开关在设置里，
          是因为 SnowLuma 页签早于设置页；这次不重复那个割裂）。 -->
@@ -4911,7 +4914,28 @@ function bindWechatPageEvents() {
       // 拉起后等端口通（最多 45 秒）—— 否则用户点完立刻看到的还是"没在跑"，会以为失败了
       'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow', { wait: true }]
     }
-    if (id === 'wx-check-btn') { loadWechatPage({ force: true }); return }
+    if (id === 'wx-check-btn') {
+      // 🔴 真的去查（POST /api/wechat/channel/selfcheck），**不是**把页面重拉一遍。
+      //    旧实现是 `loadWechatPage({force:true})`，而这一页每 15 秒本来就自动刷
+      //    ⇒ 那是个"看起来会做事、其实什么也不做"的按钮。
+      const box = $('#wx-check')
+      const v = $('#wx-verdict')
+      if (v) v.textContent = '自检中…'
+      try {
+        const r = await api('/api/wechat/channel/selfcheck', { method: 'POST', body: '{}' })
+        if (v) { v.textContent = r?.summary || '自检没返回结论'; v.style.color = r?.ok ? '#35c46a' : '' }
+        if (box) {
+          box.innerHTML = `<div style="margin:6px 0 12px">${(r?.items || []).map((i) => `
+            <div style="margin:4px 0">
+              <span style="margin-right:6px">${i.ok ? '✅' : '❌'}</span>
+              <b>${esc(i.title)}</b> <span class="muted">${esc(i.detail)}</span>
+            </div>`).join('')}</div>`
+        }
+      } catch (err) {
+        if (v) { v.textContent = `自检失败：${err.message}`; v.style.color = '' }
+      }
+      return
+    }
     // 两个开机自启动开关：`change` 也会走 click 分支，e.target.checked 此时已是新值。
     if (id === 'wx-autorelay' || id === 'wx-autoweflow') {
       const key = id === 'wx-autorelay' ? 'autoLaunchRelay' : 'autoLaunchWeFlow'

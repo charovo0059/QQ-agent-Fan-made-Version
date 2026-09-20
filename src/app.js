@@ -1732,6 +1732,69 @@ export function createApp({ log = console.log } = {}) {
         const limit = Number(new URL(req.url, 'http://x').searchParams.get('limit')) || 120;
         return json(res, 200, { logs: wechatChannel.tail(limit) });
       }
+      // 「一键自检」：**真的去查**，而不是把页面重拉一遍。
+      // ⚠️ 为什么要有这个路由（2026-09-20）：页签上那个按钮原来只是 `loadWechatPage({force:true})`，
+      //    而这一页**每 15 秒本来就自动刷**（ui/app.js 的 listPoller）⇒ 那是个"看起来会做事、
+      //    其实什么也不做"的按钮。本项目最忌的就是这一类，所以要么删掉它，要么让它真查。
+      //    选真查：把"能收但不会回""WeFlow 没开""桥断了"这些**只有组合起来才看得出来**的
+      //    问题一次列全，每条失败都带一句可行动的话。
+      if (pathname === '/api/wechat/channel/selfcheck' && method === 'POST') {
+        try {
+          const cfgNow = getConfig();
+          const cfgWx = cfgNow.wechat || {};
+          const st = await wechatChannel.status();
+          const exe = wechatChannel.resolveWeFlowExe();
+          const script = wechatChannel.findScript();
+          const items = [];
+          const add = (key, ok, title, detail) => items.push({ key, ok: !!ok, title, detail: String(detail || '') });
+
+          add('enabled', cfgWx.enabled, '微信通道总开关',
+            cfgWx.enabled ? 'config.wechat.enabled = true' : 'config.wechat.enabled = false ⇒ 收不到也不回；到「设置」打开');
+          add('script', !!script, '通道启动脚本',
+            script || `找不到（跑微信通道.mjs）。找过：${wechatChannel.candidates().join(' ｜ ') || '(无候选)'}；可在设置里填 wechat.channelScript`);
+          add('weflow', st.weflow.running, '① WeFlow（读微信库）',
+            st.weflow.running
+              ? `端口 5031 已通；程序 ${st.weflow.exe || '(未解析到路径)'}`
+              : (st.weflow.starting
+                ? `进程在（pid ${(st.weflow.pids || []).join(',')}）但端口 5031 没通 —— 它可能还在加载，或停在登录/选数据的界面`
+                : (exe.path ? `没在跑。点「启动 WeFlow」即可（会用 ${exe.path}）` : `没在跑，而且找不到它的程序。找过：${exe.candidates.join(' ｜ ') || '(没配任何路径)'}；到设置里填 wechat.weflowExe`)));
+          add('relay', st.channel.running, '② 中继（11230）',
+            st.channel.running ? '在跑' : '没在跑 —— 点「启动通道」（会顺手把 WeFlow 也点着）');
+          add('bridge', st.channel.running && st.channel.bridgeConnected, '② Bridge 有没有连进中继',
+            !st.channel.running ? '中继没在跑，这一项无从谈起'
+              : (st.channel.bridgeConnected ? '已连入' : '🔴 中继在跑但 Bridge 没连入 —— **看着通了其实收不到**。Bridge 是微信侧那个常驻程序，去它的窗口看日志'));
+          add('login', !!(st.channel.login && st.channel.login.userId), '② 微信侧登录身份',
+            st.channel.login?.userId
+              ? `${st.channel.login.nickname || ''}（${st.channel.login.userId}）`
+              : '🔴 拿不到登录身份（self_id 为 0）。发出去的消息会带错 self_id，规则判定会跟着错');
+          add('agent', !!(st.agent?.enabled && st.agent?.connected), '③ 本应用连上中继',
+            !st.agent?.enabled ? '本应用的微信通道没启用（config.wechat.enabled）'
+              : (st.agent?.connected ? '已连上' : '没连上（后端会自动重试；看主进程日志）'));
+          // ⚠️ 这一条是**组合起来才看得出来**的问题：三段全绿、白名单空 ⇒ 能收，但一个字都不回。
+          //    历史上就是这么静默过的（未放行的消息只记日志）。
+          let contacts = [];
+          try { contacts = listContacts({}) || []; } catch { contacts = []; }
+          const passed = contacts.filter((c) => allowed(c.kind === 'group' ? 'group' : 'private', c.id, cfgNow));
+          add('allowlist', passed.length > 0, '④ 有没有放行的人（没有 ⇒ 能收但不会回）',
+            passed.length
+              ? `已放行 ${passed.length} 个：${passed.slice(0, 5).map((c) => `${c.name || c.id}（${c.id}）`).join('、')}${passed.length > 5 ? ' …' : ''}`
+              : (contacts.length
+                ? `🔴 学到了 ${contacts.length} 个联系人，但**一个都没放行** ⇒ 消息收得到、一个字都不会回。到「设置 → 微信联系人」勾选`
+                : '还没学到任何微信联系人（收到过消息之后才会出现）⇒ 收得到也不会回'));
+
+          const bad = items.filter((i) => !i.ok);
+          return json(res, 200, {
+            ok: bad.length === 0,
+            at: Date.now(),
+            items,
+            summary: bad.length === 0
+              ? '✅ 全部通过 —— 现在给别人发微信消息，这边就能收到并按规则回'
+              : `❌ ${bad.length} 项没通过：${bad.map((i) => i.title).join('；')}`
+          });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
       if (pathname === '/api/wechat/channel/weflow/launch' && method === 'POST') {
         try {
           const body = await readBody(req).catch(() => ({}));
