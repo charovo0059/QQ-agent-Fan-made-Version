@@ -28,6 +28,50 @@ function decodeHtml(s) {
 }
 
 /** Bing 搜索（解析 b_algo 结果块）。searchUrl 可在配置中替换（测试/换引擎）。 */
+/**
+ * 从 Bing 搜索页 HTML 里解析结果（`b_algo` 块）。
+ *
+ * 🆕 2026-09-20 第九对话：**吸收自上游 0.4**。抽出来的理由是**去重** ——
+ *    我们本来有两处逐字相同的解析（`bingSearch` 与 `bingSearchWithUrl`），
+ *    上游那边把同一段抽成了一个函数。抽出来还有个附带好处：它是**纯函数**，
+ *    回归里可以直接喂 HTML 驱动它，不必真的联网搜一次。
+ */
+export function parseBingResults(html, maxResults = 6) {
+  const results = [];
+  for (const block of String(html ?? '').split('<li class="b_algo"').slice(1)) {
+    const hrefMatch = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
+    if (!hrefMatch) continue;
+    const urlStr = decodeHtml(hrefMatch[1]);
+    const titleMatch = block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
+    const title = titleMatch ? decodeHtml(titleMatch[1]) : '';
+    const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    const snippet = snippetMatch ? decodeHtml(snippetMatch[1]) : '';
+    if (urlStr && title) results.push({ title, url: urlStr, snippet });
+    if (results.length >= maxResults) break;
+  }
+  return results;
+}
+
+/**
+ * 站内搜索 URL 拼装（吸收自上游 0.4，与刚吸收的「浏览锁定」配套）。
+ *
+ * 上游原注释：**配合 browseLock 使用** —— 锁定站点 + 站内搜索模板 = "机器人只能在这几个站里搜"。
+ * 模板里没有 `{query}` 时按 Bing 的 `?q=` 约定兜底（而不是静默拼错 URL）。
+ *
+ * @param {string} template 形如 'https://example.com/search?q={query}'（也兼容 `%s` 写法）
+ * @param {string} query 关键词
+ */
+export function buildSiteSearchUrl(template, query) {
+  const tpl = String(template || '').trim();
+  const q = encodeURIComponent(String(query || '').trim());
+  if (!tpl) return '';
+  if (tpl.includes('{query}')) return tpl.replaceAll('{query}', q);
+  // 兼容 %s 写法（部分搜索站用这个占位）
+  if (tpl.includes('%s')) return tpl.replaceAll('%s', q);
+  // 没有占位符：按是否已有 query string 决定拼 ?q= 还是 &q=
+  return tpl + (tpl.includes('?') ? '&' : '?') + 'q=' + q;
+}
+
 export async function bingSearch(query) {
   const cfg = getConfig().webSearch ?? {};
   const searchUrl = String(cfg.searchUrl || 'https://cn.bing.com/search');
@@ -43,19 +87,7 @@ export async function bingSearch(query) {
   });
   if (!res.ok) throw new Error(`搜索服务 HTTP ${res.status}`);
   const html = await res.text();
-  const results = [];
-  const blocks = html.split('<li class="b_algo"').slice(1);
-  for (const block of blocks) {
-    const hrefMatch = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
-    if (!hrefMatch) continue;
-    const urlStr = decodeHtml(hrefMatch[1]);
-    const titleMatch = block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
-    const title = titleMatch ? decodeHtml(titleMatch[1]) : '';
-    const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const snippet = snippetMatch ? decodeHtml(snippetMatch[1]) : '';
-    if (urlStr && title) results.push({ title, url: urlStr, snippet });
-    if (results.length >= maxResults) break;
-  }
+  const results = parseBingResults(html, maxResults);
   return { query, results };
 }
 
@@ -122,8 +154,19 @@ export async function deepSeekSearch(query) {
 }
 
 /** 抓取网页正文（走 safe-fetch 的 SSRF 全防护）。 */
-export async function webFetch(url) {
-  const result = await safeFetch(url);
+/**
+ * 抓取网页。
+ *
+ * 🆕 2026-09-20 第九对话：补上 `browseLocked` 透传（**上游有、我们缺**）。
+ *    它与刚吸收的「浏览锁定」（`security.browseLock`）配套：传 `true` 时
+ *    `safeFetch` 会校验域名白名单（含逐跳校验重定向）。
+ *    ⚠️ 默认 `false` = 沿用我们原来的行为，所以这个改动**不影响现有调用方**
+ *      （`tools.js` 的 web_fetch 没传 ⇒ 行为一字未变）。
+ *      要让工具真正受锁定约束，得在调用处显式传 —— 那是**策略决定**，
+ *      留给"要不要给浏览加闸门"这件事单独拍板（见 config.security.browseLock 注释）。
+ */
+export async function webFetch(url, { browseLocked = false } = {}) {
+  const result = await safeFetch(url, { browseLocked });
   return result;
 }
 
@@ -389,18 +432,8 @@ async function bingSearchWithUrl(query, searchUrl) {
   });
   if (!res.ok) throw new Error(`自定义搜索（bing 类型）HTTP ${res.status}`);
   const html = await res.text();
-  const results = [];
-  for (const block of html.split('<li class="b_algo"').slice(1)) {
-    const hrefMatch = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
-    if (!hrefMatch) continue;
-    const urlStr = decodeHtml(hrefMatch[1]);
-    const titleMatch = block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
-    const title = titleMatch ? decodeHtml(titleMatch[1]) : '';
-    const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const snippet = snippetMatch ? decodeHtml(snippetMatch[1]) : '';
-    if (urlStr && title) results.push({ title, url: urlStr, snippet });
-    if (results.length >= maxResults) break;
-  }
+  // 🆕 用抽出来的纯函数（原来这里有一份与 bingSearch 逐字相同的解析，已去重）
+  const results = parseBingResults(html, maxResults);
   if (!results.length) throw new Error('自定义搜索（bing 类型）没有解析到结果，请确认该引擎返回 b_algo 结构');
   return { query, results };
 }
