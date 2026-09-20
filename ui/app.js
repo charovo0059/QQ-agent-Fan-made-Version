@@ -4816,6 +4816,10 @@ function wechatPageShell() {
       <button class="btn btn-small" id="wx-contacts-btn" title="放行谁能收她的消息 —— 在「设置 → 微信联系人」里勾选">微信联系人（放行）</button>
     </div>
     <div id="wx-verdict" class="hint" style="margin-bottom:8px"></div>
+    <!-- 开机自动启动的两个开关。为什么要放在这个页签而不是「设置」：
+         它们管的就是这一页在管的那条链，放一起用户才找得到（SnowLuma 那个开关在设置里，
+         是因为 SnowLuma 页签早于设置页；这次不重复那个割裂）。 -->
+    <div id="wx-autostart"></div>
     <div id="wx-status"></div>
     <div class="field" style="margin-top:10px"><label>通道日志（最近 100 行）</label>
       <pre id="wx-log" style="max-height:260px;overflow:auto;background:var(--bg-2,#111);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:12px;white-space:pre-wrap">（读取中…）</pre>
@@ -4862,6 +4866,16 @@ function renderWechatStatus(st) {
     + (st.script?.path ? '' : `<div class="hint muted">候选：${(st.script?.candidates || []).map(esc).join(' ｜ ')}</div>`)
 }
 
+/** 开机自动启动的两个开关（值来自 /api/config，不是 status）。 */
+function renderWechatAuto(cfg) {
+  const w = cfg?.wechat || {}
+  return `
+    <div class="checkbox-row" style="margin:2px 0"><input type="checkbox" id="wx-autorelay" ${w.autoLaunchRelay ? 'checked' : ''} />
+      <label for="wx-autorelay">应用启动时自动拉起微信通道（中继 + Bridge）</label></div>
+    <div class="checkbox-row" style="margin:2px 0 10px"><input type="checkbox" id="wx-autoweflow" ${w.autoLaunchWeFlow !== false ? 'checked' : ''} />
+      <label for="wx-autoweflow">自动拉起通道时，顺手把 WeFlow 也点着（不点着的话：通道看着全通，却收不到消息）</label></div>`
+}
+
 /** 自检结论：把"三段都通了吗"写成一句人话（而不是让用户自己对着三个圆点猜）。 */
 function wechatVerdict(st) {
   if (!st) return { ok: false, text: '⚠️ 读不到状态' }
@@ -4894,6 +4908,22 @@ function bindWechatPageEvents() {
       'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow', { wait: true }]
     }
     if (id === 'wx-check-btn') { loadWechatPage({ force: true }); return }
+    // 两个开机自启动开关：`change` 也会走 click 分支，e.target.checked 此时已是新值。
+    if (id === 'wx-autorelay' || id === 'wx-autoweflow') {
+      const key = id === 'wx-autorelay' ? 'autoLaunchRelay' : 'autoLaunchWeFlow'
+      const val = !!e.target.checked
+      const v0 = $('#wx-verdict')
+      if (v0) v0.textContent = `保存 ${key} = ${val} …`
+      try {
+        await api('/api/config', { method: 'POST', body: JSON.stringify({ wechat: { [key]: val } }) })
+        if (v0) v0.textContent = `已保存：${key} = ${val}${key === 'autoLaunchRelay' && val ? '（下次启动应用时自动拉起通道）' : ''}`
+      } catch (err) {
+        // 🔴 存不上必须**把勾选退回去**，否则界面在说谎（用户以为开了，其实没开）
+        e.target.checked = !val
+        if (v0) v0.textContent = `保存失败（已把勾选退回）：${err.message}`
+      }
+      return
+    }
     // 「微信联系人（放行）」：跳到设置页那一节。
     // 为什么要有个跳转而不是在这里直接勾选：放行 = 让机器人开始对**某个真人**说话，
     // 那是用户的决定，入口应该只有一处（设置页那节），页签只负责把人送过去。
@@ -4931,10 +4961,22 @@ async function loadWechatPage({ force = false } = {}) {
   }
   let st = null
   let logs = []
+  let cfg = null
   try { st = await api('/api/wechat/channel/status') } catch { st = null }
   try { logs = (await api('/api/wechat/channel/logs?limit=100')).logs || [] } catch { /* 日志读不到不影响状态 */ }
+  try { cfg = await api('/api/config') } catch { /* 配置读不到就保留上一次的勾选，不闪 */ }
   const sBox = document.getElementById('wx-status')
   if (sBox) sBox.innerHTML = renderWechatStatus(st)
+  // ⚠️ 自启动开关**只在值真的变了时才重建 DOM**：这个函数是轮询调用的，
+  //    每轮重写勾选框会和"用户正在点它"打架（点下去又被旧值刷回去）。
+  const aBox = document.getElementById('wx-autostart')
+  if (aBox && cfg?.wechat) {
+    const key = `${!!cfg.wechat.autoLaunchRelay}|${cfg.wechat.autoLaunchWeFlow !== false}`
+    if (aBox.dataset.renderKey !== key) {
+      aBox.dataset.renderKey = key
+      aBox.innerHTML = renderWechatAuto(cfg)
+    }
+  }
   const v = document.getElementById('wx-verdict')
   if (v) {
     const verdict = wechatVerdict(st)
