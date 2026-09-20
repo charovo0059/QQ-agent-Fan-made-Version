@@ -372,6 +372,22 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
     ? cfg.systemPromptSegments
     : {};
   const keys = Object.keys(defaults);
+  // 🔴 逐段覆盖**只对 QQ 生效**（用户 2026-09-20 拍板选 A）。
+  //
+  // ── 为什么（线上实测出来的）────────────────────────────────────────────
+  // 覆盖是**平台无关**的：管理员写 `stickerRules` 覆盖时想的是 QQ 的能力
+  // （`list_stickers` / `send_sticker` / `send_poke` / 【可用表情包】），
+  // 而这段文本会被**原样套到微信侧** ⇒ 覆盖掉我按平台做的内置版，
+  // 于是微信侧又在教她调一堆不存在的能力 —— 正是本次平台改造要消灭的东西。
+  // 实测（2026-09-20，线上真实 config）：微信侧系统提示里
+  // `send_poke` / `send_sticker` / `list_stickers` **都还在**，「拍一拍」出现 **3 次**，
+  // 而 K3 刚定稿的"一条事实只出现一次"因此对线上**不生效**。
+  //
+  // ⚠️ 只改**逐段覆盖**，不动 `persona.systemPrompt`（整份覆盖）：
+  //    后者一旦非空就是"我完全自己写"，那时平台感知本就无从谈起（它现在是空的）。
+  // ⚠️ 界面（设置 → 人设 → 系统提示自定义）里已写明"逐段替换只对 QQ 生效"，
+  //    否则用户会以为自己的定制在微信侧也生效了 —— 那是**界面在说谎**。
+  const isWechat = String(platform) === 'wechat';
   // ⚠️ **跳过空段**（2026-09-20 加，K3 第二轮回执 · 问题二 C 要用）：
   //    微信侧的 `stickerRules` 现在是**空串**（整段下线），而原来那段 `parts.push('')`
   //    的写法会让它留下一个**空行**（= 提示词里凭空多一个空块）。
@@ -380,7 +396,7 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
   //    所以 QQ 侧一个字都没变 —— 有 test-skills基础设施.mjs 的 sha256 钉着。
   const blocks = [];
   keys.forEach((key) => {
-    const override = overrides[key];
+    const override = isWechat ? '' : overrides[key];
     const text = override && String(override).trim()
       ? expandPlaceholders(String(override).trim(), cfg)
       : defaults[key];
