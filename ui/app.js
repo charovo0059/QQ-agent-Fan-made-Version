@@ -4813,6 +4813,7 @@ function wechatPageShell() {
       <button class="btn btn-small" id="wx-stop-btn">停止通道</button>
       <button class="btn btn-small" id="wx-weflow-btn" title="WeFlow 是第三方应用，我们只能替你点一下火">启动 WeFlow</button>
       <button class="btn btn-small" id="wx-check-btn">一键自检</button>
+      <button class="btn btn-small" id="wx-contacts-btn" title="放行谁能收她的消息 —— 在「设置 → 微信联系人」里勾选">微信联系人（放行）</button>
     </div>
     <div id="wx-verdict" class="hint" style="margin-bottom:8px"></div>
     <div id="wx-status"></div>
@@ -4877,6 +4878,14 @@ function bindWechatPageEvents() {
       'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow']
     }
     if (id === 'wx-check-btn') { loadWechatPage({ force: true }); return }
+    // 「微信联系人（放行）」：跳到设置页那一节。
+    // 为什么要有个跳转而不是在这里直接勾选：放行 = 让机器人开始对**某个真人**说话，
+    // 那是用户的决定，入口应该只有一处（设置页那节），页签只负责把人送过去。
+    if (id === 'wx-contacts-btn') {
+      state.settingsSection = 'wechat';
+      switchTab('settings');    // 内部会 loadSettings()，按 state.settingsSection 渲染
+      return
+    }
     const hit = map[id]
     if (!hit) return
     const [path, label] = hit
