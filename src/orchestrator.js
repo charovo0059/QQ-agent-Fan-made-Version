@@ -630,6 +630,9 @@ export class Orchestrator {
     const systemPrompt = buildSystemPrompt({ platform });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
+      // 平台一并传下去：记忆互通要在提示词里标出"这条来自哪个平台"（QQ↔微信）。
+      // 不传的话 formatForPrompt 会自己去问 memory.platformOf（有缓存），只是多一次查找。
+      platform,
       triggerEntries,
       store: this.store,
       memory: this.memory,

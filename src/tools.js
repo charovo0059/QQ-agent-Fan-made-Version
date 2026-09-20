@@ -873,8 +873,8 @@ export function buildToolDefs() {
         return ok(cross.length
           ? {
             memberImpression: list,
-            fromOtherChats: cross.map((x) => ({ content: x.content, from: x.fromLabel, createdAt: x.createdAt })),
-            note: 'fromOtherChats 是**别的会话**里记下的印象，只在那个场合说，别主动拿到这里提。'
+            fromOtherChats: cross.map((x) => ({ content: x.content, from: x.fromLabel, platform: x.fromPlatform || 'qq', userId: x.memberId || userId, name: x.memberName || '', createdAt: x.createdAt })),
+            note: 'fromOtherChats 是**别的会话**里记下的印象（每条带 from 来源、userId 归属人，platform 区分 QQ/微信）：只在那个场合说，别主动拿到这里提。'
           }
           : { memberImpression: list });
       }

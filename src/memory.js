@@ -194,9 +194,52 @@ function chatLabel(chatKey) {
   return m ? `群 ${m[1]}` : s;
 }
 
+/**
+ * 「这个印象属于谁」的标签 —— 用户 2026-09-20 的硬要求：
+ * **"要让她知道记忆印象来自哪里以及属于谁，不以名字而是以 id 为准，名字为辅，
+ *   微信侧则是以名字为主，因为微信通常是固定备注不会变"**。
+ *
+ * 落到字面上两边**恰好同形**：`名字（id 数字）`。区别在**读的人怎么用**（写进提示词的引导语里说清）：
+ *   · QQ   ：名字随时会改（群名片/昵称）⇒ 真正的锚是 **id**，名字只是线索
+ *   · 微信 ：名字是固定备注 ⇒ **名字**可信、可直接当她认人的依据，id 是补充
+ *
+ * ⚠️ 名字缺失时只给 `id 数字`，**不要编一个名字**。
+ * ⚠️ `id` 这两个字是故意写的：QQ 号与微信派生 id **形态一样、会撞号**
+ *    （微信 id 是桥派生的 31 位数字，见 store.js 的 chatSource 注释），
+ *    所以这个标签本身**不足以区分平台** —— 跨平台时调用方必须另外标出平台
+ *    （见 `sourceTag`），否则"id 1234"到底是 QQ 还是微信根本看不出来。
+ *
+ * @param {string} uid  印象所属人的 id（可能为空）
+ * @param {string} name 名字（备注/群名片/昵称）
+ */
+function whoLabel(uid, name) {
+  const n = String(name || '').trim();
+  const id = String(uid || '').trim();
+  if (!id) return n || '某人';
+  if (!n || n === id) return `id ${id}`;
+  return `${n}（id ${id}）`;
+}
+
+/**
+ * 「这个印象来自哪里」的标签。
+ * 同平台且同一个会话时**不标** —— 那是最常见的情况，标了只是噪声
+ * （而且 QQ 侧的提示词有"不许出现 QQ 字样"的既有约束，见 src/prompt.js）。
+ */
+function sourceTag(chatKey, { mine, platform }) {
+  const p = String(platform || 'qq');
+  const parts = [];
+  if (p !== mine) parts.push(p === 'wechat' ? '微信' : 'QQ');
+  parts.push(chatLabel(chatKey));
+  return parts.join('·');
+}
+
 export class MemoryStore {
   constructor() {
     this.cache = new Map(); // chatKey -> Map(userId|_n_xx, member)
+    // 会话 → 平台（'qq'/'wechat'）的缓存，来源是 messages/<chatKey>.json 的 source 字段。
+    // 见 platformOf 的注释：不能 import store.js（循环依赖），所以这里自己读 + 缓存。
+    this._platCache = null;
+    this._platStamp = -1;
   }
 
   /** 扫描所有有记忆的会话（文件夹或旧版单文件）。 */
@@ -592,66 +635,150 @@ export class MemoryStore {
    * 生成提示词里的【对群友的印象】摘要。
    * opts.userIds 提供时只包含这些成员（相关成员注入，控制 token）。
    *
-   * 管理端给某个 QQ 号设了「跨会话互通」时，这里会额外带上他在**别的会话**里的印象，
-   * 每行标出来源（（私聊）/（群 123456）），并加一句提醒别把 A 场合的私事拿到 B 场合说。
+   * ── 互通的三条来源（2026-09-20 第九对话扩，**取并集**）──
+   *   ① 本会话的印象（原行为，speaking 的人会加权，**不占跨会话额度**）
+   *   ② 同一个人的印象来自别处（`config.memory.share` 按人 + `unifiedMembers` 跨平台/跨组）
+   *   ③ **别的会话里别人的印象**（`config.memory.groups` 按组 / `memory.unified` 全互通）
+   * ②③ 都要标「来自哪、属于谁」，并且都占 `CROSS_CHAT_TOTAL` 的额度、都要过门槛。
+   *
+   * ⚠️ ②③ 是**一个循环里轮流取**的，不能分两趟：分两趟就等于给先跑的那趟
+   *    额外发一份额度，"公平取样"当场失效（本项目 2026-09-15 已经因为
+   *    "按 createdAt 全局排序"吃过一次亏，见 crossChatImpressions 的注释）。
+   *
+   * @param {string} chatKey
+   * @param {{userIds?: string[]|null, queryText?: string, now?: number, platform?: string}} opts
+   *        platform = 当前会话的平台（'qq'/'wechat'），由 orchestrator 传进来；
+   *        缺省时自己去问 platformOf（会读 messages 目录，有缓存）。
    */
-  formatForPrompt(chatKey, { userIds = null, queryText = '', now = Date.now() } = {}) {
+  formatForPrompt(chatKey, { userIds = null, queryText = '', now = Date.now(), platform = '' } = {}) {
     const notes = getConfig().memberNotes || {};
+    const mine = String(platform || this.platformOf(chatKey) || 'qq');
     const all = this.members(chatKey);
-    if (!all.length) return '';
     const filter = userIds ? new Set([...userIds].map(String)) : null;
     const picked = filter
       ? all.filter((m) => !m.userId || filter.has(String(m.userId)))  // 无 QQ 号的旧数据始终带上
       : all.slice(0, 15);
-    if (!picked.length) return '';
 
     // 门槛制：按相关度打分，过线才进（低于门槛宁可零条）。
     const keywords = extractKeywords(queryText);
     const speaking = new Set(userIds ? [...userIds].map(String) : []);
-    const lines = ['【对群友的印象】'];
-    let crossBudget = CROSS_CHAT_TOTAL;
-    let usedCross = false;
-    let admitted = 0;
-    for (const m of picked) {
-      const who = notes[String(m.userId)] || m.name || String(m.userId || '') || '某人';
-      const isSpeaking = !!(m.userId && speaking.has(String(m.userId)));
-      // 本地印象：逐条打分、过线才进。**不再 slice(-3)** —— 那是配额制。
-      const scored = (m.impressions || [])
-        .map((e) => ({ e, s: scoreImpression(e, { member: m, isSpeaking, keywords, now }) }))
-        .filter((x) => x.s > IMPRESSION_THRESHOLD)
-        .sort((a, b) => b.s - a.s);
-      const seen = new Set();
-      for (const { e } of scored) {
-        const key = String(e?.content ?? '').trim();
-        if (!key) continue;
-        seen.add(key);
-        lines.push(`- ${who}：${e.content}`);
-        admitted += 1;
-      }
-      // 跨会话：同一个人在别处记下的印象（同一个会话里已出现过的那句不再重复）。
-      // ⚠️ 跨会话同样走门槛 —— 否则"配额制"会从这个入口原样漏回来。
-      if (crossBudget > 0) {
-        for (const x of this.crossChatImpressions(chatKey, m.userId)) {
-          const key = String(x.content ?? '').trim();
-          if (!key || seen.has(key)) continue;
-          if (crossBudget <= 0) break;
-          const s = scoreImpression({ content: x.content, createdAt: x.createdAt }, { isSpeaking, keywords, now });
-          if (s <= IMPRESSION_THRESHOLD) continue;
-          seen.add(key);
-          lines.push(`- ${who}（${x.fromLabel}）：${x.content}`);
-          crossBudget -= 1;
-          admitted += 1;
-          usedCross = true;
-        }
+
+    // 每个 (会话, 成员) 装一桶 —— 公平取样的单位是**成员**不是会话：
+    // 组里有 5 个会话时，只按会话轮转会让"每个会话的第一个成员"占尽额度。
+    //
+    // ⚠️ 三条来源必须**在一个桶集合里**轮流取，不能分几趟各取各的：
+    //    分趟等于给每趟单独发一份额度，"公平取样"当场失效
+    //    （本项目 2026-09-15 已经因为"按 createdAt 全局排序"吃过一次亏）。
+    const buckets = [];
+    const pushed = new Set();
+    const pushBucket = (chat, m, isSpeaking, cross) => {
+      const items = (m?.impressions || []).filter((e) => e?.content);
+      if (!items.length) return;
+      // 同一个 (会话, 成员) 可能被多条轴同时选中 ⇒ 去重，否则那一桶的权重凭空翻倍。
+      const sig = chat + '\u0000' + String(m?.userId || '') + '\u0000' + (cross ? 'x' : 's');
+      if (pushed.has(sig)) return;
+      pushed.add(sig);
+      buckets.push({ chat, m, items, isSpeaking, sameChat: chat === chatKey, cross });
+    };
+
+    // ① 本会话：按 userIds 过滤（原行为，speaking 的人会加权）
+    for (const m of picked) pushBucket(chatKey, m, !!(m.userId && speaking.has(String(m.userId))), false);
+
+    // ② **按人**那条轴（`config.memory.share`）—— 原有功能，必须继续有效。
+    //    对这一轮相关的人，把他在**别处**的印象也装进来。
+    //    ⚠️ 不看 `userIds`：`picked` 里没有的人，他照样可能在别处有印象。
+    for (const uid of speaking) {
+      if (!this.sharesInto(chatKey, uid)) continue;
+      for (const other of this.listChats()) {
+        if (other === chatKey) continue;
+        const m = this.memberIn(other, uid);
+        if (m) pushBucket(other, m, true, true);
       }
     }
+
+    // ③ **按会话组 / 全互通**那条轴 —— 组内**所有人**的印象（`groups` / `unified`）。
+    //    这是"别的会话里别人说的话也能带过来"，占额度、也要过门槛。
+    for (const other of this.memberVisibleChats(chatKey, mine)) {
+      for (const m of this.members(other)) pushBucket(other, m, false, true);
+    }
+
+    // ④ **跨平台/同平台的"同一个人的记忆"**（`unifiedMembers`），哪怕他一个组都没进。
+    for (const uid of speaking) {
+      for (const other of this.ownVisibleChats(chatKey, mine)) {
+        if (other === chatKey) continue;
+        const m = this.memberIn(other, uid);
+        if (m) pushBucket(other, m, true, true);
+      }
+    }
+
+    const lines = ['【对群友的印象】'];
+    let crossBudget = CROSS_CHAT_TOTAL;
+    let admitted = 0;
+    let otherCross = false;   // 出现了"别人的"印象（③别人的会话内容）
+    const seen = new Set();
+
+    // ⚠️ 两条轴**分开轮流**，别让一条把额度吃光（第九对话实测踩到）：
+    //    `groups`/`unified` 一开，别的会话里**所有人**的印象都会来抢；
+    //    而"正在说话这个人在私聊里那份"只有一条 —— 单人打不过一堆人，
+    //    实测它就被挤出去了（而那条恰恰是"他在别处是谁"最该带上的）。
+    //    ⇒ 同一轮里两条轴各取一条。
+    const ownAxis = buckets.filter((b) => !b.cross);    // 本会话
+    const crossAxis = buckets.filter((b) => b.cross);   // 别的会话（按人 + 按组）
+
+    // 每一轮，每个桶各拿一条（从各自**最新的一条往前**），拿满额度为止。
+    for (let round = 0; ; round++) {
+      let progressed = false;
+      for (const axis of [ownAxis, crossAxis]) {
+        for (const b of axis) {
+          const e = b.items[b.items.length - 1 - round];
+          if (!e) continue;
+          progressed = true;
+          const content = String(e.content ?? '').trim();
+          if (!content || seen.has(content)) continue;
+          // ⚠️ `keywords` / `now` 必须**显式传**：`scoreImpression` 的签名是
+          //    `{ member, isSpeaking, keywords = [], now = Date.now() }`，而桶对象里
+          //    **没有** keywords 这个字段 ⇒ 展开 b 之后它会被默认成 `[]`，
+          //    关键词那一项恒为 0、所有印象都卡在 0.295 过不了 0.30 的门槛 ——
+          //    症状是"记忆段永远为空"，**不报错**。（第九对话实测踩到。）
+          const s = scoreImpression({ content, createdAt: e.createdAt }, { ...b, keywords, now });
+          if (s <= IMPRESSION_THRESHOLD) continue;
+
+          const uid = String(b.m?.userId || '');
+          const name = notes[uid] || b.m?.name || '';
+          if (b.sameChat) {
+            // 本会话：原样，不带来源标记（最常见的情况，标了只是噪声）
+            seen.add(content);
+            lines.push(`- ${whoLabel(uid, name)}：${content}`);
+            admitted += 1;
+            continue;
+          }
+          // 跨会话：占额度。带「来自…」标出来源会话与归属人。
+          if (crossBudget <= 0) continue;
+          seen.add(content);
+          const tag = sourceTag(b.chat, { mine, platform: this.platformOf(b.chat) });
+          lines.push(`- ${whoLabel(uid, name)}｜来自${tag}：${content}`);
+          crossBudget -= 1;
+          admitted += 1;
+          if (!speaking.has(uid)) otherCross = true;   // 这条属于**这个会话里没在说话的人**
+        }
+      }
+      if (!progressed) break;   // 所有桶都取空了
+    }
+
     // 一条都没过线 ⇒ 宁可不给（"错的不如空着"）。
     // ⚠️ 这会让"记忆"段经常为空 —— 那是**预期行为**，不是故障。
     if (!admitted) return '';
-    if (usedCross) {
-      lines.splice(1, 0,
-        '（带「（私聊）」「（群 X）」的是**别的场合**记下的：那件事只在那个场合说，'
-        + '别主动拿到这里提；对方自己提起来再接。）');
+
+    // 引导语：把"id 是锚、名字只是线索"说清楚（用户明确要求"让她知道属于谁"）。
+    // 插在标题下面，尽量短 —— 这段每轮都在提示词里，占 token。
+    lines.splice(1, 0, '（名字后面的 `id` 才是认人的依据：同一个人可能换名字；id 相同就是同一个人。）');
+    if (crossBudget < CROSS_CHAT_TOTAL) {
+      const note = otherCross
+        ? '（带「来自…」的是在**别的会话**里记下的、属于那里的人：这里的人不知道那些事，'
+          + '别拿出来说、也别把两个会话的人搞混。）'
+        : '（带「来自…」的是**别的场合**记下的：那件事只在那个场合说，别主动拿到这里提；'
+          + '对方自己提起来再接。）';
+      lines.splice(2, 0, note);
     }
     return lines.join('\n');
   }
@@ -663,6 +790,134 @@ export class MemoryStore {
   // QQ 号选方向（config.memory.share），让这个人在别处的印象也进当前会话的提示词。
   //
   // 只影响**读**：写入永远只写当前会话，所以每条印象都还能追溯到是哪个场合记下的。
+
+  /**
+   * ══ 按会话自由成组的互通（2026-09-20 第九对话加）══
+   *
+   * 与上面按 QQ 号的 `share` 是**两条独立的轴**，取**并集**：
+   *   · `sharesInto`        = 按人（这个人在别处的印象）
+   *   · `visibleChatsIn`    = 按会话组（这几个会话之间的记忆互通）
+   *
+   * 配置见 `config.memory.groups` / `unified` / `unifiedMembers`。
+   * ⚠️ 全部**只放宽读**，写入照旧只写当前会话 —— 这是本文件既有的硬规矩（见上面那段注释）。
+   */
+
+  /** 当前会话所属的全部互通组名。 */
+  groupsOf(chatKey) {
+    const g = getConfig().memory?.groups;
+    if (!g || typeof g !== 'object') return [];
+    const key = String(chatKey || '');
+    const out = [];
+    for (const [name, list] of Object.entries(g)) {
+      if (!Array.isArray(list)) continue;
+      if (list.some((x) => String(x) === key)) out.push(String(name));
+    }
+    return out;
+  }
+
+  /** 全互通开关开没开。 */
+  unifiedOn() {
+    return getConfig().memory?.unified === true;
+  }
+
+  /** `unifiedMembers` 的合法值归一（非法值一律当最保守的 off，不炸）。 */
+  membersScope() {
+    const v = getConfig().memory?.unifiedMembers;
+    return v === 'all' || v === 'samePlatform' || v === 'off' ? v : 'samePlatform';
+  }
+
+  /**
+   * 当前会话的**成员**能看到哪些会话的东西（不含当前会话自己；`unified` 时返回全部会话）。
+   * 这就是"按组互通"那一条轴。
+   *
+   * 🔴 **刻意不看 `unifiedMembers` 的平台限制**（2026-09-20 第九对话定的）：
+   *    用户要的是"自由选择组合、qq 可以通微信" ⇒ **进了同一个组就该通**，
+   *    再按平台偷偷过滤会让"我把 QQ 群和微信私聊编成一组"这种配置**静默失效**
+   *    （用户明明配了、却什么都没发生 —— 本项目最忌讳的坏法）。
+   *    `unifiedMembers` 的 `samePlatform` 只约束**"同一个人"**那条轴（见 `ownVisibleChats`）：
+   *    那条轴是**猜**"两边的 id 是不是同一个人"（微信 id 是桥派生的 31 位数字，与 QQ 号会撞号），
+   *    猜错了就会把不相干的人认成同一个人 —— 所以它必须保守。
+   *    而这条轴是用户**显式指定**的会话，没有"猜"的成分，不该替他打折扣。
+   */
+  memberVisibleChats(chatKey, platform) {
+    if (!chatKey) return [];
+    if (this.unifiedOn()) return this.listChats().filter((k) => k !== chatKey);
+    const mine = this.groupsOf(chatKey);
+    if (!mine.length) return [];
+    const out = [];
+    for (const other of this.listChats()) {
+      if (other === chatKey) continue;
+      if (mine.some((name) => this.groupsOf(other).includes(name))) out.push(other);
+    }
+    void platform;   // 保留入参：将来若要"按平台排除某些组"再启用，现在刻意不用
+    return out;
+  }
+
+  /**
+   * 同一个人的印象**跨会话**能看到哪些会话（`unifiedMembers`）。
+   * 与 `memberVisibleChats` 的区别只有一个：这个**只带同一个人的**印象，
+   * 因此不受 `groups` 限制 —— 那是"跨人"的泄露风险，而"同一个人"不是。
+   */
+  ownVisibleChats(chatKey, platform) {
+    if (!chatKey) return [];
+    const scope = this.membersScope();
+    if (scope === 'off') return [];
+    return this.listChats().filter((other) => {
+      if (other === chatKey) return false;
+      if (scope === 'all') return true;
+      return !!platform && this.platformOf(other) === platform;
+    });
+  }
+
+  /**
+   * 某个会话属于哪个平台（`'qq'` / `'wechat'`）。
+   *
+   * ⚠️ 平台信息是 `store` 记在**消息文件**里的（`messages/<chatKey>.json` 的 `source`），
+   *    而 `memory.js` **不能 import store.js**（会形成循环依赖：store → config → …
+   *    而本文件只依赖 config）。所以这里直接读那个字段，并**缓存**：
+   *    提示词是每轮现拼的，不缓存就会每轮把所有会话文件都读一遍。
+   *    失效判据用目录 mtime —— 新会话落盘时目录 mtime 一定会变。
+   */
+  platformOf(chatKey) {
+    const key = String(chatKey || '');
+    if (!key) return 'qq';
+    const map = this.#platformMap();
+    return map.get(key) || 'qq';   // 老会话没有 source 字段 ⇒ 兜底 qq（与 store.chatSource 一致）
+  }
+
+  #platformMap() {
+    const dir = path.join(DATA_DIR, 'messages');
+    let stamp = 0;
+    try { stamp = fs.statSync(dir).mtimeMs; } catch { /* 目录不存在 */ }
+    if (this._platCache && this._platStamp === stamp) return this._platCache;
+
+    const map = new Map();
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        const m = /^(group|private)_(\w+)\.json$/.exec(f);
+        if (!m) continue;
+        try {
+          const j = readJson(path.join(dir, f), null);
+          if (j && typeof j.source === 'string' && j.source) map.set(`${m[1]}:${m[2]}`, j.source);
+        } catch { /* 单个文件坏了不影响别人 */ }
+      }
+    } catch { /* 目录不存在 */ }
+    this._platCache = map;
+    this._platStamp = stamp;
+    return map;
+  }
+
+  /** 这个会话自己记下的那个成员（可能是当前正在说话的人）。 */
+  memberIn(chatKey, userId) {
+    const uid = String(userId ?? '').trim();
+    if (!uid) return null;
+    try { return this.getMember(chatKey, uid); } catch { return null; }
+  }
+
+  /** 这个会话里所有有印象的成员 id。 */
+  memberIdsIn(chatKey) {
+    try { return this.members(chatKey).map((m) => String(m.userId || '')).filter(Boolean); } catch { return []; }
+  }
 
   /** 这个 QQ 号的互通方向；'' = 不互通。 */
   shareModeOf(userId) {
@@ -683,12 +938,29 @@ export class MemoryStore {
 
   /**
    * 这个人在**其它会话**里的印象。
-   * @returns {Array<{content:string, from:string, fromLabel:string, createdAt:number}>}
+   *
+   * 来源会话 = 两条轴的并集（2026-09-20 第九对话扩）：
+   *   ① 按人：`sharesInto` 允许时**所有**会话（`config.memory.share`，原有行为）
+   *   ② 按组：`ownVisibleChats` —— 同一个人的印象跨组/跨平台的可见范围（`unifiedMembers`）
+   *
+   * @returns {Array<{content, from, fromLabel, fromPlatform, memberName, memberId, sameChat, createdAt}>}
    *          没开互通 / 方向不允许 / 没有别处数据 → 空数组
    */
-  crossChatImpressions(chatKey, userId, { limit = CROSS_CHAT_PER_MEMBER } = {}) {
+  crossChatImpressions(chatKey, userId, { limit = CROSS_CHAT_PER_MEMBER, platform = '' } = {}) {
     const uid = String(userId ?? '').trim();
-    if (!uid || !this.sharesInto(chatKey, uid)) return [];
+    if (!uid) return [];
+
+    const mine = this.platformOf(chatKey);
+    const from = [];
+    // ① 按人（原有那条轴，行为不变）
+    if (this.sharesInto(chatKey, uid)) {
+      for (const other of this.listChats()) if (other !== chatKey) from.push(other);
+    }
+    // ② 按组 / 跨平台同人（新那条轴）。⚠️ 去重 —— 两条轴会重叠。
+    for (const other of this.ownVisibleChats(chatKey, mine)) {
+      if (!from.includes(other)) from.push(other);
+    }
+    if (!from.length) return [];
 
     // 先把每个来源会话各自装一桶，**再轮流取** —— 不能按 createdAt 全局排序取最新 N 条。
     //
@@ -699,12 +971,10 @@ export class MemoryStore {
     //    整个挤了出去，而私聊那份恰恰是"这个人在别处是谁"最该带上的一条。
     //    轮流取能保证：只要某个会话有内容，它就至少有一条进得来。
     const buckets = [];
-    for (const other of this.listChats()) {
-      if (other === chatKey) continue;
-      let m;
-      try { m = this.getMember(other, uid); } catch { continue; }
-      const items = (m.impressions || []).filter((e) => e?.content);
-      if (items.length) buckets.push({ from: other, fromLabel: chatLabel(other), items });
+    for (const other of from) {
+      const m = this.memberIn(other, uid);
+      const items = (m?.impressions || []).filter((e) => e?.content);
+      if (items.length) buckets.push({ from: other, items, name: String(m?.name || '') });
     }
 
     // 每一轮，每个会话各拿一条（从各自**最新的一条往前**），拿满 limit 为止。
@@ -718,7 +988,11 @@ export class MemoryStore {
         out.push({
           content: String(e.content),
           from: b.from,
-          fromLabel: b.fromLabel,
+          fromLabel: chatLabel(b.from),
+          fromPlatform: this.platformOf(b.from),
+          memberName: b.name,
+          memberId: uid,
+          sameChat: false,
           createdAt: Number(e.createdAt) || 0
         });
         picked += 1;
