@@ -538,7 +538,32 @@ export function loadConfig() {
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = JSON.parse(text);
     return migrateSliderPos(deepMerge(DEFAULT_CONFIG, parsed));
-  } catch {
+  } catch (error) {
+    // ⚠️ 这里绝不能"静默回退默认值"：配置坏了 → 返回默认值 → 任何一个
+    // updateConfig/scheduleConfigSave 都会把**整份默认配置**原子写回
+    // （tmp + rename），用户真实的 API key、触发词、机器人别名、人设改动
+    // 就被永久覆盖，而且没有任何报错。所以先把坏文件改名留档，再回退。
+    // 只在"读到了文件、但解析不出来"时留档：文件不存在是首次运行；
+    // 而 EACCES/EBUSY 这类**读都读不到**的情况，说明我们既没读到内容、
+    // 多半也重命名不动它（真重命名成功反而更糟），交给用户自己处理。
+    const parseFailed = error instanceof SyntaxError;
+    let backup = '';
+    if (parseFailed && fs.existsSync(CONFIG_FILE)) {
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+      try {
+        backup = `${CONFIG_FILE}.corrupt-${stamp}`;
+        fs.renameSync(CONFIG_FILE, backup);
+      } catch (moveError) {
+        backup = '';
+        console.error('[config] 配置损坏且留档失败:', moveError?.message ?? moveError);
+      }
+    }
+    console.error(
+      `[config] 配置读不出来，已按默认值启动：${error?.message ?? error}` +
+      (backup ? `；原文件已留档 ${backup}（改好它再重启，别让后台任务把默认值覆盖回去）` : '')
+    );
     return structuredClone(DEFAULT_CONFIG);
   }
 }
