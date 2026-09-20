@@ -280,9 +280,33 @@ export function jmRequest(req, { timeoutMs = null } = {}) {
   return next
 }
 
+/**
+ * 健康检查（ping）该等多久 —— **单独抽成导出函数，就为了能被测试钉住**。
+ *
+ * ⚠️ 2026-09-21（第十对话）修：原来 jmPing 里写死 `{ timeoutMs: 15000 }`，**不吃配置**。
+ *    后果实测：走到 exe 路线（PyInstaller onefile）时，第一次 ping 要等它把自身解包，
+ *    空载冷启动实测约 1000ms，但密集重跑回归（73 个子进程抢磁盘）时会涨过 15 秒 ⇒
+ *    `test-jm-routes.mjs` 第 2 节「exe 路线 ping 通了」反复假红（单跑 1.2s 全过，22:11 /
+ *    22:14 / 22:36 / 23:08 共 4 次），而超时会 killChild 强杀 exe，PyInstaller 来不及
+ *    自清理 ⇒ 每次失败在 %TEMP% 留一个 _MEI*（约 16.7MB），残留又让下次冷启动更慢 ——
+ *    典型的反馈环。
+ *
+ * 取「配置值与 30000 的较大者」：
+ *   · **不能只读配置**：配置允许小到 3000（见 conf()），那对"首次冷启动"这种一次性开销太小；
+ *   · 下限只作用于**这一条健康检查**，正式查询仍严格按 conf().timeoutMs 走（见 jmRequest）。
+ *
+ * 为什么必须是函数而不是常量：常量会被下一次重构无声地写死回去，而**任何行为测试都测不出来**
+ * （真实 ping 是毫秒级，30 秒的上限永远碰不到）—— 当初的 15000 就是这么躲过全部 73 个测试的。
+ * 抽成纯函数后，`test-jmPing超时不吃写死值.mjs` 可以在毫秒内断言这个值随配置走。
+ */
+export const JM_PING_TIMEOUT_FLOOR_MS = 30000
+export function jmPingTimeoutMs() {
+  return Math.max(JM_PING_TIMEOUT_FLOOR_MS, conf().timeoutMs || 0)
+}
+
 /** 健康检查：给界面"测试"按钮和工具首次调用用。 */
 export async function jmPing() {
-  const r = await jmRequest({ cmd: 'ping' }, { timeoutMs: 15000 })
+  const r = await jmRequest({ cmd: 'ping' }, { timeoutMs: jmPingTimeoutMs() })
   return r
 }
 
