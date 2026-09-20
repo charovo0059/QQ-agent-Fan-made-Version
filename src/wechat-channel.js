@@ -42,7 +42,7 @@ export class WechatChannel {
    * @param {string} o.nodeExe 用哪个 node 跑脚本（默认 process.execPath + ELECTRON_RUN_AS_NODE）
    * @param {(msg:string)=>void} [o.log]
    */
-  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weflowExe = '', nodeExe = '', findPids = null, log = () => {} }) {
+  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weflowExe = '', nodeExe = '', findPids = null, findChannelProcs = null, log = () => {} }) {
     this.isPortOpen = isPortOpen
     this.relayStatusUrl = String(relayStatusUrl || 'http://127.0.0.1:11230').replace(/\/$/, '')
     // 候选路径可以是**数组**，也可以是**函数**（每次现算）。
@@ -56,6 +56,9 @@ export class WechatChannel {
     // ⚠️ 进程探测**可注入**：它读的是"这台机器上真有没有 WeFlow 在跑"，
     //    测试里必须能固定住，否则断言会随测试机的状态飘（本机恰好一直开着 WeFlow）。
     this.#findPids = typeof findPids === 'function' ? findPids : () => this.#tasklistPids()
+    // 通道进程探测同理可注入：它读的是"这台机器上真有没有通道在跑"，
+    // 不固定住的话，**同一条断言会随测试机状态飘**（本机恰好一直开着通道 —— 已经栽过一次）。
+    this.#findChannels = typeof findChannelProcs === 'function' ? findChannelProcs : () => this.#scanChannelProcesses()
     this.log = log
     this.proc = null
     this.startedAt = 0
@@ -65,6 +68,7 @@ export class WechatChannel {
   #candidatesFn = () => []
   #weflowFn = () => []
   #findPids = () => []
+  #findChannels = () => []
 
   /** 当前的候选路径（现算，见构造函数的说明）。 */
   candidates() {
@@ -249,18 +253,99 @@ export class WechatChannel {
     return { ok: false, launched: true, error: `WeFlow 已启动，但 ${Math.round(waitMs / 1000)} 秒内端口 5031 没通（请到它的窗口里看一眼）`, exe: r.exe }
   }
 
-  /** 停掉**本模块拉起的**那个通道进程。外面的窗口自己跑的不归它管（如实说明）。 */
-  stop() {
-    const proc = this.proc
-    if (!proc) return { ok: true, stopped: false, note: '当前没有由本应用拉起的通道进程（可能是在外面自己跑的）' }
+  /**
+   * 找到**正在跑的通道进程**（不管是谁拉起的）。
+   *
+   * ── 为什么必须有它（2026-09-20 补，这是"启停通道"缺的那一半）─────────────
+   * `stop()` 原来只看 `this.proc`（本模块 spawn 出来的那个），而本机真实的通道
+   * （pid 28740，`D:\node\node.exe …\跑微信通道.mjs`）是**在外面窗口里跑的**
+   * ⇒ 用户点「停止通道」什么也没发生，界面还说"当前没有由本应用拉起的通道进程"。
+   * 那句话不算撒谎，但**按钮没干它写着的事** —— 与静默失败是同一类毛病。
+   *
+   * ⚠️ 用 `Get-CimInstance`（要 CommandLine）而不是 `tasklist`：tasklist 不给命令行，
+   *    而"哪个 node 进程是通道"只能靠命令行认。**贵**（PowerShell 启动几百毫秒），
+   *    所以**只在真正要停的时候调**，绝不放进会被轮询的 status()。
+   */
+  findChannelProcesses() {
     try {
-      proc.kill()
-      this.#push('已请求停止通道')
-      this.proc = null
-      return { ok: true, stopped: true }
+      const raw = this.#findChannels() || []
+      return (Array.isArray(raw) ? raw : [])
+        .map((r) => ({ pid: Number(r?.pid ?? r?.ProcessId), parentPid: Number(r?.parentPid ?? r?.ParentProcessId), name: String(r?.name ?? r?.Name ?? '') }))
+        // 排除自己：本进程的命令行里也可能出现同一个脚本名（比如测试里）
+        .filter((r) => Number.isInteger(r.pid) && r.pid > 0 && r.pid !== process.pid)
     } catch (e) {
-      this.#push(`停止通道失败：${e?.message ?? e}`)
-      return { ok: false, error: String(e?.message ?? e) }
+      this.#push(`查通道进程失败：${e?.message ?? e}`)
+      return []
+    }
+  }
+
+  /** 默认实现：问一次 WMI 拿命令行。**贵**，只在真要停的时候调。 */
+  #scanChannelProcesses() {
+    const script = this.findScript()
+    const needle = script ? path.basename(script) : '跑微信通道.mjs'
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${needle}*' } | `
+      + `Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress`
+    ], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    const txt = String(out || '').trim()
+    if (!txt) return []
+    const arr = JSON.parse(txt)
+    return Array.isArray(arr) ? arr : [arr]
+  }
+
+  /** 结束一个进程**连同它的子进程**。通道是"启动器 + 中继 + Bridge"三层，只杀头会留下占端口的孤儿。 */
+  #killTree(pid) {
+    try {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10000, stdio: 'ignore' })
+      return true
+    } catch (e) {
+      // taskkill 有时在"进程已经没了"时也返回非 0；不把它当成失败理由，交给调用方核对
+      this.#push(`taskkill ${pid} 返回非 0（可能已经退出）：${String(e?.message ?? e).slice(0, 80)}`)
+      return false
+    }
+  }
+
+  /**
+   * 停掉通道。
+   * @param {{force?:boolean}} [o] force=true 时**连外面窗口跑的那个也停**
+   *   （先关本模块拉起的；没有则找外面的）。默认 false = 只关自己拉起的那个。
+   *
+   * ⚠️ 语义刻意写清楚：默认保守（不碰别人的窗口），用户点「停止通道」时 UI 传 force=true
+   *    —— 因为那个按钮**写的就是停止通道**，点了却不动才是不对。
+   */
+  stop({ force = false } = {}) {
+    const proc = this.proc
+    if (proc) {
+      try {
+        const pid = proc.pid
+        proc.kill()
+        this.#push(`已请求停止通道（本应用拉起的 pid=${pid}）`)
+        this.proc = null
+        return { ok: true, stopped: true, killed: [pid], ours: true }
+      } catch (e) {
+        this.#push(`停止通道失败：${e?.message ?? e}`)
+        return { ok: false, error: String(e?.message ?? e) }
+      }
+    }
+    const external = this.findChannelProcesses()
+    if (!external.length) {
+      return { ok: true, stopped: false, note: '没找到正在跑的通道进程（11230 可能是别的程序占着，或者已经停了）' }
+    }
+    if (!force) {
+      return {
+        ok: true, stopped: false, external,
+        note: `通道不是本应用拉起的（pid ${external.map((p) => p.pid).join(',')}，外面窗口里跑的）。`
+          + '要停就再点一次「停止通道」。'
+      }
+    }
+    const killed = []
+    for (const p of external) if (this.#killTree(p.pid)) killed.push(p.pid)
+    this.#push(`已结束外面窗口跑的通道：pid ${external.map((p) => p.pid).join(', ')}`)
+    return {
+      ok: true, stopped: true, killed, ours: false,
+      external,
+      note: `通道原本是在外面的窗口里跑的（pid ${external.map((p) => p.pid).join(',')}），已连同子进程一起结束。`
+        + '（那个窗口本身不会自己关，会停在报错/退出的画面上，属正常。）'
     }
   }
 

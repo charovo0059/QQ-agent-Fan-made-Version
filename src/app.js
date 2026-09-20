@@ -1720,7 +1720,10 @@ export function createApp({ log = console.log } = {}) {
       }
       if (pathname === '/api/wechat/channel/stop' && method === 'POST') {
         try {
-          return json(res, 200, wechatChannel.stop());
+          // force=true 才连"外面窗口跑的"一起停。UI 的「停止通道」传 true ——
+          // 那个按钮写的就是停止通道，点了却不动才是不对（见 wechat-channel.js 的 stop 注释）。
+          const body = await readBody(req).catch(() => ({}));
+          return json(res, 200, wechatChannel.stop({ force: body?.force === true }));
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
         }
