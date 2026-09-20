@@ -4855,7 +4855,11 @@ function renderWechatStatus(st) {
       : (!a.connected ? '本应用没连上中继（会自己重试）' : (a.bridgeConnected === false ? '连上中继了，但上游（②）不通' : '通'))))
   const managed = st.managed?.pid
     ? `本应用拉起的通道进程 pid=${st.managed.pid}`
-    : '通道进程不是本应用拉起的（可能是你在外面的窗口里跑的，正常）'
+    // ⚠️ 这一句要**提前说清"停止按钮会动它"**：用户看到"外面的窗口里跑的，正常"，
+    //    会以为那个按钮碰不到它 —— 于是要么不敢点，要么点了被吓一跳。
+    : (c.running
+      ? '通道进程不是本应用拉起的（可能在你在外面的窗口里跑的）—— 点「停止通道」会把它一起停掉'
+      : '通道进程不是本应用拉起的（可能是你在外面的窗口里跑的，正常）')
   const script = st.script?.path ? `脚本：${st.script.path}` : '⚠️ 找不到通道脚本 —— 见下方候选路径'
   // ⚠️ 找不到 WeFlow 时**必须把找过哪些路径列出来**：只写"找不到"，用户只能来问我们。
   //    已找到时也报出来 —— 用户装了两份 WeFlow 时，得知道我们点的是哪一个。
@@ -4903,7 +4907,7 @@ function bindWechatPageEvents() {
       // 启动通道时**顺带把 WeFlow 点着**（后端默认这么做）：少了这一步，用户会遇到
       // "通道起来了、日志也正常，就是收不到消息"，原因是 WeFlow 没开。
       'wx-start-btn': ['/api/wechat/channel/start', '启动通道', { launchWeFlowFirst: true }],
-      'wx-stop-btn': ['/api/wechat/channel/stop', '停止通道', {}],
+      'wx-stop-btn': ['/api/wechat/channel/stop', '停止通道', { force: true }],
       // 拉起后等端口通（最多 45 秒）—— 否则用户点完立刻看到的还是"没在跑"，会以为失败了
       'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow', { wait: true }]
     }
@@ -4940,10 +4944,17 @@ function bindWechatPageEvents() {
     try {
       const r = await api(path, { method: 'POST', body: JSON.stringify(body || {}) })
       if (v) {
-        v.textContent = r?.ok
-          ? `${label}成功${r.alreadyRunning ? '（本来就在跑）' : (r.launched ? '（已拉起）' : '')}${r.waitedMs ? `，等了 ${Math.round(r.waitedMs / 1000)} 秒` : ''}`
+        if (!r?.ok) {
           // 失败要把**原文**带上（比如"找过这几个路径都不存在"），别只说"未知原因"
-          : `${label}失败：${r?.error || '未知原因'}`
+          v.textContent = `${label}失败：${r?.error || '未知原因'}`
+        } else if (r.note) {
+          // 🔴 有 note 就直接用它：`stopped:false` 也是 `ok:true`，
+          //    这时候说"停止通道成功"是**界面在说谎**（什么都没停）。
+          //    note 是后端写好的完整句子，含"它原本是谁拉起的、现在怎么了"。
+          v.textContent = `${label}：${r.note}`
+        } else {
+          v.textContent = `${label}成功${r.alreadyRunning ? '（本来就在跑）' : (r.launched ? '（已拉起）' : '')}${r.waitedMs ? `，等了 ${Math.round(r.waitedMs / 1000)} 秒` : ''}`
+        }
       }
     } catch (err) {
       if (v) v.textContent = `${label}失败：${err.message}`
