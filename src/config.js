@@ -166,7 +166,19 @@ export const DEFAULT_CONFIG = {
   },
   // 安全例外（默认全部关闭）
   security: {
-    allowPrivateImageHosts: false           // true 时图片下载允许内网地址（仅本地测试/自建图床）
+    allowPrivateImageHosts: false,          // true 时图片下载允许内网地址（仅本地测试/自建图床）
+    // ── 浏览锁定：把"她能浏览哪些域名"收成显式白名单（吸收自上游 0.4，2026-09-20）──
+    // 默认 **不启用**（enabled !== true ⇒ 一律放行），所以加了它不改变现有行为。
+    // 启用后：hostAllowed 支持子域（白名单有 example.com 时 img.example.com 也放行，
+    // 否则一个图床的 CDN 域名就把正常使用挡死）；但反向不成立。
+    // ⚠️ 开了锁定但 hosts 为空 = **全部拒绝**（比"全部放行"安全）。
+    // 生效点在 safe-fetch 的三个入口：safeFetch / safeFetchBinary / safeFetchBinaryToFile，
+    // 且**逐跳校验**重定向目标（否则白名单形同虚设）。
+    browseLock: {
+      enabled: false,
+      hosts: [],
+      siteSearchUrl: ''
+    }
   },
   // SnowLuma / OneBot v11
   snowluma: {
