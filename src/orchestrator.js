@@ -77,6 +77,8 @@ export class Orchestrator {
     this.wakeTimers = new Map();       // chatKey -> timer
     this.pendingWake = new Set();      // 防抖中等待聚批的 chatKey
     this.pendingSessions = new Map();  // chatKey -> waiting sessionId（防抖期可见的“等待中”会话）
+    // chatKey -> 本次唤醒**掷定的**随机档骰子（见 scheduleWake 顶部注释：预判与实跑必须用同一个）
+    this.pendingRoll = new Map();
     this.consolidating = new Set();    // 正在整理记忆的 chatKey
     this.runningChats = new Set();     // 正在运行的 chatKey
     this.activeRuns = new Map();       // chatKey -> sessionId
@@ -127,9 +129,11 @@ export class Orchestrator {
    * 所以防抖窗口期间每次来新消息都可以重新预判 ——
    * 先来一句闲聊（不命中、不显示），接着有人 @ 机器人（命中、立刻显示）。
    *
+   * @param {number|null} roll 随机档的骰子结果（0-100）。**必须由调用方固定并复用**
+   *   —— 见 `wake()` 里那段长注释：这个参数就是本条 bug 的修法。
    * @returns {{shouldRespond:boolean, tier:number, count:number, reason:string}}
    */
-  #predictTier(chatKey) {
+  #predictTier(chatKey, roll = null) {
     const cfg = getConfig();
     const entries = this.store.peekUnread(chatKey, 200) || [];
     const r = resolveContextTier({
@@ -137,7 +141,8 @@ export class Orchestrator {
       selfNickname: cfg.persona?.selfNickname || this.onebot.selfNickname || '',
       botName: cfg.persona?.botName || '',
       selfId: cfg.onebot?.selfId || this.onebot.selfId || '',
-      cfg: storeConfigForChat(chatKey)   // 按会话取档位：统一开关关闭时各群可以有独立滑条
+      cfg: storeConfigForChat(chatKey),   // 按会话取档位：统一开关关闭时各群可以有独立滑条
+      roll
     });
     // pending / hasUnread 是给「唤醒一次处理」按钮回报用的（原先只有 shouldRespond）。
     const extra = { pending: entries.length, hasUnread: entries.length > 0 };
@@ -146,10 +151,21 @@ export class Orchestrator {
     return { ...r, ...extra };
   }
 
-  scheduleWake(chatKey, delay = null) {
+  scheduleWake(chatKey, delay = null, pinnedRoll = null) {
     const ms = delay ?? Math.max(0, Number(getConfig().wakeDelayMs) || 2000);
     if (this.pendingWake.has(chatKey)) clearTimeout(this.wakeTimers.get(chatKey));
     this.pendingWake.add(chatKey);
+
+    // 🔴 随机档的骰子在这里掷**一次**，然后一路复用（预判 → 等待会话 → 实跑）。
+    //    2026-09-20 第八对话修：原来预判掷一次、实跑又掷一次，两次互相独立 ⇒
+    //    预判放行（该群 10%）之后，实跑有 ~90% 的概率判成"未触发"。
+    //    后果不是"少回一句"，而是**那一轮不带任何历史**（contextLimit=0）：
+    //    她只看到刚到的 1~3 条新消息，完全不知道谁在跟谁说话 ⇒
+    //    就会去接明显不是说给她的话。用户报的"回复不属于她的消息"主要就是它。
+    //    （prompt.js 的 resolveContextTier 注释早就写明"随机档结果必须固定下来"，
+    //      orchestrator 的注释也写了"在唤醒时算一次并固定下来"—— 但**没人真的传 roll**。）
+    const roll = pinnedRoll === null || pinnedRoll === undefined ? Math.random() * 100 : Number(pinnedRoll);
+    this.pendingRoll.set(chatKey, roll);
 
     // 等待窗口 > 0：在会话页立刻创建“等待中”会话，并随新消息重置倒计时
     //
@@ -158,7 +174,7 @@ export class Orchestrator {
     //    等半天最后变成"中止"的条目，既干扰又让人以为出了错。
     //    窗口结束前若来了新消息且命中，届时再创建（见下面 pendingSessions 分支）。
     if (ms > 0 && !this.runningChats.has(chatKey)) {
-      const predicted = this.#predictTier(chatKey);
+      const predicted = this.#predictTier(chatKey, roll);
       if (predicted.shouldRespond === false) {
         // 不响应：把已存在的等待会话撤掉（例如刚被艾特、随后判定又不成立的情况）
         const stale = this.pendingSessions.get(chatKey);
@@ -206,11 +222,14 @@ export class Orchestrator {
       this.pendingWake.delete(chatKey);
       const waitingId = this.pendingSessions.get(chatKey);
       this.pendingSessions.delete(chatKey);
+      // 把上面掷的那一次骰子**原样**带进实跑（见 scheduleWake 顶部的注释）
+      const pinnedRoll = this.pendingRoll.get(chatKey);
+      this.pendingRoll.delete(chatKey);
       if (this.paused || this.aborted || this.runningChats.has(chatKey)) {
         if (waitingId) this.#finishWaiting(waitingId, 'aborted');
         return;
       }
-      this.wake(chatKey, { waitingSessionId: waitingId ?? null })
+      this.wake(chatKey, { waitingSessionId: waitingId ?? null, roll: pinnedRoll ?? null })
         .catch((error) => console.error(`[orchestrator] wake ${chatKey} 出错:`, error));
     }, ms);
     this.wakeTimers.set(chatKey, timer);
@@ -263,7 +282,8 @@ export class Orchestrator {
     if (this.paused) return { started: false, reason: 'paused' };
     if (this.runningChats.has(chatKey)) return { started: false, reason: 'running' };
 
-    const t = this.#predictTier(chatKey);
+    const roll = Math.random() * 100;
+    const t = this.#predictTier(chatKey, roll);
     if (!t.hasUnread) return { started: false, reason: 'no-unread' };
 
     if (t.shouldRespond === false) {
@@ -281,13 +301,13 @@ export class Orchestrator {
       return { started: false, reason: 'swept', marked, tier: t.tier, configTier, tierReason: t.reason };
     }
 
-    this.scheduleWake(chatKey, 0);
+    this.scheduleWake(chatKey, 0, roll);
     return { started: true, tier: t.tier, count: t.count, tierReason: t.reason, pending: t.pending };
   }
 
   // ── 核心循环 ───────────────────────────────────────────────────────────
 
-  async wake(chatKey, { proactive = false, waitingSessionId = null } = {}) {
+  async wake(chatKey, { proactive = false, waitingSessionId = null, roll = null } = {}) {
     if (this.aborted) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.paused && !proactive) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.runningChats.has(chatKey)) return;
@@ -323,7 +343,9 @@ export class Orchestrator {
       }
       setTimeout(() => {
         if (!this.runningChats.has(chatKey) && !this.paused && !this.aborted) {
-          this.scheduleWake(chatKey, 0);
+          // 带上**同一个** roll：刚才那次判定已经说"要回应"，重排只是等并发位
+          // （不传的话会重掷，可能反而判成未响应 —— 见 scheduleWake 顶部注释）
+          this.scheduleWake(chatKey, 0, roll);
         }
       }, 3000);
       return;
@@ -348,7 +370,8 @@ export class Orchestrator {
       }
 
       // 复用 scheduleWake 那一份判定逻辑，避免两处各写一套、日后漂移
-      const tierResult0 = this.#predictTier(chatKey);
+      // ⚠️ 必须传同一个 roll（见 scheduleWake 顶部注释）—— 不传就退回"掷两次"的老 bug
+      const tierResult0 = this.#predictTier(chatKey, roll);
 
       if (tierResult0.shouldRespond === false) {
         // 不响应：沉入历史（已读），不产生会话、不消耗 token。
@@ -384,8 +407,25 @@ export class Orchestrator {
       selfNickname: cfgNow.persona?.selfNickname || this.onebot.selfNickname || '',
       botName: cfgNow.persona?.botName || '',
       selfId: cfgNow.onebot?.selfId || this.onebot.selfId || '',
-      cfg: storeConfigForChat(chatKey)   // 与 #predictTier 同一来源，保证预判/实跑一致
+      cfg: storeConfigForChat(chatKey),   // 与 #predictTier 同一来源，保证预判/实跑一致
+      roll                                // 🔴 同一个骰子（见 scheduleWake 顶部注释）
     });
+
+    // 🔴 兜底：**绝不允许"不带历史"地跑一轮**。
+    //    上面那个 roll 修好之后，这里理论上不该再命中；留着是因为这类不一致的代价特别大：
+    //    contextLimit=0 ⇒ 【过去状态】里一条历史都没有 ⇒ 她只看到刚到的 1~3 条消息，
+    //    不知道谁在跟谁说话，就会去接根本不是对她说的话（用户报的现象）。
+    //    宁可这一轮不跑（消息标已读，日后被艾特时还会作为已读历史带上），也不要瞎答。
+    if (!proactive && tierResult.shouldRespond === false) {
+      // 注意：走到这儿时 `drainUnread` 已经把触发批取走并标为已读（它会成为"已读历史"），
+      // 所以这里**不是**"再标一次已读"，只是把等待会话清掉、不发这一轮。
+      if (waitingSessionId) this.#discardWaiting(waitingSessionId);
+      this.emit('chat-update', chatKey);
+      console.warn(`[orchestrator] ${chatKey} 预判放行、实跑却判成「${tierResult.reason}」`
+        + `⇒ 按不响应处理（${triggerEntries.length} 条触发消息已并入已读历史）。`
+        + '这不该发生，出现即说明某条路径没把 roll 传下来 —— 见 scheduleWake 顶部注释。');
+      return;
+    }
 
     this.runningChats.add(chatKey);
     const seq = (this.runSeq.get(chatKey) || 0) + 1;
