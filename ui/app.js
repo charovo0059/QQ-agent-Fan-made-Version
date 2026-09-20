@@ -3439,6 +3439,9 @@ async function loadMemoryDetail(chatKey) {
       api(`/api/memory-files/${chatKey.replace(':', '_')}`),
       api('/api/config')
     ]);
+    // 把刚取到的配置存回 state：下面 memInteropHtml() 从 state.config 读（与页面其它处一致），
+    // 不存的话它读到的是空对象 —— 复选框就会显示成"关"，而实际可能是开的（显示与真相不符）。
+    state.config = cfg;
     const notes = cfg.memberNotes || {};
     const shareMap = (cfg.memory && cfg.memory.share) || {};
     const kind = chatKey.startsWith('group') ? 'group' : 'private';
@@ -3507,9 +3510,24 @@ async function loadMemoryDetail(chatKey) {
           ${consolidateStatusHtml}
         </div>
       </div>
+      ${memInteropHtml(chatKey)}
       ${membersHtml}
       ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>'}
     `;
+    // 「记忆互通」这一节：三个开关都**默认关**，改完立刻写 config（见 saveMemoryInterop）
+    const uniOn = $('#mem-unified');
+    if (uniOn) {
+      uniOn.addEventListener('change', () => saveMemoryInterop({ unified: uniOn.checked }, detail));
+      uniOn.checked = !!(cfg.memory && cfg.memory.unified === true);
+    }
+    const scopeSel = $('#mem-members-scope');
+    if (scopeSel) {
+      scopeSel.addEventListener('change', () => saveMemoryInterop({ unifiedMembers: scopeSel.value }, detail));
+    }
+    $$('.mem-group-toggle', detail).forEach((el) => {
+      el.addEventListener('click', (e) => { e.stopPropagation(); toggleChatInGroup(el.dataset.group, chatKey, detail) });
+    });
+    $('#mem-group-add')?.addEventListener('click', () => addGroupWithChat(chatKey, detail));
     const loadMembersBtn = $('#mem-load-members-btn');
     if (loadMembersBtn) loadMembersBtn.addEventListener('click', () => loadGroupMembers(chatId, chatKey));
     $$('.mem-edit-imp', detail).forEach((el) => {
@@ -3604,6 +3622,113 @@ async function loadMemoryDetail(chatKey) {
   } catch (e) {
     detail.innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
   }
+}
+
+/**
+ * 「记忆互通」设置区（记忆页里那个折叠块）—— 2026-09-20 第九对话加。
+ *
+ * 三个开关的语义（都**默认关**，见 config.js 的 memory 段注释）：
+ *   · 全互通          `memory.unified`        —— 忽略分组，所有会话一个池子（含 QQ↔微信）
+ *   · 同一个人的记忆   `memory.unifiedMembers` —— off / samePlatform / all
+ *   · 互通组          `memory.groups`         —— { 组名: [chatKey, ...] }，一个会话可在多个组
+ *
+ * ⚠️ 这里是**跨人**的互通，所以默认关：开了之后 A 私聊里的事可能出现在 B 私聊里。
+ *    用户明确要这个能力，但"默认打开"会让没配过的人凭空泄露 ⇒ 必须由人显式打开。
+ */
+function memInteropHtml(chatKey) {
+  const cfg = (state.config || {});
+  const mem = cfg.memory || {};
+  const groups = (mem.groups && typeof mem.groups === 'object') ? mem.groups : {};
+  const unified = mem.unified === true;
+  const scope = ['off', 'samePlatform', 'all'].includes(mem.unifiedMembers) ? mem.unifiedMembers : 'off';
+
+  // 每个组一行：本会话在不在组里，决定按钮是「已加入」还是「加入」
+  const groupRows = Object.entries(groups).map(([name, list]) => {
+    const arr = Array.isArray(list) ? list.map(String) : [];
+    const inside = arr.includes(String(chatKey));
+    const others = arr.filter((k) => k !== String(chatKey));
+    const preview = others.slice(0, 4).map((k) => formatChatTitle(k, chatNameOf(k))).join('、');
+    return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0">
+      <button class="btn btn-small mem-group-toggle${inside ? '' : ' btn-ghost'}" data-group="${esc(name)}">${inside ? '✓ 已加入' : '加入'}</button>
+      <b>${esc(name)}</b>
+      <span class="muted">${arr.length} 个会话${others.length ? '：' + esc(preview) + (others.length > 4 ? ' …' : '') : ''}</span>
+    </div>`;
+  }).join('');
+
+  return `<details class="mem-interop" style="margin:6px 0;padding:6px 10px;border:1px solid var(--line,#333);border-radius:6px">
+    <summary style="cursor:pointer">🔗 记忆互通（跨会话共享印象）</summary>
+    <div style="padding:8px 0 2px">
+      <div class="muted" style="margin-bottom:6px">
+        默认全部关闭。打开后，别的会话里记下的印象也会进这里的提示词，
+        每条都会标明<b>来自哪个会话</b>与<b>属于谁（id 为准）</b>。
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;padding:4px 0">
+        <input type="checkbox" id="mem-unified" ${unified ? 'checked' : ''}>
+        <b>全互通</b>
+        <span class="muted">所有会话一个池子（含 QQ ↔ 微信）；开了它就忽略下面的分组</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;padding:4px 0">
+        <b>同一个人的记忆</b>
+        <select id="mem-members-scope">
+          <option value="off"${scope === 'off' ? ' selected' : ''}>各聊各的</option>
+          <option value="samePlatform"${scope === 'samePlatform' ? ' selected' : ''}>同平台内互通（QQ 自己通、微信自己通）</option>
+          <option value="all"${scope === 'all' ? ' selected' : ''}>全平台互通（QQ 认识的他，微信里也认得）</option>
+        </select>
+      </label>
+      <div style="padding:6px 0 2px"><b>互通组</b>
+        <span class="muted">（一个会话可同时属于多个组）</span>
+        <button class="btn btn-small" id="mem-group-add" style="margin-left:8px">＋ 新建组并加入本会话</button>
+      </div>
+      ${groupRows || '<div class="muted" style="padding:4px 0">还没有互通组。点上面「新建组」把本会话放进去，再到另一个会话里把它也加进同一个组。</div>'}
+    </div>
+  </details>`;
+}
+
+/** 写 config.memory 的互通设置（只 POST 这一小块，绝不整体回传配置）。 */
+async function saveMemoryInterop(patch, detail) {
+  const status = $('#mem-share-status');
+  const say = (t, color) => { if (status) { status.textContent = t; status.style.color = color || ''; } };
+  try {
+    // 现取现用：别的标签页/设置页可能刚改过，拿缓存去算 next 会把它抹掉
+    const fresh = await api('/api/config');
+    const cur = (fresh && fresh.memory) || {};
+    const body = { memory: {} };
+    if ('unified' in patch) body.memory.unified = !!patch.unified;
+    if ('unifiedMembers' in patch) body.memory.unifiedMembers = String(patch.unifiedMembers);
+    if ('groups' in patch) body.memory.groups = { __replace__: patch.groups };
+    await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
+    state.config = await api('/api/config');
+    say('已保存（下一轮对话就生效）', 'var(--green)');
+    setTimeout(() => { if (status) status.textContent = ''; }, 4000);
+    void cur;
+    return true;
+  } catch (e) {
+    say(`保存失败：${e.message}`, 'var(--orange)');
+    return false;
+  }
+}
+
+/** 把当前会话加入/移出某个互通组，然后重渲染。 */
+async function toggleChatInGroup(groupName, chatKey, detail) {
+  const fresh = await api('/api/config');
+  const groups = Object.assign({}, (fresh && fresh.memory && fresh.memory.groups) || {});
+  const arr = Array.isArray(groups[groupName]) ? groups[groupName].map(String) : [];
+  const key = String(chatKey);
+  groups[groupName] = arr.includes(key) ? arr.filter((k) => k !== key) : [...arr, key];
+  if (!groups[groupName].length) delete groups[groupName];   // 空组没有意义，顺手清掉
+  if (await saveMemoryInterop({ groups }, detail)) loadMemoryDetail(chatKey);
+}
+
+/** 新建一个组并把当前会话放进去（组名让用户填，默认给个可用的）。 */
+async function addGroupWithChat(chatKey, detail) {
+  const name = (window.prompt('给这个互通组起个名字（例如「家人」「同事」）：') || '').trim();
+  if (!name) return;
+  const fresh = await api('/api/config');
+  const groups = Object.assign({}, (fresh && fresh.memory && fresh.memory.groups) || {});
+  const arr = Array.isArray(groups[name]) ? groups[name].map(String) : [];
+  if (!arr.includes(String(chatKey))) arr.push(String(chatKey));
+  groups[name] = arr;
+  if (await saveMemoryInterop({ groups }, detail)) loadMemoryDetail(chatKey);
 }
 
 /**

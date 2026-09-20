@@ -745,7 +745,10 @@ export function buildUserPrompt(ctx) {
   const memText = ctx.memory.formatForPrompt(ctx.chatKey, {
     userIds: [...relevantUserIds],
     queryText,
-    now
+    now,
+    // 当前会话的平台：决定"跨平台的那条要不要标出平台"。
+    // 缺省 '' 时 formatForPrompt 自己去问 memory.platformOf（有缓存），不会炸。
+    platform: ctx.platform || ''
   });
   const memBlock = memText ? `【记忆】\n${memText}` : '';
 
