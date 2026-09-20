@@ -436,11 +436,18 @@ function formatEntry(m, { withId = true } = {}) {
 
 /**
  * 判断一段消息里是否艾特了机器人。
- * 支持三种写法：@昵称 / @机器人名 / CQ 码 [CQ:at,qq=机器人QQ号]
+ * 支持四种写法：入库标记（最可靠）/ @昵称 / @机器人名 / CQ 码 [CQ:at,qq=机器人QQ号]
+ *
+ * ⚠️ 这里的顺序是有讲究的：**入库标记优先**。结构化 at 在 `segmentsToText` 里
+ *    已经用 QQ 号判定过并写下 `（在叫我）`（见那里的长注释：名字会被 QQ 改写、
+ *    会被用户改名片，靠名字反推必然漏）。下面那几条字面/CQ 判据保留，
+ *    是为了覆盖**手工打出来的** @名字 与**老存档**（它们没有标记）。
  */
 export function isAtMe(text, { selfNickname = '', botName = '', selfId = '' } = {}) {
   const t = String(text ?? '');
   if (!t) return false;
+  // ① 入库时按 QQ 号判定过的结论（最可靠，与名字怎么写无关）
+  if (t.includes('（在叫我）')) return true;
   const nick = String(selfNickname || '').trim();
   const name = String(botName || '').trim();
   if (nick && t.includes(`@${nick}`)) return true;
@@ -624,10 +631,23 @@ function triggerLabels(entry, ctx) {
   //    实测真实 @ 消息里，昵称后面**紧跟中文**的情况是存在的：
   //      `@DeepSleep这是当然的`、`@DeepSleep给你看你成年的样子`
   //    ⇒ 要求"昵称后面必须是分隔符"会把这些**真 @** 判成不是 —— 那是更坏的错。
-  //    代价是"@一个名字里含机器人名的群友"仍会被标（如 `@仓库炸了死机中的DeepSleep`），
-  //    这个残余已知、可接受（要根治得用 `at` 段里的 qq 号做结构化判定，不在本次范围）。
+  //    ⚠️ 但要注意：这条对**结构化 at** 是不可靠的（见下），它现在只覆盖"手工打出 @名字"。
+  //
+  // 🔴 2026-09-20（第九对话）修「改名就漏叫」：结构化 at 一律改认**入库标记**。
+  //
+  // ── 为什么字面匹配不够（用户报："可能会有人给她改名"）────────────────
+  // 实测 40 份最近存档，@ 她的消息被存成三种形式：
+  //     `@DeepSleep （本子搜索版）`（群名片，**QQ 自动加了空格**，最高频）/ `@DeepSleep 关机` / `@<QQ号>`
+  // 名字是被 QQ 化过妆的 —— 改名、加前缀、那个空格，任何一样都让字面判据失效：
+  //     `@仓库炸了死机中的DeepSleep 评价一下` 原来就判成"不是在叫我"（她在群里被这么叫却收不到）。
+  // ⇒ 现在由 `onebot.js` 的 `segmentsToText` 在**入库那一刻**用 at 段里的 QQ 号判定并写下
+  //    `（在叫我）`（与已有的 `（在叫别人）` 同构），这里只认这个结论，不再猜名字。
+  //    好处：与"名字长什么样"彻底解耦 —— 换名片、加前缀、QQ 塞空格、名片缓存过期都不影响。
   const selfNick = String(ctx.selfNickname || '');
-  if ((selfNick && text.includes(`@${selfNick}`)) || (nick && text.includes(`@${nick}`))) labels.push('@我');
+  const atMeMarked = text.includes('（在叫我）');
+  if (atMeMarked
+    || (selfNick && text.includes(`@${selfNick}`))
+    || (nick && text.includes(`@${nick}`))) labels.push('@我');
   if ((botName && lower.includes(botName)) || (nick && lower.includes(nick))) labels.push('提到我');
   if (noteName && lower.includes(noteLower)) labels.push('提到我（备注名）');
   if (/[?？]$/.test(text.trim()) || /[吗呢]/.test(text)) labels.push('提问');

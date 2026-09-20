@@ -815,15 +815,23 @@ export function createApp({ log = console.log } = {}) {
   });
 
   // ── 入站事件处理 ──
-  let atNameCache = new Map(); // groupId:userId -> name
+  //
+  // ⚠️ 这个缓存**必须有有效期**（2026-09-20 第九对话，用户报"可能会有人给她改名"）。
+  //    原来它是一份**永不过期**的 `Map`（只在超过 500 条时整体 `clear()`）：
+  //    谁改了群名片、或者她自己换了名字，旧名字就会被一直用下去 —— 表现是
+  //    "改了名之后她好像认不出在叫她了"。加 TTL 后最多迟 5 分钟，代价可忽略
+  //    （一个群成员的名字5分钟内不会变几次，而且命中缓存就不发请求）。
+  const AT_NAME_TTL_MS = 5 * 60 * 1000;
+  let atNameCache = new Map(); // groupId:userId -> { name, at }
   async function resolveAtName(groupId, userId) {
     const key = `${groupId}:${userId}`;
-    if (atNameCache.has(key)) return atNameCache.get(key);
+    const hit = atNameCache.get(key);
+    if (hit && (Date.now() - hit.at) < AT_NAME_TTL_MS) return hit.name;
     try {
       const info = await onebot.getGroupMemberInfo(groupId, userId);
       const name = info?.card || info?.nickname || null;
       if (name) {
-        atNameCache.set(key, String(name));
+        atNameCache.set(key, { name: String(name), at: Date.now() });
         if (atNameCache.size > 500) atNameCache.clear(); // 简单防膨胀
         return String(name);
       }
