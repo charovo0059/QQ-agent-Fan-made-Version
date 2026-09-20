@@ -14,6 +14,7 @@
 //         stderr 留最近若干行供界面排障。
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { getConfig } from './config.js'
@@ -147,12 +148,63 @@ export function jmPaths() {
   }
 }
 
+/**
+ * 清理被我们**强杀**掉的 PyInstaller onefile 留下的解包残留。
+ *
+ * 为什么要（2026-09-21 第十对话）：exe 路线跑的是 PyInstaller onefile（24.8MB），
+ * 它启动时把自身解包到 `%TEMP%\_MEIxxxxxx`，**正常退出会自己删**；但 `killChild()`
+ * 走的是 `child.kill()`（Windows 上是强杀）⇒ 那个清理来不及跑 ⇒ 每次强杀留一个
+ * 约 16.7MB 的目录。本棒实测：09-20 密集重跑那两小时留了 6 个；全机累计清出
+ * **260 个 / 9.08 GB**（C 盘因此只剩 5.9%）。而残留越多、exe 冷启动越慢，
+ * 越容易撞 jmPing 超时被强杀 —— 是个正反馈环。
+ *
+ * ⚠️ 安全性（**别把这条改成"删所有 _MEI"**）：
+ *   ① 只在 **exe 路线** 才可能由我们产生，脚本路线（Python）不产生 `_MEI`；
+ *   ② 名字必须是十六进制后缀 `/^_MEI[0-9a-f]+$/i` —— 注意 `\d+` 是**错的**，
+ *      PyInstaller 的后缀含 a-f（实测 `_MEI000004f42`；用 `\d+` 会漏 242/262 个**且安静少报**）；
+ *   ③ 只删 **≥ GRACE_MS 之前**创建的 ⇒ 绝不碰"此刻刚起来的那个"（它的解包时间就是它自己的寿命）；
+ *   ④ 只扫 `os.tmpdir()` 与 `%TMP%`，**不动别的目录**。
+ *   代价：若同机还有别的 PyInstaller 程序恰好在 GRACE_MS 前启动，会被误删 —— 这个风险
+ *   与"每次强杀稳定泄漏 16.7MB、累积 9GB"相比是可接受的，且注释与经验库都记了这条边界。
+ */
+const MEI_RE = /^_MEI[0-9a-f]+$/i
+const MEI_GRACE_MS = 5 * 60 * 1000
+function sweepMeiResidue() {
+  try {
+    const dirs = [...new Set([os.tmpdir(), process.env.TMP, process.env.TEMP].filter(Boolean))]
+    const cutoff = Date.now() - MEI_GRACE_MS
+    let removed = 0
+    let bytes = 0
+    for (const dir of dirs) {
+      let entries = []
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
+      for (const e of entries) {
+        if (!e.isDirectory() || !MEI_RE.test(e.name)) continue
+        const fp = path.join(dir, e.name)
+        let st = null
+        try { st = fs.statSync(fp) } catch { continue }
+        if (st.mtimeMs > cutoff) continue          // 太新 ⇒ 可能正在用，放过
+        try {
+          fs.rmSync(fp, { recursive: true, force: true, maxRetries: 2 })
+          if (fs.existsSync(fp)) continue
+          removed++
+        } catch { /* 被占用就跳过，不是错误 */ }
+      }
+    }
+    if (removed) console.log(`[jm-bridge] 清掉 ${removed} 个 PyInstaller _MEI 残留（强杀 exe 留下的）`)
+  } catch { /* 清理失败绝不能影响主流程 */ }
+}
+
 function killChild(reason) {
   if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
   if (!child) return
+  const wasExe = spawnedSig.startsWith('exe|')
   try { child.stdin.end() } catch { /* ignore */ }
   try { child.kill() } catch { /* ignore */ }
   child = null
+  // ⚠️ 必须**先**清 child 再清残留：见上面 sweepMeiResidue 的注释。
+  //    只对 exe 路线做（脚本路线不产生 _MEI），且是纯尽力而为。
+  if (wasExe) sweepMeiResidue()
   if (pending) {
     clearTimeout(pending.timer)
     pending.reject(new Error(`JM 服务已停止（${reason}）`))
