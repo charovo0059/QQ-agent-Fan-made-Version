@@ -94,17 +94,44 @@ export function isRetryableError(error) {
  * @param {object} args 同 chatCompletion
  * @param {number} [retries=2] 最多额外重试几次（默认 2，即总共最多 3 次尝试）
  */
+/**
+ * 可被 abort 打断的 sleep。
+ *
+ * ⚠️ 为什么不用 `new Promise((r) => setTimeout(r, ms))`：那个 sleep 一旦开始
+ *    就**取消不掉**。用户在界面上点「停止」时，即使请求本身已经中止，
+ *    这段退避还会把这一轮硬拖满 1s/2s（`retries=2` 时最多拖 3s），
+ *    表现为"点了停止，她还在转"——这就是审查里 L-6 说的"退避 sleep 不响应 abort"。
+ *    这里把 signal 接到定时器上，中止就立刻结束等待。
+ *
+ * @param {number} ms 毫秒
+ * @param {AbortSignal|null} signal 可选；已中止或等待期间中止都会立即结束
+ */
+function abortableSleep(ms, signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', done);
+      resolve();
+    }
+    signal?.addEventListener?.('abort', done, { once: true });
+  });
+}
+
 export async function chatCompletionWithRetry(args, retries = 2) {
   let lastError = null;
+  const signal = args?.signal ?? null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await chatCompletion(args);
     } catch (error) {
       lastError = error;
       if (attempt >= retries || !isRetryableError(error)) throw error;
+      if (signal?.aborted) throw error;   // 已中止就别再等退避
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
       console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
-      await new Promise((r) => setTimeout(r, wait));
+      await abortableSleep(wait, signal);
     }
   }
   throw lastError;

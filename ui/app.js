@@ -1295,7 +1295,15 @@ function connectSSE() {
   es.addEventListener('status', () => refreshStatus());
   es.addEventListener('snowluma-status', () => { refreshStatus(); if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true }); });
   es.addEventListener('snowluma-log', (ev) => {
-    const d = JSON.parse(ev.data);
+    // ⚠️ 必须带守卫：这个监听器**在首屏完成前就会收到日志帧**，而它下面
+    //    第一件事就是 setLoadingStatus()。原来这里裸 JSON.parse，一旦收到
+    //    半截/非 JSON 帧就抛 SyntaxError 把整段回调打断（同一帧的处理直接
+    //    没了），首屏就停在"加载中…"不动 —— 症状和项目坑里记的"页面卡在
+    //    加载中"一模一样，很难往"一行日志解析失败"上想。
+    //    这个文件里其它 SSE 监听器（1192/1229/1248 行）**都已经**这样包了，
+    //    只有这两处漏掉。来源：上游 audit-round1 的 L-4【B】。
+    let d;
+    try { d = JSON.parse(ev.data); } catch { return; }
     if (!appReady && d?.text) {
       setLoadingStatus(d.text);
     }
@@ -1304,7 +1312,8 @@ function connectSSE() {
     }
   });
   es.addEventListener('feedback', (ev) => {
-    const d = JSON.parse(ev.data);
+    let d;
+    try { d = JSON.parse(ev.data); } catch { return; }
     if (d.level === 'error') console.warn('[agent 反馈]', d.message);
   });
   es.onerror = () => { /* EventSource 自动重连 */ };
@@ -2755,9 +2764,9 @@ function updateUsagePage(stats, st, prices) {
     el.classList.toggle('btn-primary', el.dataset.range === String(usageRange));
   });
 
-  // 单日/24小时 → 隐藏"按天"
+  // 单日/24小时 → 隐藏"按天"；「全部」也要显示（历史越长越需要按天看）
   const daysBlock = box.querySelector('[data-block="days"]');
-  if (daysBlock) daysBlock.style.display = (stats?.mode === 'days') ? '' : 'none';
+  if (daysBlock) daysBlock.style.display = (stats?.mode === 'days' || stats?.mode === 'all') ? '' : 'none';
 
   // 行数很多时（按模型常有几十行）默认只显示前 N 行，点"展开全部"再看全部。
   // 注意：后端不截断（保证求和一致），这里只是前端显示层面的折叠。

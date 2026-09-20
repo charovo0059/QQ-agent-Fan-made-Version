@@ -1653,7 +1653,7 @@ export function createApp({ log = console.log } = {}) {
       }
 
       // ── 成本看板：按天 / 按会话 / 按模型统计 ──
-      // range: 'today'=今天0点起 | '24h'=最近24小时 | '3'|'7'|'14'|'30'=最近N天
+      // range: 'today'=今天0点起 | '24h'=最近24小时 | 'all'=全部历史 | '3'|'7'|'14'|'30'=最近N天
       if (pathname === '/api/usage/stats' && method === 'GET') {
         try {
           const raw = String(url.searchParams.get('range') || url.searchParams.get('days') || '7');
@@ -3642,11 +3642,27 @@ export function createApp({ log = console.log } = {}) {
  * 解析时间范围参数。
  *   'today' → 今天 00:00 起
  *   '24h'   → 最近 24 小时（滚动窗口，可能跨天）
+ *   'all'   → 全部历史（start=0），仍按天分桶
  *   '3'|'7'|'14'|'30' → 最近 N 个自然日
+ *
+ * ⚠️ 'all' 这个分支是**必须**的，别当成兜底删掉：前端「用量与成本」页的
+ *    时间范围按钮里就有「全部」（`ui/app.js` 的 USAGE_RANGES），点它发的就是
+ *    `range=all`。原来这里没有这一支，`Number('all')` 是 NaN → `|| 7`，
+ *    于是**按钮写着「全部」、实际算出的是「最近 7 天」**，标签还会明说
+ *    「最近 7 天」。用户由此得出的"我总共才花了这么点"是错的。
+ *    来源：上游 audit-round2 的 M2（那一处和我们同源同病）。
+ *
+ *    mode 给 'all' 而不是沿用 'days'：前端用 `stats.mode === 'days'`
+ *    决定要不要显示「按天」表（ui/app.js 里 daysBlock 那行），'all'
+ *    同样需要那张表（历史跨度越长越要看它），所以 mode 只用来说明
+ *    "这不是一个 N 天窗口"，显示与否由前端按 all 一并放行。
  */
 function resolveRange(raw) {
   const s = String(raw || '7').trim().toLowerCase();
   const now = Date.now();
+  if (s === 'all') {
+    return { mode: 'all', start: 0, end: now, label: '全部' };
+  }
   if (s === 'today') {
     const d = new Date(now);
     d.setHours(0, 0, 0, 0);

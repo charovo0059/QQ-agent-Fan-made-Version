@@ -33,14 +33,84 @@ function run(cmd, args, timeoutMs = 20000) {
 let _ffmpeg = null;
 let _ffprobe = null;
 let _checked = false;
+let _lastProbeAt = 0;
+let _probeCount = 0;   // 探测**轮**数（供 ffProbeStats 诊断/回归用）
+
+/**
+ * 探测一次 ffmpeg / ffprobe 的位置，结果缓存。
+ *
+ * ⚠️ 缓存**必须有有效期**（上游 audit-round1 的 L-8）：原来的 `_checked`
+ *    是一次性的 —— 本机没装 ffmpeg 时，这里把"找不到"钉死到进程结束，
+ *    用户按提示装完 ffmpeg 仍然不生效，只能重启应用，看起来像"装了没用"。
+ *    现在的规矩：
+ *      · 找到了 → 永久缓存（真的不会变，没必要反复 spawn）；
+ *      · 只找到一半 → 1 分钟后重探（补齐另一半）；
+ *      · 一个都没找到 → 1 分钟后重探（给刚装完的人机会）。
+ *   重探代价：一次 spawn + `-version`，且 60 秒内最多一次，不构成负担。
+ *   探到仍失败时**只打一次**日志（`_warnedMissing`），免得刷屏。
+ *
+ *   有效期可用环境变量 `QQA_FF_PROBE_TTL_MS` 覆盖 —— **只为测试存在**
+ *   （回归要验"过期之后会重探"，否则得真等 60 秒）。生产环境不要设它。
+ *   ⚠️ 注意判据是"环境变量有没有被设置"，**不是"值 > 0"**：测试要用 `0`
+ *      表示"立刻过期"，写成 `Number(v) > 0 ? v : 60000` 会把 0 悄悄还原成
+ *      60 秒，于是"过期后重探"这条路**永远测不到**（我第一版就踩了这个，
+ *      表现是测试报"1 → 1 没重探"，看起来像实现没修好，其实旋钮没生效）。
+ */
+/**
+ * 当前生效的探测缓存有效期。
+ *
+ * ⚠️ 必须**每次调用时读**，不能在模块加载时固化成常量：我们的验证套件
+ *    （如 `test-群禁言识别.mjs`）习惯在**同一进程**里先 setRuntimeConfig、
+ *    再 import 被测模块；若在这里就把 env 读死，届时改 env 将完全无效 ——
+ *    那正是"测试看着过了、其实旋钮没接上"的典型。函数调用代价可忽略。
+ */
+function ffProbeTtlMs() {
+  const raw = process.env.QQA_FF_PROBE_TTL_MS;
+  if (raw === undefined || raw === '') return 60 * 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(0, n) : 60 * 1000;
+}
+let _warnedMissing = false;
+
+/**
+ * 探测诊断（**给排障与回归用**，不参与压缩逻辑）。
+ *
+ * 为什么要导出这个：验证 L-8 的修法只能靠"探测发生了几次"，而模块**内部**
+ * 的 spawn 计数从外面观测不到（在子进程里包 `child_process.spawn` 是没用的 ——
+ * `import { spawn }` 绑的是内置模块的内部槽，改命名空间属性它看不见）。
+ * 与其为了测试去动 `run()` 的实现，不如让模块自己把这件事说出来。
+ *
+ * @returns {{probes:number, found:boolean, ffmpeg:string|null, ffprobe:string|null, lastProbeAt:number}}
+ */
+export function ffProbeStats() {
+  return {
+    probes: _probeCount,
+    found: Boolean(_ffmpeg && _ffprobe),
+    ffmpeg: _ffmpeg,
+    ffprobe: _ffprobe,
+    lastProbeAt: _lastProbeAt,
+  };
+}
+
 async function ensureFf() {
-  if (_checked) return { ffmpeg: _ffmpeg, ffprobe: _ffprobe };
+  const now = Date.now();
+  if (_checked && _ffmpeg && _ffprobe) return { ffmpeg: _ffmpeg, ffprobe: _ffprobe };
+  if (_checked && (now - _lastProbeAt) < ffProbeTtlMs()) return { ffmpeg: _ffmpeg, ffprobe: _ffprobe };
   _checked = true;
+  _lastProbeAt = now;
+  _probeCount += 1;   // 记"轮"数，不记候选个数（候选列表长度会变）
+  // 重探前先清空，避免"上次半成功"的残留被当成这次的结果
+  _ffmpeg = null;
+  _ffprobe = null;
   for (const name of ffmpegCandidates()) {
     if (await run(name, ['-version'], 5000)) { _ffmpeg = name; break; }
   }
   for (const name of ffprobeCandidates()) {
     if (await run(name, ['-version'], 5000)) { _ffprobe = name; break; }
+  }
+  if (!_ffmpeg && !_warnedMissing) {
+    _warnedMissing = true;
+    console.warn('[image-compress] 没找到 ffmpeg —— 过大的图片只能按字节数粗判，装好后 1 分钟内会自动重试');
   }
   return { ffmpeg: _ffmpeg, ffprobe: _ffprobe };
 }
