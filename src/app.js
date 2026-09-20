@@ -2427,12 +2427,22 @@ export function createApp({ log = console.log } = {}) {
       // 支持整份替换与逐段替换（内置提示原本硬编码在 src/prompt.js，界面上改不了）。
       if (pathname === '/api/system-prompt' && method === 'GET') {
         const persona = getConfig().persona || {};
-        const defaults = buildDefaultSegments(persona);
+        // 🔴 平台感知（2026-09-20）：这个预览原来**永远渲染 QQ 那一份**，
+        //    于是在微信模式下打开设置页，看到的是模型在微信里**根本收不到**的提示词
+        //    —— 「预览」与「实际」不一致，正是本项目最忌的两套口径。
+        //    缺省跟随 `ui.mode`（用户当前在看哪个平台，就预览哪个），
+        //    也可用 `?platform=wechat|qq` 显式指定。`ui.mode` 不是这两个值时退回 'qq'。
+        const q = new URL(req.url, 'http://x').searchParams.get('platform');
+        const mode = String(getConfig().ui?.mode || 'qq');
+        const platform = (q === 'wechat' || q === 'qq') ? q : (mode === 'wechat' ? 'wechat' : 'qq');
+        const defaults = buildDefaultSegments(persona, { platform });
         const overrides = persona.systemPromptSegments && typeof persona.systemPromptSegments === 'object'
           ? persona.systemPromptSegments
           : {};
         return json(res, 200, {
           ok: true,
+          platform,
+          platformSource: q ? 'query' : 'ui.mode',
           fullOverride: String(persona.systemPrompt ?? ''),
           segments: Object.keys(defaults).map((key) => ({
             key,
@@ -2440,7 +2450,7 @@ export function createApp({ log = console.log } = {}) {
             default: defaults[key],
             override: String(overrides[key] ?? '')
           })),
-          effective: buildSystemPrompt()
+          effective: buildSystemPrompt({ platform })
         });
       }
 
