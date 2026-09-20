@@ -11,6 +11,13 @@
 // ── 三段，缺一不可（界面要能一眼看出断在哪一段）──────────────────────────
 //   ① WeFlow      读微信本地库 + 推新消息的第三方应用（端口 5031）。**它不归我们管**，
 //                 只能"检测在不在跑"，必要时替用户把它拉起来。
+//                 🔴 2026-09-20 用户拍板：**就停在"检测 + 拉起"这一步**。
+//                 我曾按用户早先那句「逆向 weflow，只保留我们需要的功能，逆向出来加进 app 里」
+//                 一路走到 wx_key.dll 的授权门（`AUTH_FAILED:auth_env_missing`，
+//                 它要 WEFLOW_XKEY_AUTH_* 四个环境变量并连回本机端口换授权），
+//                 再往前就是**伪造授权、破第三方商业软件的校验** —— 那超出委托范围，
+//                 我停手并把三条路线交给用户；用户选了本条（A：只做生命周期管理）。
+//                 事实与取舍见 `待办与决策记录.md` §12.27，**别从头再撞一遍**。
 //   ② 通道        我们的中继（11229 等 Bridge / 11230 给 agent）+ 真 Bridge。
 //                 这一段的生命周期由本模块负责。
 //   ③ 我的链路    app 自己的第二个 OneBot 客户端有没有连上中继 ——
@@ -20,7 +27,7 @@
 //    绝不"点了没反应"。本项目的头号病就是静默失败。
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 
 /** 日志环形缓冲上限（够排障，又不会把内存吃光）。 */
 const LOG_LIMIT = 300
@@ -30,20 +37,25 @@ export class WechatChannel {
    * @param {object} o
    * @param {(host:string,port:number,timeout?:number)=>Promise<boolean>} o.isPortOpen 注入（app 里已有）
    * @param {string} o.relayStatusUrl 中继状态口，如 http://127.0.0.1:11230
-   * @param {string[]} o.scriptCandidates 通道启动脚本的候选路径（按序找第一个存在的）
-   * @param {string} o.weflowExe WeFlow 可执行文件路径（可选；用于"替用户拉起来"）
+   * @param {string[]|(()=>string[])} o.scriptCandidates 通道启动脚本的候选路径（按序找第一个存在的）
+   * @param {string|(()=>string[])} o.weflowExe WeFlow 可执行文件候选（字符串=单个路径；函数=现算一串）
    * @param {string} o.nodeExe 用哪个 node 跑脚本（默认 process.execPath + ELECTRON_RUN_AS_NODE）
    * @param {(msg:string)=>void} [o.log]
    */
-  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weflowExe = '', nodeExe = '', log = () => {} }) {
+  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weflowExe = '', nodeExe = '', findPids = null, log = () => {} }) {
     this.isPortOpen = isPortOpen
     this.relayStatusUrl = String(relayStatusUrl || 'http://127.0.0.1:11230').replace(/\/$/, '')
     // 候选路径可以是**数组**，也可以是**函数**（每次现算）。
     // 为什么允许函数：用户可能在设置里改 `wechat.channelScript`，而本对象是 app 启动时建好的
     // —— 存成快照的话"改了要重启才生效"，而那句注释会变成谎话。
     this.#candidatesFn = typeof scriptCandidates === 'function' ? scriptCandidates : () => scriptCandidates
-    this.weflowExe = weflowExe
+    // WeFlow 那条同理，而且是同一个坑：第一版我把 weflowExe 存成构造时的**快照**，
+    // 于是"用户在设置里填了路径"要重启才认 —— 和 channelScript 犯的是同一个错。
+    this.#weflowFn = typeof weflowExe === 'function' ? weflowExe : () => (weflowExe ? [weflowExe] : [])
     this.nodeExe = nodeExe || process.execPath
+    // ⚠️ 进程探测**可注入**：它读的是"这台机器上真有没有 WeFlow 在跑"，
+    //    测试里必须能固定住，否则断言会随测试机的状态飘（本机恰好一直开着 WeFlow）。
+    this.#findPids = typeof findPids === 'function' ? findPids : () => this.#tasklistPids()
     this.log = log
     this.proc = null
     this.startedAt = 0
@@ -51,6 +63,8 @@ export class WechatChannel {
   }
 
   #candidatesFn = () => []
+  #weflowFn = () => []
+  #findPids = () => []
 
   /** 当前的候选路径（现算，见构造函数的说明）。 */
   candidates() {
@@ -77,6 +91,50 @@ export class WechatChannel {
     return ''
   }
 
+  /** WeFlow 可执行文件的候选（现算，见构造函数的说明）。 */
+  weflowCandidates() {
+    try {
+      const v = this.#weflowFn()
+      const list = Array.isArray(v) ? v : [v]
+      return [...new Set(list.map((s) => String(s || '').trim()).filter(Boolean))]
+    } catch { return [] }
+  }
+
+  /**
+   * 解析出"到底该点哪个 WeFlow"。
+   *
+   * ⚠️ 为什么不能只判断端口就够了：用户点「启动 WeFlow」时端口**必然**是通的判断为假，
+   *    我们要的是"哪个 exe 存在、来自哪条候选" —— 找不到时必须说清**找过哪些**，
+   *    否则就是本项目最忌的"点了没反应"。
+   * @returns {{path:string, source:string, candidates:string[], missing:boolean}}
+   */
+  resolveWeFlowExe() {
+    const candidates = this.weflowCandidates()
+    for (const p of candidates) {
+      try { if (fs.existsSync(p)) return { path: p, source: 'candidate', candidates, missing: false } } catch { /* ignore */ }
+    }
+    return { path: '', source: candidates.length ? 'none-exists' : 'unconfigured', candidates, missing: true }
+  }
+
+  /** 按进程名找 WeFlow（端口还没开、但进程已经在加载时，这个能看出"它其实起来了"）。 */
+  findWeFlowPids() {
+    try { return (this.#findPids() || []).map(Number).filter((n) => Number.isInteger(n) && n > 0) } catch { return [] }
+  }
+
+  /** 默认实现：问一次 tasklist。失败就当"没找到"（不要让它把状态接口带崩）。 */
+  #tasklistPids() {
+    try {
+      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq WeFlow.exe', '/FO', 'CSV', '/NH'],
+        { encoding: 'utf8', windowsHide: true, timeout: 5000 })
+      const pids = []
+      for (const line of String(out).split(/\r?\n/)) {
+        const m = line.trim().match(/^"([^"]+)","(\d+)"/)
+        if (m) pids.push(Number(m[2]))
+      }
+      return pids
+    } catch { return [] }
+  }
+
   /** 三段的实时状态。②段的细节从**中继自己**的状态口取（不猜）。 */
   async status() {
     const weflowUp = await this.isPortOpen('127.0.0.1', 5031).catch(() => false)
@@ -88,8 +146,20 @@ export class WechatChannel {
         relay = await r.json()
       } catch { relay = null }
     }
+    const exe = this.resolveWeFlowExe()
+    // WeFlow 有两种"在"：端口通了（真的能读库）与进程在（可能还在启动/在登录界面）。
+    // 分开报，是因为"点了启动没反应"和"启动了但还没就绪"要给用户不同的话。
+    const pids = weflowUp ? [] : this.findWeFlowPids()
     return {
-      weflow: { running: weflowUp, port: 5031 },
+      weflow: {
+        running: weflowUp,
+        port: 5031,
+        pids,
+        starting: !weflowUp && pids.length > 0,
+        exe: exe.path,
+        exeSource: exe.source,
+        exeCandidates: exe.candidates
+      },
       // 中继起来了但 akasha 没连 = **Bridge 没跑**（这正是最容易"看着正常其实收不到"的状态）
       channel: {
         running: relayUp,
@@ -106,16 +176,24 @@ export class WechatChannel {
   /**
    * 拉起通道（中继 + Bridge 的启动器）。
    * 已经通了就直接返回 alreadyRunning —— **不重复起**（重复起会因为端口被占而报一堆错）。
+   *
+   * @param {{launchWeFlowFirst?:boolean, waitMs?:number}} [o]
+   *   launchWeFlowFirst=true 时，若 WeFlow 没在跑就先替用户点一下火、并**等它的端口起来**
+   *   （最多 waitMs 毫秒，默认 45 秒）。这是「一条命令开起来」的关键：
+   *   少了这一步，用户会遇到"通道起来了但一直读不到消息"，而原因是 WeFlow 没开。
    */
-  async start() {
+  async start({ launchWeFlowFirst = false, waitMs = 45000 } = {}) {
     if (await this.isPortOpen('127.0.0.1', 11230).catch(() => false)) {
       this.#push('中继已经在跑（11230 已就绪），不重复启动')
       return { ok: true, alreadyRunning: true, pid: this.proc?.pid ?? null }
     }
+    let weflow = null
+    if (launchWeFlowFirst) weflow = await this.ensureWeFlow(waitMs)
     const script = this.findScript()
     if (!script) {
       return {
         ok: false,
+        weflow,
         error: '找不到通道启动脚本（跑微信通道.mjs）。开发布局下它应在「工具-中继」里；'
           + '打包布局下应随 app 一起分发。可在设置里指定路径。',
         candidates: this.candidates()   // ⚠️ 用 candidates() 现算的方法，别再用构造时的快照字段（它已经不存在了）
@@ -144,10 +222,31 @@ export class WechatChannel {
         if (this.proc === child) this.proc = null
       })
       child.on('error', (e) => this.#push(`通道进程启动失败：${e?.message ?? e}`))
-      return { ok: true, pid: child.pid, script }
+      return { ok: true, pid: child.pid, script, weflow }
     } catch (e) {
-      return { ok: false, error: String(e?.message ?? e) }
+      return { ok: false, error: String(e?.message ?? e), weflow }
     }
+  }
+
+  /**
+   * 保证 WeFlow 在跑（不在就点一下火，然后等它的 5031 端口起来）。
+   * ⚠️ 只**启动**、不**停止** —— 见 stopWeFlow 的说明（它是第三方通用应用，用户可能同时在用它）。
+   * @returns {Promise<{ok:boolean, alreadyRunning?:boolean, launched?:boolean, waitedMs?:number, error?:string, exe?:string}>}
+   */
+  async ensureWeFlow(waitMs = 45000) {
+    if (await this.weflowRunning()) return { ok: true, alreadyRunning: true, exe: this.resolveWeFlowExe().path }
+    const r = this.launchWeFlow()
+    if (!r.ok) return r
+    const step = 1000
+    for (let waited = 0; waited < Math.max(0, waitMs); waited += step) {
+      await new Promise((res) => setTimeout(res, step))
+      if (await this.weflowRunning()) {
+        this.#push(`WeFlow 已就绪（等了 ${waited + step}ms，端口 5031 通了）`)
+        return { ok: true, launched: true, waitedMs: waited + step, exe: r.exe }
+      }
+    }
+    this.#push(`⚠️ WeFlow 已拉起但 ${waitMs}ms 内端口 5031 还没通 —— 可能停在了登录/选择数据的界面`)
+    return { ok: false, launched: true, error: `WeFlow 已启动，但 ${Math.round(waitMs / 1000)} 秒内端口 5031 没通（请到它的窗口里看一眼）`, exe: r.exe }
   }
 
   /** 停掉**本模块拉起的**那个通道进程。外面的窗口自己跑的不归它管（如实说明）。 */
@@ -179,16 +278,43 @@ export class WechatChannel {
    * 替用户把 WeFlow 拉起来。
    * ⚠️ 它是**第三方 GUI 应用**：我们只负责"没跑就点一下火"，它的窗口会自己弹出来，
    *    我们既改不了它的界面，也不该把它的二进制打进我们的安装包。
+   * ⚠️ 找不到 exe 时**必须把找过哪些路径报出来** —— "点了没反应"是本项目的头号病。
    */
   launchWeFlow() {
-    if (!this.weflowExe) return { ok: false, error: '没配置 WeFlow 的路径（设置里填 wechat.weflowExe）' }
-    if (!fs.existsSync(this.weflowExe)) return { ok: false, error: `找不到 WeFlow：${this.weflowExe}` }
-    try {
-      spawn(this.weflowExe, [], { detached: true, stdio: 'ignore', windowsHide: false }).unref()
-      this.#push('已请求启动 WeFlow（它自己的窗口会弹出来）')
-      return { ok: true }
-    } catch (e) {
-      return { ok: false, error: String(e?.message ?? e) }
+    if (this.findWeFlowPids().length > 0) {
+      this.#push('WeFlow 进程已经在跑（端口还没通，可能还在加载）')
+      return { ok: true, alreadyRunning: true }
     }
+    const exe = this.resolveWeFlowExe()
+    if (!exe.path) {
+      return {
+        ok: false,
+        error: exe.candidates.length
+          ? `WeFlow 没在跑，而这几个路径都不存在：\n  ${exe.candidates.join('\n  ')}\n可在设置里填 wechat.weflowExe 指定。`
+          : '没配置 WeFlow 的路径（设置里填 wechat.weflowExe），也没找到默认位置。',
+        candidates: exe.candidates
+      }
+    }
+    try {
+      const child = spawn(exe.path, [], { detached: true, stdio: 'ignore', windowsHide: false })
+      child.unref()
+      this.#push(`已请求启动 WeFlow（${exe.path}）—— 它自己的窗口会弹出来`)
+      return { ok: true, launched: true, exe: exe.path, pid: child.pid ?? null }
+    } catch (e) {
+      this.#push(`启动 WeFlow 失败：${e?.message ?? e}`)
+      return { ok: false, error: String(e?.message ?? e), exe: exe.path }
+    }
+  }
+
+  /**
+   * ⚠️ **刻意不做**「停止 WeFlow」。
+   *
+   * 理由：SnowLuma 是我们通道的专用组件，停掉它只影响我们；而 WeFlow 是**通用的微信数据应用**，
+   * 用户可能同时在用它看别的东西 —— 我们在界面上放一个"停止"，等于给了用户一个
+   * "顺手把别人正在用的程序关掉"的按钮。
+   * ⇒ 界面上的按钮只有「启动 WeFlow」，**没有停止**。要停请用户自己关它的窗口。
+   */
+  stopWeFlow() {
+    return { ok: false, error: '本应用不提供停止 WeFlow（它是通用第三方应用，用户可能正在用它；请直接关它的窗口）' }
   }
 }
