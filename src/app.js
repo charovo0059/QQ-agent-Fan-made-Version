@@ -2770,6 +2770,23 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, { files, consolidating: [...busy], hiddenEmpty: [...hiddenEmpty] });
       }
 
+      // 「同一个人」身份表：列出所有有记忆的会话与它们的成员（含平台），
+      // 供记忆页挑"哪个会话里的哪个人 = 当前这个人"。
+      // 为什么要一个接口：QQ 与微信 id **会撞号**（微信 id 是桥派生的 31 位数字），
+      // 所以必须带上**平台**才敢做身份关联；前端自己拼不出平台。
+      if (pathname === '/api/memory-identity' && method === 'GET') {
+        const chats = memory.listChats().map((chatKey) => ({
+          chatKey,
+          platform: memory.platformOf(chatKey),
+          members: memory.members(chatKey)
+            .filter((m) => m.userId)
+            .map((m) => ({ userId: String(m.userId), name: String(m.name || ''), count: (m.impressions || []).length }))
+            // 顺手带上每个人当前的身份键，前端好显示"已关联"
+            .map((m) => ({ ...m, identityKey: `${memory.platformOf(chatKey)}:${m.userId}` }))
+        })).filter((c) => c.members.length);
+        return json(res, 200, { chats, identity: memory.identityMap() });
+      }
+
       const memoryFileMatch = /^\/api\/memory-files\/(group|private)_(\w+)$/.exec(pathname);
       if (memoryFileMatch && method === 'GET') {
         const chatKey = `${memoryFileMatch[1]}:${memoryFileMatch[2]}`;

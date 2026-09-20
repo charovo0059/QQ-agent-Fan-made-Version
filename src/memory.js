@@ -703,10 +703,16 @@ export class MemoryStore {
     }
 
     // ④ **跨平台/同平台的"同一个人的记忆"**（`unifiedMembers`），哪怕他一个组都没进。
+    //    🔴 这里必须**先按身份表换 id**：同一个人在微信里的 id 与 QQ 里不同，
+    //       直接拿 QQ 号去微信会话里 `memberIn(other, uid)` 是**找不到的** ——
+    //       实测线上就是因为这个，"跨平台认人"一对都没合上（详见 `#identityMap` 注释）。
     for (const uid of speaking) {
-      for (const other of this.ownVisibleChats(chatKey, mine)) {
+      const plain = String(uid);
+      for (const other of this.ownVisibleChats(chatKey, mine, plain)) {
         if (other === chatKey) continue;
-        const m = this.memberIn(other, uid);
+        // 先用身份表在这个会话里找出"同一个人"的 id；没声明就退回按 id 相等（老行为）
+        const otherId = this.samePersonIdIn(other, mine, plain) || plain;
+        const m = this.memberIn(other, otherId);
         if (m) pushBucket(other, m, true, true);
       }
     }
@@ -857,16 +863,109 @@ export class MemoryStore {
    * 同一个人的印象**跨会话**能看到哪些会话（`unifiedMembers`）。
    * 与 `memberVisibleChats` 的区别只有一个：这个**只带同一个人的**印象，
    * 因此不受 `groups` 限制 —— 那是"跨人"的泄露风险，而"同一个人"不是。
+   *
+   * 🔴 2026-09-20 修一处**真实的安全缺口**（第九对话）：
+   *    原来是 `scope === 'all'` 时返回**所有**会话，然后由调用方**按 id 字面相等**去别的会话里找。
+   *    而 QQ 号与微信 id 在同一个数值空间里（见 `#identityMap` 注释）⇒
+   *    **QQ 的 123 和微信派生出来的 123 会被当成同一个人**，把不相干的人的记忆带过来。
+   *    ⇒ 现在：`'all'` 时先看这个人在**身份表**里有没有声明别的平台 id；
+   *      有 ⇒ 只去"那些 id 所在的会话"（精确，且不会撞号）；
+   *      没有 ⇒ 退回同平台（与 `'samePlatform'` 同语义），**不再跨平台按数字撞**。
+   *    这条同时意味着：**跨平台认人必须先人工声明**（`memory.identity`），否则不生效 ——
+   *    这是刻意的，因为在 id 会撞号的前提下，"自动猜"必然是错的。
    */
-  ownVisibleChats(chatKey, platform) {
+  ownVisibleChats(chatKey, platform, userId = '') {
     if (!chatKey) return [];
     const scope = this.membersScope();
     if (scope === 'off') return [];
-    return this.listChats().filter((other) => {
-      if (other === chatKey) return false;
-      if (scope === 'all') return true;
-      return !!platform && this.platformOf(other) === platform;
-    });
+    const mine = String(platform || this.platformOf(chatKey));
+    const others = this.listChats().filter((k) => k !== chatKey);
+
+    if (scope === 'all') {
+      // 声明过别的平台 id ⇒ 只认那些 id 所在的会话；没声明 ⇒ 退回同平台（不猜）
+      const declared = this.otherPlatformIdsOf(mine, userId);
+      if (declared.length) {
+        const want = new Set(declared.map((d) => `${d.platform}:${d.userId}`));
+        const hits = others.filter((k) => want.has(`${this.platformOf(k)}:${this.samePersonIdIn(k, mine, userId)}`));
+        if (hits.length) return hits;
+      }
+      return others.filter((k) => this.platformOf(k) === mine);
+    }
+    return others.filter((k) => this.platformOf(k) === mine);
+  }
+
+  /**
+   * ══ 「同一个人」身份表（2026-09-20 第九对话加）══
+   *
+   * 为什么需要人工声明，而不是靠 id 相等自动合并：QQ 号与微信 id **在同一个数值空间里**
+   * （微信 id 是桥派生的 31 位数字：`blake2s(wxid) % (2^31-1) + 1`）⇒
+   *   ① 同一个真人两边 id 不同 ⇒ **永远合不上**（实测线上就是这个状态：跨平台一对都没合上）；
+   *   ② 微信 id 撞上一个真 QQ 号 ⇒ 会把**两个不相干的人认成同一个**。
+   * ⇒ 只有人工能可靠回答"这两个 id 是不是同一个人"。
+   *
+   * 🔴 键**必须带平台**：`"<platform>:<userId>"`。只用数字做键就会踩上面 ② ——
+   *    把 QQ 的 123 和微信派生出来的 123 当成一个人。
+   */
+  #identityMap() {
+    const raw = getConfig().memory?.identity;
+    const out = new Map();   // "platform:userId" → personId
+    if (!raw || typeof raw !== 'object') return out;
+    for (const [k, v] of Object.entries(raw)) {
+      const key = String(k || '').trim();
+      const person = String(v ?? '').trim();
+      // 只认 `平台:数字id` 形式；非法项直接忽略（宁可退回"各聊各的"，也不猜）
+      if (!person || !/^(qq|wechat):[0-9A-Za-z_]+$/.test(key)) continue;
+      out.set(key, person);
+    }
+    return out;
+  }
+
+  /** 这个 id 在这个平台上的身份键；没声明返回 ''。 */
+  #identityKeyOf(platform, userId) {
+    const uid = String(userId ?? '').trim();
+    if (!uid) return '';
+    const p = String(platform) === 'wechat' ? 'wechat' : 'qq';
+    return `${p}:${uid}`;
+  }
+
+  /** 一个人在**别的平台**的 id（按身份表查；没声明则空数组）。返回值不含传入的那个。 */
+  otherPlatformIdsOf(platform, userId) {
+    const map = this.#identityMap();
+    const self = this.#identityKeyOf(platform, userId);
+    if (!self) return [];
+    const person = map.get(self);
+    if (!person) return [];
+    const out = [];
+    for (const [k, v] of map) {
+      if (v !== person || k === self) continue;
+      const m = /^([a-z]+):(.+)$/.exec(k);
+      if (m) out.push({ platform: m[1], userId: m[2] });
+    }
+    return out;
+  }
+
+  /** 某个会话里，这个人的 id（优先按该会话自己的平台匹配；查不到返回 ''）。 */
+  samePersonIdIn(chatKey, platform, userId) {
+    const key = this.#identityKeyOf(platform, userId);
+    if (!key) return '';
+    const map = this.#identityMap();
+    const person = map.get(key);
+    const ids = this.memberIdsIn(chatKey);
+    if (!person) return '';   // 没声明"同一个人" ⇒ 不猜（调用方会退回按 id 相等的老行为）
+    const mine = this.platformOf(chatKey);
+    // 按**该会话自己的平台**去匹配：微信会话就用 wechat 键，QQ 会话就用 qq 键。
+    // ⚠️ 不能拿数字直接比 —— QQ 与微信 id 会撞号，那正是要修掉的 bug。
+    for (const id of ids) {
+      if (map.get(this.#identityKeyOf(mine, id)) === person) return id;
+    }
+    return '';
+  }
+
+  /** 管理端用：当前身份表（只回合法项）。 */
+  identityMap() {
+    const out = {};
+    for (const [k, v] of this.#identityMap()) out[k] = v;
+    return out;
   }
 
   /**

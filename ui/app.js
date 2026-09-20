@@ -3435,13 +3435,21 @@ async function loadMemoryDetail(chatKey) {
   const detail = $('#memory-detail');
   detail.innerHTML = '<div class="empty-hint">加载中…</div>';
   try {
-    const [mem, cfg] = await Promise.all([
+    const [mem, cfg, ident] = await Promise.all([
       api(`/api/memory-files/${chatKey.replace(':', '_')}`),
-      api('/api/config')
+      api('/api/config'),
+      // 身份表 + 各会话平台：给"同一个人…"按钮用。
+      // 失败不能拖垮整页（它只是锦上添花），所以单独 catch 成空数据。
+      api('/api/memory-identity').catch(() => ({ chats: [], identity: {} }))
     ]);
     // 把刚取到的配置存回 state：下面 memInteropHtml() 从 state.config 读（与页面其它处一致），
     // 不存的话它读到的是空对象 —— 复选框就会显示成"关"，而实际可能是开的（显示与真相不符）。
     state.config = cfg;
+    // 会话 → 平台：身份键必须带平台，否则 QQ 与微信撞号会认错人（见 config.js 的 memory.identity）
+    state.chatPlatforms = {};
+    for (const c of (ident.chats || [])) state.chatPlatforms[c.chatKey] = c.platform;
+    const identMap = ident.identity || {};
+    state.identityChats = ident.chats || [];
     const notes = cfg.memberNotes || {};
     const shareMap = (cfg.memory && cfg.memory.share) || {};
     const kind = chatKey.startsWith('group') ? 'group' : 'private';
@@ -3473,11 +3481,21 @@ async function loadMemoryDetail(chatKey) {
              </select>
            </label>`
         : '';
+      // 「同一个人」：把这个会话里的这个人，与**别的会话**里的某人标成同一人。
+      // 为什么必须人工标：QQ 号与微信派生 id 在同一个数值空间里会撞号，
+      // 而同一个真人两边 id 又不同 ⇒ 自动合并两头都错（详见 config.js 的 memory.identity 注释）。
+      const chatPlat = state.chatPlatforms?.[chatKey] || 'qq';
+      const linked = !!(identMap[`${chatPlat}:${m.userId}`]);
+      const identLabel = canDel
+        ? `<button class="btn btn-small mem-ident-btn" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px"
+             title="把这个人与别的会话里的某人标成「同一个人」，跨平台/跨会话认人才成立">${linked ? '✓ 已关联' : '同一个人…'}</button>`
+        : '';
       return `<div class="collapsible" open>
         <summary>${esc(who)}${qq}（${m.impressions.length} 条）
           <button class="btn btn-small mem-edit-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:8px">编辑</button>
           <button class="btn btn-small mem-refresh-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px" title="让模型重新分析这个人：有印象则整理合并，没印象则从聊天记录里提炼">更新记忆</button>
           <button class="btn btn-small btn-danger mem-del-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px" ${canDel ? '' : 'disabled'} title="${delTitle}">删除</button>
+          ${identLabel}
           ${shareSel}
         </summary>
         <div class="coll-body">${esc(imps)}</div>
@@ -3540,6 +3558,15 @@ async function loadMemoryDetail(chatKey) {
     });
     $('#mem-add-imp-btn')?.addEventListener('click', () => openMemberImpressModal(chatKey, null));
     $('#mem-clear-btn')?.addEventListener('click', () => clearChatMemory(chatKey));
+    // 「同一个人」关联：把这个会话里的这个人，与别的会话里的某人标成同一人
+    $$('.mem-ident-btn', detail).forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();   // 别把 <details> 收起来
+        const m = members.find((x) => String(x.userId) === String(el.dataset.qq));
+        openIdentityModal(chatKey, m || { userId: el.dataset.qq, name: el.dataset.name });
+      });
+    });
     // 跨会话互通方向：按 QQ 号全局设，改完写进 config.memory.share
     $$('.mem-share-sel', detail).forEach((el) => {
       el.addEventListener('click', (e) => e.stopPropagation());   // 别把 <details> 收起来
@@ -3784,6 +3811,113 @@ async function addGroupWithChat(chatKey, detail) {
  *  if (!name) return;
  *  ... window.prompt 在应用里不显示 ⇒ 用户看到"按了没反应"。
  */
+
+/**
+ * 「同一个人」关联弹窗（2026-09-20 第九对话加）。
+ *
+ * 用途：把**当前会话里的这个人**与**别的会话里的某人**标成同一个人。
+ * 为什么必须人工标（不能自动）：
+ *   · QQ 号与微信派生 id **在同一个数值空间里**（微信 id = blake2s(wxid) % (2^31-1) + 1）
+ *     ⇒ 按 id 相等合并会**撞号认错人**；
+ *   · 同一个真人两边的 id 又**不同** ⇒ 不声明就**永远合不上**。
+ *   实测线上就是这个状态：跨平台一对都没合上。所以只能人来回答"这俩是不是同一个人"。
+ *
+ * 🔴 身份键带**平台**：`qq:<id>` / `wechat:<id>` —— 这是撞号不会误合的关键。
+ */
+function openIdentityModal(chatKey, member) {
+  const uid = String(member?.userId || '');
+  const chats = (state.identityChats || []).filter((c) => c.chatKey !== chatKey);
+  const identMap = (state.config?.memory?.identity) || {};
+  const myPlat = state.chatPlatforms?.[chatKey] || 'qq';
+  const myKey = `${myPlat}:${uid}`;
+  const myPerson = identMap[myKey] || '';
+
+  // 当前已关联到哪些（同一 person 值的其它键）
+  const linked = Object.entries(identMap)
+    .filter(([k, v]) => v === myPerson && k !== myKey)
+    .map(([k]) => k);
+
+  const rows = chats.length
+    ? chats.map((c) => {
+      const opts = c.members.map((mm) => {
+        const k = `${c.platform}:${mm.userId}`;
+        const on = linked.includes(k);
+        return `<label style="display:flex;align-items:center;gap:8px;padding:3px 0">
+          <input type="checkbox" class="id-pick" value="${esc(k)}" ${on ? 'checked' : ''}>
+          <span>${esc(mm.name || mm.userId)}</span>
+          <span class="muted" style="font-size:11px;white-space:nowrap">${esc(k)} · ${mm.count} 条</span>
+        </label>`;
+      }).join('');
+      return `<details style="margin:4px 0">
+        <summary style="cursor:pointer">${esc(formatChatTitle(c.chatKey, chatNameOf(c.chatKey)))} <span class="muted">（${esc(c.platform)}，${c.members.length} 人）</span></summary>
+        <div style="padding:4px 0 4px 16px">${opts}</div>
+      </details>`;
+    }).join('')
+    : '<div class="muted">别的会话还没有任何有 id 的记忆成员。</div>';
+
+  const overlay = modelModalShell({
+    head: `同一个人：${member?.name || uid}`,
+    body: `
+      <div class="hint">本会话这个人：<b>${esc(member?.name || uid)}</b>
+        <span class="muted">${esc(myKey)}</span></div>
+      <div class="hint" style="margin-top:6px">
+        勾上<b>别的会话里属于同一个真人</b>的条目。勾选后，两边的印象会互相看见（受「记忆互通」里的
+        「同一个人的记忆」开关控制）。<br>
+        ⚠️ <b>只勾真的是同一个人的</b> —— QQ 与微信的数字 id 会撞号，勾错等于把两个人合并。
+      </div>
+      <div style="max-height:300px;overflow:auto;margin-top:8px;border:1px solid var(--line,#333);border-radius:6px;padding:6px">
+        ${rows}
+      </div>
+      <div class="hint" id="id-err" style="color:var(--orange)"></div>`,
+    foot: `${linked.length ? '<button class="btn btn-danger" id="id-unlink">解除全部关联</button>' : ''}
+           <button class="btn" id="id-cancel">取消</button>
+           <button class="btn btn-primary" id="id-save">保存</button>`
+  });
+
+  overlay.querySelector('#id-cancel').addEventListener('click', () => closeModelModal(overlay));
+
+  /** 把"本会话这个人 + 勾选的其它 id"写成身份表（幂等：先清掉这些键再写）。 */
+  const applyIdentity = async (picked) => {
+    const fresh = await api('/api/config');
+    const next = { ...((fresh.memory && fresh.memory.identity) || {}) };
+    // 先解掉本键与所有"原同一人"的键（用户可能取消了某几个勾）
+    delete next[myKey];
+    for (const k of linked) delete next[k];
+    if (picked.length) {
+      // 复用已有 person 值（保持既有分组），没有就新生成一个
+      const person = myPerson || `p_${Date.now().toString(36)}`;
+      next[myKey] = person;
+      for (const k of picked) next[k] = person;
+    }
+    await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({ memory: { identity: { __replace__: next } } })
+    });
+    state.config = await api('/api/config');
+  };
+
+  overlay.querySelector('#id-save').addEventListener('click', async () => {
+    const err = overlay.querySelector('#id-err');
+    const picked = [...overlay.querySelectorAll('.id-pick')].filter((el) => el.checked).map((el) => el.value);
+    try {
+      await applyIdentity(picked);
+      closeModelModal(overlay);
+      await loadMemoryDetail(chatKey);
+      await loadMemoryView();
+    } catch (e) { if (err) err.textContent = `保存失败：${e.message}` }
+  });
+
+  const unlink = overlay.querySelector('#id-unlink');
+  if (unlink) unlink.addEventListener('click', async () => {
+    const err = overlay.querySelector('#id-err');
+    try {
+      await applyIdentity([]);
+      closeModelModal(overlay);
+      await loadMemoryDetail(chatKey);
+      await loadMemoryView();
+    } catch (e) { if (err) err.textContent = `解除失败：${e.message}` }
+  });
+}
 
 /**
  * 保存某个 QQ 号的「跨会话记忆互通」方向。
