@@ -903,9 +903,17 @@ export function createApp({ log = console.log } = {}) {
 
     let text;
     if (segments) {
+      // 「@别人」要标出来 —— 用**这条事件对应那个客户端**的自己的号，
+      // 不能两个客户端共用一个（QQ 与微信的 self_id 是两套：1000000004 / QQ 号）。
+      // 取不到就传空串，`segmentsToText` 那边会**不标**（见那里的注释：乱标比不标更糟）。
+      const selfIdForAt = String(
+        (source === 'wechat' ? (wechatOnebot && wechatOnebot.selfId) : onebot.selfId)
+        || cfgNow.onebot?.selfId || ''
+      );
       text = await segmentsToText(segments, {
         resolveReply: (mid) => resolveReply(mid),
-        resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null
+        resolveAtName: (qq) => kind === 'group' ? resolveAtName(id, qq) : null,
+        selfId: selfIdForAt
       });
     } else {
       text = String(event.raw_message ?? event.message ?? '').trim();
