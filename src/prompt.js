@@ -610,7 +610,24 @@ function triggerLabels(entry, ctx) {
   const notes = getConfig().memberNotes || {};
   const noteName = notes[String(entry?.senderId || '')];
   const noteLower = String(noteName || '').toLowerCase();
-  if (text.startsWith('@') || text.includes(`@${ctx.selfNickname}`) || (nick && text.includes(`@${nick}`))) labels.push('@我');
+  // 「@我」标签：只做**昵称/名片匹配**，不允许裸前缀命中。
+  //
+  // 🔴 2026-09-20（第九对话）修：原来这里第一个分支是 `text.startsWith('@')` ——
+  //    于是**任何以 @ 开头的消息都被标成「@我」**，包括明显在叫别人的。
+  //    而这个标签**直接进模型上下文**（本函数只被 buildTriggerBlock 调用），
+  //    会让她以为"这句话在叫我" —— 与我们上一轮修的「@别人」标注**互相打架**。
+  //
+  //    上游在 0.4 preview 里独立发现了同一处（`docs/audit-round2.md` 的 M1），
+  //    修法一致：**删掉那个裸前缀分支**。本机实测该分支贡献了 69/2022 条误标。
+  //
+  // ⚠️ **刻意保留 `includes('@' + 昵称)` 的子串匹配**（与上游同口径），没有收紧成"词边界"：
+  //    实测真实 @ 消息里，昵称后面**紧跟中文**的情况是存在的：
+  //      `@DeepSleep这是当然的`、`@DeepSleep给你看你成年的样子`
+  //    ⇒ 要求"昵称后面必须是分隔符"会把这些**真 @** 判成不是 —— 那是更坏的错。
+  //    代价是"@一个名字里含机器人名的群友"仍会被标（如 `@仓库炸了死机中的DeepSleep`），
+  //    这个残余已知、可接受（要根治得用 `at` 段里的 qq 号做结构化判定，不在本次范围）。
+  const selfNick = String(ctx.selfNickname || '');
+  if ((selfNick && text.includes(`@${selfNick}`)) || (nick && text.includes(`@${nick}`))) labels.push('@我');
   if ((botName && lower.includes(botName)) || (nick && lower.includes(nick))) labels.push('提到我');
   if (noteName && lower.includes(noteLower)) labels.push('提到我（备注名）');
   if (/[?？]$/.test(text.trim()) || /[吗呢]/.test(text)) labels.push('提问');
