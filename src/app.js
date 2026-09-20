@@ -565,6 +565,23 @@ export function createApp({ log = console.log } = {}) {
     log: (...a) => log('[wechat-channel]', ...a)
   });
 
+  // ── 微信「三段状态」的**单一来源** ──────────────────────────────────────
+  // ⚠️ 为什么必须抽成一个函数（2026-09-20，自检第一次跑就抓到的真 bug）：
+  //    原来自检路由自己调 `wechatChannel.status()`，而第三段 `agent` 是**状态路由自己拼上去的**
+  //    ⇒ 自检里 `st.agent` 是 undefined ⇒ 它报出"本应用的微信通道没启用"，
+  //    而同一个响应里第一项刚说过 `config.wechat.enabled = true`。**两项自相矛盾**。
+  //    这正是本项目反复犯的病：同一个人看到的两份东西来自两个源。
+  //    ⇒ 凡是"给人看的"和"给机器判的"，一律走这一个函数。
+  const wechatStatusWithAgent = async () => {
+    const st = await wechatChannel.status();
+    st.agent = {
+      connected: wechatOnebot ? wechatOnebot.connected : false,
+      enabled: !!getConfig().wechat?.enabled,
+      bridgeConnected: wechatOnebot?.connected ? wechatUpstreamNow().online : null
+    };
+    return st;
+  };
+
   const stickers = new StickerManager(onebot);
   // 群禁言状态（见 src/mutes.js）。三条来源都会往里写：
   //   · notice/group_ban 事件（见 handleOneBotEvent）
@@ -1692,13 +1709,7 @@ export function createApp({ log = console.log } = {}) {
       // 为什么要做成页签按钮：在此之前通道只能靠人在命令行开窗口，用户看不到状态也关不掉。
       if (pathname === '/api/wechat/channel/status' && method === 'GET') {
         try {
-          const st = await wechatChannel.status();
-          // 第三段（app 自己那条链路）在 /api/status.wechat 里，这里顺带带上，页签一屏看全
-          st.agent = {
-            connected: wechatOnebot ? wechatOnebot.connected : false,
-            enabled: !!getConfig().wechat?.enabled,
-            bridgeConnected: wechatOnebot?.connected ? wechatUpstreamNow().online : null
-          };
+          const st = await wechatStatusWithAgent();
           return json(res, 200, { ok: true, ...st });
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -1742,7 +1753,7 @@ export function createApp({ log = console.log } = {}) {
         try {
           const cfgNow = getConfig();
           const cfgWx = cfgNow.wechat || {};
-          const st = await wechatChannel.status();
+          const st = await wechatStatusWithAgent();
           const exe = wechatChannel.resolveWeFlowExe();
           const script = wechatChannel.findScript();
           const items = [];
