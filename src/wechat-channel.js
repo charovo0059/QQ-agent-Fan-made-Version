@@ -273,6 +273,9 @@ export class WechatChannel {
         .map((r) => ({ pid: Number(r?.pid ?? r?.ProcessId), parentPid: Number(r?.parentPid ?? r?.ParentProcessId), name: String(r?.name ?? r?.Name ?? '') }))
         // 排除自己：本进程的命令行里也可能出现同一个脚本名（比如测试里）
         .filter((r) => Number.isInteger(r.pid) && r.pid > 0 && r.pid !== process.pid)
+        // 再挡一道外壳进程（见 #scanChannelProcesses 的注释：我们自己那条查询就会匹配到自己）。
+        // 注入的探测函数也走这里 ⇒ 两道防线对注入实现同样生效。
+        .filter((r) => !/^(powershell|pwsh|cmd|conhost)\.exe$/i.test(r.name))
     } catch (e) {
       this.#push(`查通道进程失败：${e?.message ?? e}`)
       return []
@@ -284,7 +287,14 @@ export class WechatChannel {
     const script = this.findScript()
     const needle = script ? path.basename(script) : '跑微信通道.mjs'
     const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${needle}*' } | `
+      // 🔴 `-notin` 那一条不是保险，是**必需**：这条查询自己的命令行里就含 `needle`
+      //    （`-like '*跑微信通道.mjs*'` 这串字面量本身），所以 PowerShell **会匹配到自己**。
+      //    实测（2026-09-20）第一次真停通道时，返回的 external 里就混进了一个
+      //    `powershell.exe`（pid 27196）—— 它正是那次查询自己。若时序不同，
+      //    taskkill 就会去杀一个无关的 PowerShell。
+      //    这与本项目"进程残留检测器匹配到自己"是同一个病，第二次犯了。
+      `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${needle}*' -and `
+      + `$_.Name -notin @('powershell.exe','pwsh.exe','cmd.exe','conhost.exe') } | `
       + `Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress`
     ], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
     const txt = String(out || '').trim()
