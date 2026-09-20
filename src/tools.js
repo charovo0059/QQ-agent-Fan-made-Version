@@ -19,6 +19,12 @@ import { firstFrameOnly, countFrames } from './gif.js';
 // 加一种格式就要改三处"）。这里换成引用，逻辑与他那份**逐字一致**（含 `length < 12` 的守卫），
 // 所以行为不变，只是以后加格式只改一处。
 import { detectMime } from './image-type.js';
+// 大图压缩（**吸收自上游 0.4**）。⚠️ 2026-09-20 第九对话补接线：
+// 这个模块早就吸收了，但**一直没有任何地方 import 它** —— 等于死代码，
+// 吸收时只搬了实现、没接上会用它的地方。上游是在它的
+// `downloadImageAsDataUrl()` 里调的，而我们的看图链路没有那个函数
+// （我们是 `prepareImage()`），所以它的接线没法照抄，得落到我们这一支上。
+import { compressImage } from './image-compress.js';
 // 工具注册表（Skills 基础设施，来自上游 0.3.1）：原生工具与技能工具都在这里登记，
 // 技能工具（带 skillId）的可用性统一问 getToolAvailability()。
 import { registerTool, listTools, getToolAvailability } from './tool-registry.js';
@@ -123,11 +129,15 @@ function fmtBytes(n) {
 /**
  * 下载一张图并转成能进模型的 data URL，同时把它压到安全体积。
  *
- * 当前唯一的压缩手段：**动画 GIF 只留第一帧**（纯字节截断，见 gif.js）。
- * 其它格式（PNG/JPEG/WEBP）不改，超上限就明确拒绝 —— 宁可不发，也不能把整轮请求搞成 413。
+ * 压缩手段有两条：
+ *   ① **动画 GIF 只留第一帧**（纯字节截断，见 gif.js）—— 不动内容，最省；
+ *   ② **其余格式交给 ffmpeg 缩放重编码**（image-compress.js，2026-09-20 接的线）。
+ *      ② 是后加的补救：原来 ① 之后还是超限就**直接拒绝**，
+ *      用户发一张 1.5MB 的截图就得到"图太大"，而她其实只是想让你看一眼。
  *
- * ⚠️ 传进来的 url 很可能是**已经过期的**存档链接（rkey 只有十几小时寿命）。
- * 只要能拿到 QQ 文件名，就先换一条新链接再下（见 onebot.js 的 resolveFreshImageUrl）。
+ * ⚠️ ② 会把图**转成 JPEG**（动图/透明通道会丢），所以**只在"不压就只能拒收"时才用**：
+ *    体积没超限的图**原样发**，绝不因为"能压就顺手压一下"而降质。
+ *    这个取舍是刻意的：宁可压，也不要"看不到"。
  *
  * @param {{call:Function}} onebot OneBot 客户端
  * @param {string} url 存下来的图片链接
@@ -144,6 +154,7 @@ async function prepareImage(onebot, url, file = '') {
 
   let data = buffer;
   let note = '';
+  let outMime = mime;
   if (data.length > lim.bytes && mime === 'image/gif') {
     const one = firstFrameOnly(data);
     if (one && one.length < data.length) {
@@ -152,10 +163,40 @@ async function prepareImage(onebot, url, file = '') {
       data = one;
     }
   }
+  if (data.length > lim.bytes && mime !== 'image/gif') {
+    // ② 交给 ffmpeg 缩放重编码。没装 ffmpeg 时它原样返回（compressed=false），
+    //    行为与接线前完全一致 —— 所以"没装"不会变成新的失败点。
+    //
+    // ⚠️ 为什么要**逐级降质重试**，而不是"调一次 compressImage 就完事"：
+    //    `compressImage` 的 `maxBytes` 只用来**决定压不压**，它按 `maxDim` 缩放尺寸、
+    //    画质用传入的 `quality`（上游默认 4 = 画质优先），**压完是多少就是多少**，
+    //    不会回头逼近字节预算。
+    //    实测（1100x900 噪声 PNG，2181KB）：quality 4 → 916KB、8 → 544KB、12 → 366KB。
+    //    也就是说**用上游默认的 4 压完仍然超 700KB 上限 ⇒ 照样被拒 ⇒ 这次接线等于白接**。
+    //    （这正是"吸收模块"与"接线"必须分开做、且接线必须真跑一遍的原因：
+    //     光看函数签名会以为传了 maxBytes 就有人保证不超。）
+    let best = null;
+    for (const quality of [4, 8, 12, 20, 28]) {
+      const out = await compressImage(data, { maxBytes: lim.bytes, maxDim: 1568, quality });
+      if (!out?.compressed || !out.buffer?.length) break;    // 压不动（没 ffmpeg / 解不开）→ 别空转
+      if (!best || out.buffer.length < best.buffer.length) best = out;
+      if (out.buffer.length <= lim.bytes) break;             // 已经进预算了，用这一档
+    }
+    if (best && best.buffer.length < data.length) {
+      const before = data.length;
+      data = best.buffer;
+      outMime = best.mime || 'image/jpeg';
+      // ⚠️ note 要如实说"缩过+重编码过"，不能只说"压小了" ——
+      //    模型据此判断"这张图我看得够不够清"，说轻了它会以为细节都在。
+      note = `原图 ${fmtBytes(before)} 超过上限，已压缩到 ${fmtBytes(data.length)} 再发（尺寸与画质都降过，细节可能看不清）`;
+    }
+  }
+  // 压完还是太大才拒。注意这里**不能**因为"压过了"就放行：
+  // 万一压缩比不够，发出去会把整轮请求顶成 413，比"看不到这张图"糟得多。
   if (data.length > lim.bytes) {
     throw new Error(`图太大（${fmtBytes(data.length)}，上限 ${fmtBytes(lim.bytes)}）`);
   }
-  return { dataUrl: `data:${mime};base64,${data.toString('base64')}`, note };
+  return { dataUrl: `data:${outMime};base64,${data.toString('base64')}`, note };
 }
 
 // ── 表情图本地缓存（2026-09-17） ─────────────────────────────────────────
