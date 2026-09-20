@@ -549,8 +549,19 @@ export function createApp({ log = console.log } = {}) {
       path.join(WORKSPACE_DIR, '工具-中继', '跑微信通道.mjs'),
       path.join(APP_DIR, 'wechat-channel', '跑微信通道.mjs')
     ],
-    // WeFlow 同理：先看配置，再试开发布局（它是工作区的**兄弟**目录）
-    weflowExe: cfg.wechat?.weflowExe || path.join(path.resolve(WORKSPACE_DIR, '..'), 'weflow', 'WeFlow.exe'),
+    // WeFlow 同理（也传函数）：先看配置，再试几个常见布局。
+    // ⚠️ 为什么是一串候选而不是一条：WeFlow 是**别人装的**第三方应用，装在哪我们说了不算。
+    //    写死一条的结果就是"在我机器上好好的，在别人机器上点了没反应"。
+    weflowExe: () => {
+      const fromCfg = (() => { try { return String(getConfig().wechat?.weflowExe || '') } catch { return '' } })()
+      return [
+        fromCfg,
+        path.join(path.resolve(WORKSPACE_DIR, '..'), 'weflow', 'WeFlow.exe'),          // 开发机：工作区的兄弟目录
+        path.join(WORKSPACE_DIR, 'AstrWeChat', 'WeFlow.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'WeFlow', 'WeFlow.exe'),
+        path.join(process.env.PROGRAMFILES || '', 'WeFlow', 'WeFlow.exe')
+      ]
+    },
     log: (...a) => log('[wechat-channel]', ...a)
   });
 
@@ -1695,7 +1706,13 @@ export function createApp({ log = console.log } = {}) {
       }
       if (pathname === '/api/wechat/channel/start' && method === 'POST') {
         try {
-          const r = await wechatChannel.start();
+          // 🔴 起通道之前先把 WeFlow 点着（默认做）。
+          //    为什么默认做：少了这一步，用户会遇到"通道起来了、日志也正常，就是收不到消息"，
+          //    而原因是 WeFlow 没开 —— 这正是本项目最忌的"看着成功其实是空的"。
+          //    想只起通道、不碰 WeFlow 的，显式传 { launchWeFlowFirst: false }。
+          const body = await readBody(req).catch(() => ({}));
+          const launchWeFlowFirst = body?.launchWeFlowFirst !== false;
+          const r = await wechatChannel.start({ launchWeFlowFirst });
           return json(res, r.ok ? 200 : 400, r);
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -1714,7 +1731,9 @@ export function createApp({ log = console.log } = {}) {
       }
       if (pathname === '/api/wechat/channel/weflow/launch' && method === 'POST') {
         try {
-          const r = wechatChannel.launchWeFlow();
+          const body = await readBody(req).catch(() => ({}));
+          // { wait: true } = 拉起后等 5031 端口通（最多 45 秒），给"一键把整条链开起来"用
+          const r = body?.wait ? await wechatChannel.ensureWeFlow(Number(body?.waitMs) || 45000) : wechatChannel.launchWeFlow();
           return json(res, r.ok ? 200 : 400, r);
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -3443,6 +3462,16 @@ export function createApp({ log = console.log } = {}) {
     //    不该因此拖住控制台启动（QQ 侧照常可用）。
     if (wechatOnebot) {
       wechatOnebot.connect().catch((e) => log(`[wechat] 连接失败（会自行重试）：${e?.message ?? e}`));
+    }
+    // 微信**通道**（中继 + Bridge + 必要时 WeFlow）的自动启动。
+    // ⚠️ 与上面那行分工不同：`wechatOnebot.connect()` 是**我们去连**中继；
+    //    这一段是**把中继本身开起来**。之前 `wechat.autoLaunchRelay` 是个没人读的占位
+    //    ⇒ 用户重启 app 后必须记得手点页签上的「启动通道」，忘了就是"看着开着其实收不到"。
+    // ⚠️ 仍然**不 await**：拉 WeFlow 可能要等几十秒，不能拖住控制台的启动。
+    if (getConfig().wechat?.autoLaunchRelay) {
+      wechatChannel.start({ launchWeFlowFirst: getConfig().wechat?.autoLaunchWeFlow !== false })
+        .then((r) => log(`[微信通道] 自动启动：${r.alreadyRunning ? '中继已在跑' : r.ok ? '已拉起' : '失败 — ' + r.error}`))
+        .catch((e) => log(`[微信通道] 自动启动异常：${e?.message ?? e}`));
     }
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     // 空闲「梦」的定时器（每 5 分钟看一次该不该做；关着的话它自己会跳过）

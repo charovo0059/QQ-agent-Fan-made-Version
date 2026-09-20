@@ -4833,7 +4833,15 @@ function renderWechatStatus(st) {
   if (!st) return wxRow(null, '读不到状态', '后端 /api/wechat/channel/status 没响应');
   const w = st.weflow || {}, c = st.channel || {}, a = st.agent || {};
   const rows = []
-  rows.push(wxRow(!!w.running, '① WeFlow', w.running ? `在跑（端口 ${w.port || 5031}）` : `没在跑（端口 ${w.port || 5031} 不通）—— 点上面「启动 WeFlow」或自己开它`))
+  // WeFlow 有两种"在"，分开说（见 wechat-channel.js 的 status()）：
+  //   端口通 = 真的能读库；只有进程 = 还在加载/停在登录界面。
+  // 这两个状态的处置完全不同，混成一句话会让用户白等。
+  const wfDetail = w.running
+    ? `在跑（端口 ${w.port || 5031} 已通）`
+    : (w.starting
+      ? `进程在（pid ${(w.pids || []).join(',')}），但端口 ${w.port || 5031} 还没通 —— 它可能还在加载，或停在登录/选数据的界面`
+      : '没在跑 —— 点上面「启动 WeFlow」')
+  rows.push(wxRow(!!w.running, '① WeFlow', wfDetail))
   rows.push(wxRow(!!c.running && !!c.bridgeConnected, '② 通道（中继 + Bridge）',
     !c.running ? '中继没在跑 —— 点上面「启动通道」'
       : (!c.bridgeConnected ? '中继在跑，但 **Bridge 没连上来** ⇒ 消息进不来也发不出'
@@ -4845,7 +4853,12 @@ function renderWechatStatus(st) {
     ? `本应用拉起的通道进程 pid=${st.managed.pid}`
     : '通道进程不是本应用拉起的（可能是你在外面的窗口里跑的，正常）'
   const script = st.script?.path ? `脚本：${st.script.path}` : '⚠️ 找不到通道脚本 —— 见下方候选路径'
-  return rows.join('') + `<div class="hint" style="margin-top:8px">${esc(managed)}<br>${esc(script)}</div>`
+  // ⚠️ 找不到 WeFlow 时**必须把找过哪些路径列出来**：只写"找不到"，用户只能来问我们。
+  //    已找到时也报出来 —— 用户装了两份 WeFlow 时，得知道我们点的是哪一个。
+  const wfExe = w.exe
+    ? `WeFlow 程序：${w.exe}`
+    : `⚠️ 没找到 WeFlow 程序 —— 找过：${(w.exeCandidates || []).join(' ｜ ') || '(没配任何路径)'}`
+  return rows.join('') + `<div class="hint" style="margin-top:8px">${esc(managed)}<br>${esc(script)}<br>${esc(wfExe)}</div>`
     + (st.script?.path ? '' : `<div class="hint muted">候选：${(st.script?.candidates || []).map(esc).join(' ｜ ')}</div>`)
 }
 
@@ -4873,9 +4886,12 @@ function bindWechatPageEvents() {
     const id = e.target && e.target.id
     if (!id || !id.startsWith('wx-')) return
     const map = {
-      'wx-start-btn': ['/api/wechat/channel/start', '启动通道'],
-      'wx-stop-btn': ['/api/wechat/channel/stop', '停止通道'],
-      'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow']
+      // 启动通道时**顺带把 WeFlow 点着**（后端默认这么做）：少了这一步，用户会遇到
+      // "通道起来了、日志也正常，就是收不到消息"，原因是 WeFlow 没开。
+      'wx-start-btn': ['/api/wechat/channel/start', '启动通道', { launchWeFlowFirst: true }],
+      'wx-stop-btn': ['/api/wechat/channel/stop', '停止通道', {}],
+      // 拉起后等端口通（最多 45 秒）—— 否则用户点完立刻看到的还是"没在跑"，会以为失败了
+      'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow', { wait: true }]
     }
     if (id === 'wx-check-btn') { loadWechatPage({ force: true }); return }
     // 「微信联系人（放行）」：跳到设置页那一节。
@@ -4888,12 +4904,17 @@ function bindWechatPageEvents() {
     }
     const hit = map[id]
     if (!hit) return
-    const [path, label] = hit
+    const [path, label, body] = hit
     const v = $('#wx-verdict')
-    if (v) v.textContent = `${label}中…`
+    if (v) v.textContent = `${label}中…${id === 'wx-weflow-btn' ? '（要等它的端口起来，最多 45 秒）' : ''}`
     try {
-      const r = await api(path, { method: 'POST', body: '{}' })
-      if (v) v.textContent = r?.ok ? `${label}成功${r.alreadyRunning ? '（本来就在跑）' : ''}` : `${label}失败：${r?.error || '未知原因'}`
+      const r = await api(path, { method: 'POST', body: JSON.stringify(body || {}) })
+      if (v) {
+        v.textContent = r?.ok
+          ? `${label}成功${r.alreadyRunning ? '（本来就在跑）' : (r.launched ? '（已拉起）' : '')}${r.waitedMs ? `，等了 ${Math.round(r.waitedMs / 1000)} 秒` : ''}`
+          // 失败要把**原文**带上（比如"找过这几个路径都不存在"），别只说"未知原因"
+          : `${label}失败：${r?.error || '未知原因'}`
+      }
     } catch (err) {
       if (v) v.textContent = `${label}失败：${err.message}`
     }

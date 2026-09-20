@@ -191,7 +191,12 @@ export const DEFAULT_CONFIG = {
     wsUrl: 'ws://127.0.0.1:11230/ws',      // 中继给 agent 的事件口
     httpUrl: 'http://127.0.0.1:11230',     // 中继给 agent 的 API 口
     accessToken: '',                       // 中继不校验（本机回环）；留作将来收紧
-    autoLaunchRelay: false,                // 是否由本应用拉起中继（留位；页签上的按钮先手动）
+    autoLaunchRelay: false,                // 🆕 已接线（2026-09-20）：true = app 启动时自动拉起整条微信通道
+    // 🆕 自动拉起通道时，要不要顺手把 WeFlow 也点着（默认 true）。
+    //    默认 true 的理由：WeFlow 没开时，通道会**起来得完全正常**（中继在跑、Bridge 也连上），
+    //    只是永远收不到消息 —— 这是本项目最忌的"看着成功其实是空的"。
+    //    想自己手动管 WeFlow 的，把它设成 false。
+    autoLaunchWeFlow: true,
     // 🆕 「微信」页签用：通道启动脚本（跑微信通道.mjs）的路径。
     //    留空 = 自动找（开发布局在工作区「工具-中继」里；打包布局应随 app 分发）。
     //    为什么要可配：开发机与别人机器上的目录结构不一样，写死必然有一边找不到。
