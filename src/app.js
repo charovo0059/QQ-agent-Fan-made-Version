@@ -20,6 +20,7 @@ import { Orchestrator } from './orchestrator.js';
 // 群禁言状态表（2026-09-19 第八对话）：机器人被群禁言时**停止起编排**，别白烧模型调用。
 // 背景与证据链见 src/mutes.js 顶部注释，以及 待办与决策记录.md §30。
 import { GroupMutes, reseedGroupMutes } from './mutes.js';
+import { WechatChannel } from './wechat-channel.js';
 // 微信联系人登记表（2026-09-20）：把桥派生的数字 id 与昵称对应起来，
 // 让白名单可以点选而不是手填数字。见该文件顶部注释（含"为什么必须有它"）。
 import { learnContact, listContacts } from './wechat-contacts.js';
@@ -528,6 +529,30 @@ export function createApp({ log = console.log } = {}) {
     }
     return wechatUpstream;
   }
+
+  // ── 微信通道（中继 + Bridge）的生命周期：与 SnowLuma 那套同构（用户要"统一类似的界面"）──
+  const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  // 工作区根：app 在 <工作区>\QQ Agent\resources\app ⇒ 往上四层
+  const WORKSPACE_DIR = path.resolve(APP_DIR, '..', '..', '..');
+  /** 通道脚本路径：**每次从当前配置读**（用户可能在设置里改过；启动时读一次就过期了）。 */
+  const wechatScriptFromConfig = () => {
+    try { return String(getConfig().wechat?.channelScript || '') } catch { return '' }
+  };
+  // 脚本候选：① 设置里指定的 ② 开发布局（工作区「工具-中继」）③ 打包布局（随 app 的 wechat-channel\）。
+  // 为什么要一串候选：开发机与别人机器上的目录结构不一样，写死任何一条都必然有一边找不到。
+  const wechatChannel = new WechatChannel({
+    isPortOpen,
+    relayStatusUrl: cfg.wechat?.httpUrl || 'http://127.0.0.1:11230',
+    // 传**函数**而不是数组：用户可能随时在设置里改 channelScript，现算才不用重启
+    scriptCandidates: () => [
+      wechatScriptFromConfig(),
+      path.join(WORKSPACE_DIR, '工具-中继', '跑微信通道.mjs'),
+      path.join(APP_DIR, 'wechat-channel', '跑微信通道.mjs')
+    ],
+    // WeFlow 同理：先看配置，再试开发布局（它是工作区的**兄弟**目录）
+    weflowExe: cfg.wechat?.weflowExe || path.join(path.resolve(WORKSPACE_DIR, '..'), 'weflow', 'WeFlow.exe'),
+    log: (...a) => log('[wechat-channel]', ...a)
+  });
 
   const stickers = new StickerManager(onebot);
   // 群禁言状态（见 src/mutes.js）。三条来源都会往里写：
@@ -1650,6 +1675,50 @@ export function createApp({ log = console.log } = {}) {
 
       if (pathname === '/api/snowluma/logs' && method === 'GET') {
         return json(res, 200, { logs: snowlumaLogs.slice(-200) });
+      }
+
+      // ── 🆕 微信通道（中继 + Bridge）的生命周期：与 SnowLuma 那套**同构**，便于统一界面与操作 ──
+      // 为什么要做成页签按钮：在此之前通道只能靠人在命令行开窗口，用户看不到状态也关不掉。
+      if (pathname === '/api/wechat/channel/status' && method === 'GET') {
+        try {
+          const st = await wechatChannel.status();
+          // 第三段（app 自己那条链路）在 /api/status.wechat 里，这里顺带带上，页签一屏看全
+          st.agent = {
+            connected: wechatOnebot ? wechatOnebot.connected : false,
+            enabled: !!getConfig().wechat?.enabled,
+            bridgeConnected: wechatOnebot?.connected ? wechatUpstreamNow().online : null
+          };
+          return json(res, 200, { ok: true, ...st });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+      if (pathname === '/api/wechat/channel/start' && method === 'POST') {
+        try {
+          const r = await wechatChannel.start();
+          return json(res, r.ok ? 200 : 400, r);
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+      if (pathname === '/api/wechat/channel/stop' && method === 'POST') {
+        try {
+          return json(res, 200, wechatChannel.stop());
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+      if (pathname === '/api/wechat/channel/logs' && method === 'GET') {
+        const limit = Number(new URL(req.url, 'http://x').searchParams.get('limit')) || 120;
+        return json(res, 200, { logs: wechatChannel.tail(limit) });
+      }
+      if (pathname === '/api/wechat/channel/weflow/launch' && method === 'POST') {
+        try {
+          const r = wechatChannel.launchWeFlow();
+          return json(res, r.ok ? 200 : 400, r);
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
       }
 
       if (pathname === '/api/snowluma/stop' && method === 'POST') {

@@ -68,6 +68,8 @@
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
     <button class="tab" data-tab="skills" id="tab-skills">技能</button>
     <button class="tab" data-tab="snowluma" data-page-node-id="xFOx4aoCGOuX8g3AXNrBPj">SnowLuma</button>
+    <!-- 微信通道（2026-09-20 新增）：与 SnowLuma 并排，操作逻辑同构（状态/启停/日志/自检） -->
+    <button class="tab" data-tab="wechat" id="tab-wechat">微信</button>
     <button class="tab" data-tab="settings" data-page-node-id="4cXbRBtGmcpcL272eKvHPV">设置</button>
     <!-- 社区功能（右侧）：金句上传 / 意见收集。金句勾选模式下「确认金句」出现在最左 -->
     <span class="nav-spacer"></span>
@@ -105,6 +107,13 @@
     <!-- SnowLuma 视图 -->
     <section id="view-snowluma" class="view" data-page-node-id="53uE3Zo3JPnyOzB2ChLSiO">
       <div id="snowluma-page" class="snowluma-pane" data-page-node-id="VeCbHXFvH0XsHAqkw2PfCF"></div>
+    </section>
+
+    <!-- 微信通道（2026-09-20 第八对话新增）——与 SnowLuma 同构，用户要"统一类似的界面"
+         ⚠️ 这一页**不参与平台切换的隐藏**（hideInWechat 只藏 表情包/SnowLuma）：
+            它在 QQ 模式下也要能看见，否则用户根本找不到入口（默认就是 QQ 模式）。 -->
+    <section id="view-wechat" class="view">
+      <div id="wechat-page"></div>
     </section>
 
     <!-- 记忆视图 -->
