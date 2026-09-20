@@ -570,14 +570,24 @@ export class Orchestrator {
       return all.length ? all[all.length - 1].ts : Date.now();
     })();
 
+    // 🔴 按**会话来源**告诉提示词"这是在哪个平台"（2026-09-20 第八对话）：
+    //    微信没有拍一拍/合并转发/表情包，提示词按 QQ 写会诱导模型去调不存在的能力，
+    //    她还会张口就说"QQ"（实测：她在微信里回完话，小结写的是"发送者QQ"）。
+    //    ⚠️ 缺省 'qq'，且 QQ 分支的文本逐字不变 —— 别为了微信改动 QQ 侧一个字。
+    const platform = (() => {
+      try { return this.store.chatSource(chatKey) } catch { return 'qq' }
+    })();
+    const isWechat = platform === 'wechat';
+
     // 表情库快照（提示词用）
+    // ⚠️ 微信侧**不取**：微信没有表情包，给了目录她就会去发（发不出去，白花一次调用）
     let stickerEntries = [];
-    if (cfg.sticker?.enabled !== false) {
+    if (!isWechat && cfg.sticker?.enabled !== false) {
       try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
 
     // 组装提示词（无 LLM 历史）
-    const systemPrompt = buildSystemPrompt();
+    const systemPrompt = buildSystemPrompt({ platform });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
       triggerEntries,
