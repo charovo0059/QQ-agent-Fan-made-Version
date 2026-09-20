@@ -3719,17 +3719,71 @@ async function toggleChatInGroup(groupName, chatKey, detail) {
   if (await saveMemoryInterop({ groups }, detail)) loadMemoryDetail(chatKey);
 }
 
-/** 新建一个组并把当前会话放进去（组名让用户填，默认给个可用的）。 */
+/**
+ * 新建一个组并把当前会话放进去。
+ *
+ * 🔴 2026-09-20（第九对话）修：原来这里用的是 `window.prompt(...)`，**用户报「按了没反应」**。
+ *    实测（CDP 在真页面里点了一下）：`window.prompt` **确实被调用到了**，函数没坏 ——
+ *    坏的是**那个原生弹窗在应用里不显示**（Electron 渲染进程里不可靠；本应用自己也
+ *    基本不用它，`ui/app.js` 里只剩两处，另一处是"复制这段文本"的兜底）。
+ *    ⇒ 用户看到的就是"点了没动静"。
+ *    ⇒ 改成应用自己的**页内弹窗** `modelModalShell`（项目里 19 处都这么做），
+ *      顺带能一次填「组名 + 可选会话」，比原生 prompt 更好用。
+ *
+ * ⚠️ 别再用 `window.prompt` / `window.confirm` / `window.alert` 做交互 ——
+ *    本项目其余 18 个弹窗都是页内的，只有这里漏了。
+ */
 async function addGroupWithChat(chatKey, detail) {
-  const name = (window.prompt('给这个互通组起个名字（例如「家人」「同事」）：') || '').trim();
-  if (!name) return;
   const fresh = await api('/api/config');
   const groups = Object.assign({}, (fresh && fresh.memory && fresh.memory.groups) || {});
-  const arr = Array.isArray(groups[name]) ? groups[name].map(String) : [];
-  if (!arr.includes(String(chatKey))) arr.push(String(chatKey));
-  groups[name] = arr;
-  if (await saveMemoryInterop({ groups }, detail)) loadMemoryDetail(chatKey);
+  // 候选会话：优先白名单里的会话（有名字可显示），当前会话排最前
+  const chats = (state.chats || []).map((c) => c.key).filter(Boolean);
+  if (!chats.includes(chatKey)) chats.unshift(chatKey);
+  const ordered = [chatKey, ...chats.filter((k) => k !== chatKey)];
+
+  const overlay = modelModalShell({
+    head: '新建互通组',
+    body: `
+      <div class="field"><label>组名</label>
+        <input type="text" id="mg-name" placeholder="例如：家人 / 同事 / 全平台" style="width:100%" /></div>
+      <div class="hint">同一个组里的会话<b>互相可见</b>彼此记下的印象；一个会话可以同时属于多个组。</div>
+      <div class="field" style="margin-top:8px"><label>要放进这个组的会话（可多选）</label>
+        <div style="max-height:260px;overflow:auto;border:1px solid var(--line,#333);border-radius:6px;padding:6px">
+          ${ordered.map((k) => `
+            <label style="display:flex;align-items:center;gap:8px;padding:3px 0">
+              <input type="checkbox" class="mg-chat" value="${esc(k)}" ${k === chatKey ? 'checked' : ''}>
+              <span>${esc(formatChatTitle(k, chatNameOf(k)))}</span>
+              <span class="muted" style="font-size:11px;white-space:nowrap">${esc(k)}</span>
+            </label>`).join('')}
+        </div>
+      </div>
+      <div class="hint" id="mg-err" style="color:var(--orange)"></div>`,
+    foot: `<button class="btn" id="mg-cancel">取消</button>
+           <button class="btn btn-primary" id="mg-save">创建</button>`
+  });
+  overlay.querySelector('#mg-cancel').addEventListener('click', () => closeModelModal(overlay));
+  overlay.querySelector('#mg-save').addEventListener('click', async () => {
+    const name = (overlay.querySelector('#mg-name')?.value || '').trim();
+    const err = overlay.querySelector('#mg-err');
+    if (!name) { if (err) err.textContent = '请先填一个组名'; return }
+    if (groups[name]) { if (err) err.textContent = `「${name}」已经存在了，换个名字，或直接在列表里点「加入」`; return }
+    const picked = [...overlay.querySelectorAll('.mg-chat')].filter((el) => el.checked).map((el) => el.value);
+    if (!picked.length) { if (err) err.textContent = '至少要选一个会话'; return }
+    groups[name] = picked;
+    // ⚠️ 关弹窗要放在保存**成功之后**分支里；失败时留着让用户改（saveMemoryInterop 会把错误写在
+    //    记忆页的状态行里）。这里先关再保存的话，失败时用户看不到任何提示 —— 与"按了没反应"同类。
+    const okSaved = await saveMemoryInterop({ groups }, detail);
+    if (!okSaved) { if (err) err.textContent = '保存失败，看记忆页右上角的状态提示'; return }
+    closeModelModal(overlay);
+    await loadMemoryDetail(chatKey);
+  });
 }
+
+/** 旧实现（保留注释，别再改回去）：
+ *  const name = (window.prompt('给这个互通组起个名字（例如「家人」「同事」）：') || '').trim();
+ *  if (!name) return;
+ *  ... window.prompt 在应用里不显示 ⇒ 用户看到"按了没反应"。
+ */
 
 /**
  * 保存某个 QQ 号的「跨会话记忆互通」方向。
