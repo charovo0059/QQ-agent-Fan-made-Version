@@ -132,7 +132,7 @@ const CONSOLE_MARKER = 'qq-agent-console';
 */
 const THEME_ICON = { dark: '🌙', light: '☀️', system: '🖥️', '?': '❓' };
 const THEME_LABEL = { dark: '暗色', light: '亮色', system: '跟随系统', '?': '？' };
-const THEME_VALUES = ['dark', 'light', 'system', '?'];
+const THEME_VALUES = ['light', 'dark', 'system', '?'];
 
 /** 读取当前主题设置（localStorage 优先，其次系统偏好）。 */
 function getThemePref() {
@@ -477,7 +477,7 @@ function renderBanner() {
   if (show) {
     if (state.paused) {
       html += ` <button class="btn btn-small" id="banner-resume-btn">恢复</button>
-        <button class="btn btn-small btn-danger" id="banner-resume-read-btn" title="恢复运行，并把暂停期间积压的所有未读消息直接标记为已读（不再处理）">恢复并全部标为已读</button>`;
+        <button class="btn btn-small btn-danger" id="banner-resume-read-btn">恢复并全部标为已读</button>`;
     }
     banner.innerHTML = html;
     const link = $('#banner-goto-settings');
@@ -897,7 +897,7 @@ function renderSkillsPage() {
       <div class="usage-days">
         <span class="uc-tag" title="生效中 / 全部条目">${activeAll} / ${total} 生效</span>
         <span class="uc-tag" title="${hot ? '放进 skills/ 或 plugins/ 的扩展会被自动加载（约 0.5 秒后生效）' : '新扩展要手动点「刷新」才会加载'}">热重载：${hot ? '开' : '关'}</span>
-        <button class="btn btn-small" id="skills-hotreload-btn" title="切换热重载（放进目录的 .js 会被自动执行，这是它的代价）">${hot ? '关掉热重载' : '打开热重载'}</button>
+        <button class="btn btn-small" id="skills-hotreload-btn" title="切换热重载开关">${hot ? '关掉热重载' : '打开热重载'}</button>
         <button class="btn btn-small" id="skills-refresh-btn" title="重新扫描 skills/ 与 plugins/ 目录">刷新</button>
       </div>
     </div>
@@ -6194,7 +6194,7 @@ function renderDesktopSection(c) {
     <h3>界面</h3>
     <div class="field"><label>主题</label>
       <div class="theme-picker" id="theme-picker">
-        ${['dark', 'light', 'system', '?'].map((t) => `
+        ${['light', 'dark', 'system', '?'].map((t) => `
           <div class="theme-option${getThemePref() === t ? ' on' : ''}" data-theme-opt="${t}" role="button" tabindex="0">
             <span class="t-ico">${THEME_ICON[t]}</span>
             <span>${THEME_LABEL[t]}</span>

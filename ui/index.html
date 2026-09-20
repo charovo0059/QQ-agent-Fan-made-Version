@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/style.css" data-page-node-id="x8F6i7W4lVVFQuDLeTBT6x" />
   <script>
     /* 主题预置：在样式生效前就定好 data-theme，避免首屏闪白/闪黑。
-       优先级：localStorage 里的显式选择 > 系统偏好 > 暗色。
+       优先级：localStorage 里的显式选择 > 亮色（默认）；仅当选了「跟随系统」才读系统偏好。
        这里只做"应用"，真正的切换逻辑与持久化在 app.js。 */
     (function () {
       try {
@@ -18,7 +18,7 @@
         if (theme !== 'light' && theme !== 'dark' && theme !== '?') theme = 'dark';
         document.documentElement.setAttribute('data-theme', theme);
       } catch (e) {
-        document.documentElement.setAttribute('data-theme', 'dark');
+        document.documentElement.setAttribute('data-theme', 'light');
       }
     })();
   </script>
@@ -43,7 +43,7 @@
       <span id="usage-label" class="muted" data-page-node-id="ASGoXILEnFSWWqgmj2pS4B">今日：-</span>
       <span class="sep" data-page-node-id="GWds7ORTDExh6JmgVu8cSC"></span>
       <span id="search-count-label" class="muted" title="今日联网搜索次数（web_search / web_fetch）" data-page-node-id="OLNka4FykNQRaxEpBoEK6t">搜索：-</span>
-      <button id="theme-btn" class="icon-btn" title="切换主题（暗 → 亮 → 跟随系统）" aria-label="切换主题" data-page-node-id="v47iM0LsuM4VppZ5WLh7Qi"></button>
+      <button id="theme-btn" class="icon-btn" title="切换主题（亮 → 暗 → 跟随系统）" aria-label="切换主题" data-page-node-id="v47iM0LsuM4VppZ5WLh7Qi"></button>
       <button id="pause-btn" class="btn btn-small" data-page-node-id="plyqWsDjnlKP1Td6wSVJaD">暂停</button>
     </div>
   </header>
@@ -126,7 +126,7 @@
         <div id="proposal-review" class="proposal-review"></div>
         <div class="list-head muted" style="display:flex;align-items:center;gap:8px" data-page-node-id="LVSsdebq14ic87yIdKe0k1">
           <span>记忆</span>
-          <label style="margin-left:auto;font-weight:400;font-size:11.5px;cursor:pointer;white-space:nowrap" title="白名单里的会话如果没有记忆文件，默认不显示（它们不是文件，删不掉）">
+          <label style="margin-left:auto;font-weight:400;font-size:12px;cursor:pointer;white-space:nowrap" title="白名单里的会话如果没有记忆文件，默认不显示（它们不是文件，删不掉）">
             <input type="checkbox" id="mem-show-empty" style="vertical-align:-1px" />显示空记忆
           </label>
         </div>
