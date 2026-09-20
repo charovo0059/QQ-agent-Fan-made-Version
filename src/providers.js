@@ -250,18 +250,29 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
   const existing = providers.find((p) => normalizeBaseUrl(p.baseURL) === base);
   const entries = normalizeModelInput(models);
   if (existing) {
+    // ⚠️ 顺序很关键（上游 audit-round1 M-3）：**先改完，再落盘**。
+    //    `existing` 是 `currentProviders()` 造出来的**副本**（那里有 `.map`，
+    //    `withResolvedKey` 又 `{...p}`），所以改它**不会**影响内存配置，
+    //    更不会进盘 —— 唯一的持久化途径就是下面那次 `updateConfig(providers)`。
+    //    原来这里把 `existing.modelNames = ...` 写在两次 updateConfig **之后**，
+    //    于是：
+    //      · 往已有提供商里加模型，`modelNames`（模型显示名）永远存不下；
+    //      · 若 models 也要靠这次加，`existing.models.push` 同样白做 ——
+    //        重启或重载后就"自己变回去了"，而接口返回的是已改过的副本，
+    //        界面看起来是成功的。属于"显示成功、实际没存"的静默丢数据。
+    //    `addModelsToProvider` / `removeModelFromProvider` 两个兄弟函数
+    //    本来就是"先改后写"，只有这一支漏了。
     for (const m of entries) {
       if (!existing.models.includes(m.id)) existing.models.push(m.id);
     }
-    if (apiKey) {
-      const keys = { ...(getConfig().dshProviderKeys || {}) };
-      keys[existing.id] = String(apiKey).trim();
-      updateConfig({ providers, dshProviderKeys: keys });
-    } else {
-      updateConfig({ providers });
-    }
     existing.modelNames = { ...(existing.modelNames || {}) };
     for (const m of entries) existing.modelNames[m.id] = m.name;
+
+    const keys = { ...(getConfig().dshProviderKeys || {}) };
+    if (apiKey) keys[existing.id] = String(apiKey).trim();
+    // 与兄弟函数同一写法：apiKey 走 dshProviderKeys，providers 数组里不留明文
+    const clean = providers.map((x) => { const { apiKey: _drop, ...rest } = x; return rest; });
+    updateConfig({ providers: clean, ...(apiKey ? { dshProviderKeys: keys } : {}) });
     return { provider: withResolvedKey(existing), created: false };
   }
   const id = `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
