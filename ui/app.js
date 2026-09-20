@@ -675,6 +675,7 @@ function switchTab(name) {
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'dreams') loadDreams();
   if (name === 'snowluma') loadSnowlumaPage();
+  if (name === 'wechat') loadWechatPage();
   if (name === 'skills') loadSkillsPage();
   if (name === 'settings') loadSettings();
 }
@@ -1437,6 +1438,7 @@ function startListPoller() {
     if (state.tab === 'sessions') loadSessions({ quiet: true });
     if (state.tab === 'chats') loadChats({ quiet: true });
     if (state.tab === 'snowluma') loadSnowlumaPage({ quiet: true });
+    if (state.tab === 'wechat') loadWechatPage();   // 只重建状态区，日志框只更新文本（见那一页的约束 2）
     if (state.tab === 'usage') loadUsageView();   // 无 force：只更新数值，不重建 DOM
     if (state.tab === 'settings') refreshStatus();
   }, refreshIntervalMs());
@@ -4779,6 +4781,145 @@ async function loadWechatContacts() {
       loadWechatContacts();
     });
   });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   微信通道页（2026-09-20 第八对话新增；用户要求"和 snowluma 一样的操作逻辑"）
+   ──────────────────────────────────────────────────────────────────────
+   为什么要有这一页：在此之前微信通道**只能靠人在命令行开窗口**
+   （`中继.mjs` + `跑Bridge.mjs`，后来合成 `跑微信通道.mjs`）——用户看不到状态、
+   也没法在界面里开或关。SnowLuma 早就有"启动 / 停止 / 日志"那一套。
+
+   ⚠️ 三条约束（**改这一页前必读**）：
+   1. **状态一律取后端 `/api/wechat/channel/status`**，前端不自己推断通没通 ——
+      否则又会出现"界面说通了、实际收不到"的两套口径（本项目栽过，见 §12.15）。
+   2. **日志框放在常驻容器里**，轮询只重建状态区 —— 整页重建会把用户正在看的位置
+      冲掉，这正是 §29「群发打字打一半被打断」的同一个病。
+   3. **三段分开显示**（WeFlow / 通道 / 我的链路），断在哪一段要一眼看出来 ——
+      "微信没反应"最常见的原因就是中间那段断了而界面不说。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/** 页面的骨架（只建一次；之后只重建 `#wx-status` 与更新 `#wx-log` 的文本）。 */
+function wechatPageShell() {
+  return `
+    <h3>微信通道</h3>
+    <div class="hint" style="margin-bottom:10px">
+      三段各管一件事：<b>WeFlow</b>（读微信本地库、推新消息，第三方应用）→
+      <b>通道</b>（我们的中继 + Bridge）→ <b>我的链路</b>（本应用连上中继）。
+      <br>要收微信消息，<b>三段都得是通的</b>；断了哪一段这里会说。
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn btn-small" id="wx-start-btn">启动通道</button>
+      <button class="btn btn-small" id="wx-stop-btn">停止通道</button>
+      <button class="btn btn-small" id="wx-weflow-btn" title="WeFlow 是第三方应用，我们只能替你点一下火">启动 WeFlow</button>
+      <button class="btn btn-small" id="wx-check-btn">一键自检</button>
+    </div>
+    <div id="wx-verdict" class="hint" style="margin-bottom:8px"></div>
+    <div id="wx-status"></div>
+    <div class="field" style="margin-top:10px"><label>通道日志（最近 100 行）</label>
+      <pre id="wx-log" style="max-height:260px;overflow:auto;background:var(--bg-2,#111);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:12px;white-space:pre-wrap">（读取中…）</pre>
+    </div>`;
+}
+
+/** 一行状态：圆点 + 标题 + 说明。 */
+function wxRow(okState, title, detail) {
+  const color = okState === true ? '#35c46a' : (okState === false ? '#e0574a' : '#8a8a8a');
+  const dot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:6px"></span>`;
+  return `<div style="margin:6px 0">${dot}<b>${esc(title)}</b> <span class="muted">${esc(detail || '')}</span></div>`;
+}
+
+function renderWechatStatus(st) {
+  if (!st) return wxRow(null, '读不到状态', '后端 /api/wechat/channel/status 没响应');
+  const w = st.weflow || {}, c = st.channel || {}, a = st.agent || {};
+  const rows = []
+  rows.push(wxRow(!!w.running, '① WeFlow', w.running ? `在跑（端口 ${w.port || 5031}）` : `没在跑（端口 ${w.port || 5031} 不通）—— 点上面「启动 WeFlow」或自己开它`))
+  rows.push(wxRow(!!c.running && !!c.bridgeConnected, '② 通道（中继 + Bridge）',
+    !c.running ? '中继没在跑 —— 点上面「启动通道」'
+      : (!c.bridgeConnected ? '中继在跑，但 **Bridge 没连上来** ⇒ 消息进不来也发不出'
+        : `通（Bridge 已连入${c.login ? `，微信侧登录 ${c.login.nickname || c.login.userId}` : ''}${c.eventsIn !== null && c.eventsIn !== undefined ? `，累计收到事件 ${c.eventsIn}` : ''}）`)))
+  rows.push(wxRow(!!a.enabled && !!a.connected && a.bridgeConnected !== false, '③ 我的链路',
+    !a.enabled ? '本应用的微信通道**没启用**（config.wechat.enabled=false）'
+      : (!a.connected ? '本应用没连上中继（会自己重试）' : (a.bridgeConnected === false ? '连上中继了，但上游（②）不通' : '通'))))
+  const managed = st.managed?.pid
+    ? `本应用拉起的通道进程 pid=${st.managed.pid}`
+    : '通道进程不是本应用拉起的（可能是你在外面的窗口里跑的，正常）'
+  const script = st.script?.path ? `脚本：${st.script.path}` : '⚠️ 找不到通道脚本 —— 见下方候选路径'
+  return rows.join('') + `<div class="hint" style="margin-top:8px">${esc(managed)}<br>${esc(script)}</div>`
+    + (st.script?.path ? '' : `<div class="hint muted">候选：${(st.script?.candidates || []).map(esc).join(' ｜ ')}</div>`)
+}
+
+/** 自检结论：把"三段都通了吗"写成一句人话（而不是让用户自己对着三个圆点猜）。 */
+function wechatVerdict(st) {
+  if (!st) return { ok: false, text: '⚠️ 读不到状态' }
+  const w = !!st.weflow?.running, c = !!(st.channel?.running && st.channel?.bridgeConnected), a = !!(st.agent?.enabled && st.agent?.connected)
+  if (w && c && a) return { ok: true, text: '✅ 三段全通 —— 现在给别人发微信消息，这边就能收到' }
+  const miss = []
+  if (!w) miss.push('① WeFlow 没在跑（它负责读微信库）')
+  if (!st.channel?.running) miss.push('② 中继没在跑')
+  else if (!st.channel?.bridgeConnected) miss.push('② Bridge 没连上中继')
+  if (!st.agent?.enabled) miss.push('③ 本应用的微信通道没启用')
+  else if (!st.agent?.connected) miss.push('③ 本应用没连上中继')
+  return { ok: false, text: '❌ 还不通：' + miss.join('；') }
+}
+
+let wechatPageBound = false
+function bindWechatPageEvents() {
+  if (wechatPageBound) return
+  wechatPageBound = true
+  const page = document.getElementById('wechat-page')
+  if (!page) return
+  page.addEventListener('click', async (e) => {
+    const id = e.target && e.target.id
+    if (!id || !id.startsWith('wx-')) return
+    const map = {
+      'wx-start-btn': ['/api/wechat/channel/start', '启动通道'],
+      'wx-stop-btn': ['/api/wechat/channel/stop', '停止通道'],
+      'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow']
+    }
+    if (id === 'wx-check-btn') { loadWechatPage({ force: true }); return }
+    const hit = map[id]
+    if (!hit) return
+    const [path, label] = hit
+    const v = $('#wx-verdict')
+    if (v) v.textContent = `${label}中…`
+    try {
+      const r = await api(path, { method: 'POST', body: '{}' })
+      if (v) v.textContent = r?.ok ? `${label}成功${r.alreadyRunning ? '（本来就在跑）' : ''}` : `${label}失败：${r?.error || '未知原因'}`
+    } catch (err) {
+      if (v) v.textContent = `${label}失败：${err.message}`
+    }
+    loadWechatPage({ force: true })
+  })
+}
+
+async function loadWechatPage({ force = false } = {}) {
+  const box = document.getElementById('wechat-page')
+  if (!box) return
+  if (force || !document.getElementById('wx-status')) {
+    box.innerHTML = wechatPageShell()
+    bindWechatPageEvents()
+  }
+  let st = null
+  let logs = []
+  try { st = await api('/api/wechat/channel/status') } catch { st = null }
+  try { logs = (await api('/api/wechat/channel/logs?limit=100')).logs || [] } catch { /* 日志读不到不影响状态 */ }
+  const sBox = document.getElementById('wx-status')
+  if (sBox) sBox.innerHTML = renderWechatStatus(st)
+  const v = document.getElementById('wx-verdict')
+  if (v) {
+    const verdict = wechatVerdict(st)
+    v.textContent = verdict.text
+    v.style.color = verdict.ok ? '#35c46a' : ''
+  }
+  // ⚠️ 日志框只更新文本、不重建元素（保住用户的滚动位置）
+  const logBox = document.getElementById('wx-log')
+  if (logBox) {
+    const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 8
+    logBox.textContent = logs.length
+      ? logs.map((l) => `[${new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false })}] ${l.text}`).join('\n')
+      : '（还没有日志：通道还没由本应用启动过，或者你是在外面的窗口里跑的）'
+    if (atBottom) logBox.scrollTop = logBox.scrollHeight
+  }
 }
 
 function renderSettingsSection(c) {
