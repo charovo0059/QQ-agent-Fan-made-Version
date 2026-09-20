@@ -114,10 +114,14 @@ function memoryRules() {
 }
 
 function stickerRules(platform) {
-  // 微信侧：没有表情包、也不能拍一拍 ⇒ **不给策略，只给禁令**（避免她去找不存在的能力）
-  if (String(platform) === 'wechat') {
-    return '【表情包与拍一拍】微信上没有表情包，也不能拍一拍 —— 这两样都用不了，不要尝试，也不要提起它们。';
-  }
+  // 微信侧：**整段下线**（K3 第二轮回执 · 问题二选 C）。
+  //   为什么不是"给一段禁令"（那是我原来的写法）：
+  //   ① K3 把"没有表情包、也不能拍一拍"并进了【微信场景规则】第 1 条，
+  //      一条事实只出现一次 —— 两处都写，模型容易只记住其中一条；
+  //   ② 原禁令里还有一句"不要尝试，也不要提起它们"，而 K3 在场景规则里
+  //      已经写成"用不了的不要尝试，更不要主动提起"，重复。
+  //   ⇒ 返回**空串**，由 buildSystemPrompt 跳过（见那里的"跳过空段"）。
+  if (String(platform) === 'wechat') return '';
   // 活跃度档位直接改写策略段的频率行（引导统一在系统提示，不在"本次输入"重复）
   const lvl = Math.min(3, Math.max(0, Number(getConfig().sticker?.encourage) || 0));
   return [
@@ -160,7 +164,7 @@ function reportBan() {
 function wechatSceneRules() {
   return [
     '【微信场景规则】',
-    '- 你现在在微信里，不是 QQ。这里只有文字：没有图片、表情、文件，也没有拍一拍。',
+    '- 你现在在微信里，不是 QQ。这里只有文字：没有图片、表情、文件，也不能拍一拍——用不了的不要尝试，更不要主动提起。',
     '- 做不到的事不承诺。想发图、发表情的时候，改成用文字说。',
     '- 没有 @ 那一套，想叫谁就直接叫昵称。',
     '- 一对一私聊里，人家发消息就是对你说的：别像在群里那样潜水不接，但也不用回得很满，照常用你的短句。',
@@ -368,15 +372,22 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
     ? cfg.systemPromptSegments
     : {};
   const keys = Object.keys(defaults);
-  const parts = [];
-  keys.forEach((key, index) => {
+  // ⚠️ **跳过空段**（2026-09-20 加，K3 第二轮回执 · 问题二 C 要用）：
+  //    微信侧的 `stickerRules` 现在是**空串**（整段下线），而原来那段 `parts.push('')`
+  //    的写法会让它留下一个**空行**（= 提示词里凭空多一个空块）。
+  //    改成"先把非空段收起来、再用 `\n\n` 拼"，结果与旧写法**逐字节相同**
+  //    （旧写法 parts = [段, '', 段, '', …] join('\n') ≡ 各段 join('\n\n')），
+  //    所以 QQ 侧一个字都没变 —— 有 test-skills基础设施.mjs 的 sha256 钉着。
+  const blocks = [];
+  keys.forEach((key) => {
     const override = overrides[key];
-    parts.push(override && String(override).trim()
+    const text = override && String(override).trim()
       ? expandPlaceholders(String(override).trim(), cfg)
-      : defaults[key]);
-    if (index < keys.length - 1) parts.push('');
+      : defaults[key];
+    const s = String(text ?? '');
+    if (s.trim()) blocks.push(s);
   });
-  return parts.join('\n') + skillBlock + customRulesBlock(cfg);
+  return blocks.join('\n\n') + skillBlock + customRulesBlock(cfg);
 }
 
 // ── 用户消息 ─────────────────────────────────────────────────────────────
