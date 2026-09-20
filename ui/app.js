@@ -5474,6 +5474,13 @@ function renderSystemPromptEditor(c) {
           保存后<b>下一条消息</b>即生效，无需重启。优先级：完整系统提示 &gt; 逐段替换 &gt; 内置默认。
           覆盖文本可用 <code>{botName}</code>、<code>{participation}</code> 占位符。
         </div>
+        <div class="sp-callout">
+          <span class="sp-callout-icon">🆕</span>
+          <div><b>逐段替换只对 QQ 生效</b>（2026-09-20 起）。微信侧一律用内置的平台版——
+            因为人写覆盖时想的是 QQ 的能力（<code>send_sticker</code>、<code>send_poke</code>、表情包…），
+            套到微信侧会<b>诱导她去调一个不存在的能力</b>。
+            想让微信侧也有自定义措辞，请等「微信专用覆盖」这个功能（还没做）。</div>
+        </div>
         <div class="field"><label>完整系统提示（留空 = 使用内置）</label>
           <textarea id="cfg-sysprompt" class="persona-role-text sp-full-text" placeholder="留空即使用内置系统提示。点下方「载入内置默认」可把内置提示填进来再改。" spellcheck="false">${esc(persona.systemPrompt || '')}</textarea></div>
         <div class="sp-toolbar">
