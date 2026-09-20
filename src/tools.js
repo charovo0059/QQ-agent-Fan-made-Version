@@ -13,6 +13,12 @@ import { webSearch, webFetch } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
+// 图片类型嗅探统一走 image-type.js（**吸收自上游 0.4，2026-09-20 第九对话**）。
+// 原来本文件内联了一份 detectMime（魔数判断），与别处那份各自演化 ——
+// 上游正是因为这个才把它抽成单独模块（他的注释里写着"三份实现各自演化，
+// 加一种格式就要改三处"）。这里换成引用，逻辑与他那份**逐字一致**（含 `length < 12` 的守卫），
+// 所以行为不变，只是以后加格式只改一处。
+import { detectMime } from './image-type.js';
 // 工具注册表（Skills 基础设施，来自上游 0.3.1）：原生工具与技能工具都在这里登记，
 // 技能工具（带 skillId）的可用性统一问 getToolAvailability()。
 import { registerTool, listTools, getToolAvailability } from './tool-registry.js';
@@ -244,15 +250,9 @@ function imageBudgetLeft(ctx) {
   return imageLimits().runBytes - (Number(ctx.__imageBytes) || 0);
 }
 
-function detectMime(buf) {
-  if (!buf || buf.length < 12) return null;
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
-  if (buf.toString('ascii', 0, 8) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  return null;
-}
-
+// ⚠️ `detectMime` 原来在这里内联实现（魔数嗅探），已改为从 `./image-type.js` 引入 ——
+//    那份实现与本处**逐字等价**（连 `buf.length < 12` 的守卫都一样），所以行为不变。
+//    别再把它抄回来：抄回来就又变成"三份实现各自演化"。
 function ok(payload) {
   return { content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1) };
 }
