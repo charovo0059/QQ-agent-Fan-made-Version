@@ -2522,8 +2522,18 @@ export function createApp({ log = console.log } = {}) {
         // 群名要调 OneBot 拿，可能慢或失败 —— 用 allSettled 保证绝不影响主流程：
         // 拿不到的 chatName 为空，UI 自动退回只显示群号。
         await Promise.allSettled(chats.map(async (c) => {
+          c.chatName = '';
+          // 🔴 微信侧的名字**不用问 OneBot** —— 桥把昵称学在联系人表里了（wechat-contacts.json）。
+          //    不补这一步，微信会话在界面上只会显示"私聊 1000000001"，而用户认得的是"某群友"。
+          //    （实测：微信会话的 chatName 是空的，因为 OneBot 那条路只管 QQ 群名。）
+          if (store.chatSource(c.key) === 'wechat') {
+            const id = String(c.key).split(':')[1] || '';
+            const hit = listContacts().find((x) => String(x.id) === id);
+            if (hit?.name) c.chatName = hit.name;
+            return;
+          }
           const m = /^group:(\d+)$/.exec(String(c.key || ''));
-          if (!m) { c.chatName = ''; return; }
+          if (!m) return;
           try {
             c.chatName = await Promise.race([
               orchestrator.getChatName(m[1]),

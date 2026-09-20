@@ -1757,9 +1757,12 @@ function renderSessionDetail(s) {
     }
     // 发出的消息
     for (const sent of s.sent || []) {
+      // 🔴 这里原来写死「已发送到 QQ」—— 微信的回复也显示成 QQ，用户一眼就发现"它不知道自己在微信"。
+      //    平台要从**这条会话的 chatKey** 查（列表接口不带 source）。
+      const plat = sessionPlatform({ chatKey: s.chatKey }) === 'wechat' ? '微信' : 'QQ';
       html.push(`
         <div class="sent-badge">
-          <div class="asr-label">已发送到 QQ${sent.at ? ` · ${sent.at}` : ''}</div>
+          <div class="asr-label">已发送到 ${plat}${sent.at ? ` · ${sent.at}` : ''}</div>
           ${esc(sent.text)}
         </div>`);
     }
@@ -5332,8 +5335,8 @@ function renderWechatContactsSection(c) {
       <div class="checkbox-row" style="align-items:center">
         <input type="checkbox" class="wx-contact-cb" data-id="${esc(x.id)}" data-kind="${esc(x.kind)}" ${x.allowed ? 'checked' : ''} />
         <label style="flex:1">
-          ${esc(x.name || '(没拿到昵称)')}
-          <span class="muted">· ${x.kind === 'group' ? '群' : '私聊'} · <code>${esc(x.id)}</code>${x.count ? ` · 收到过 ${x.count} 条` : ''}</span>
+          <b>${esc(x.name || '(没拿到昵称)')}（${esc(x.id)}）（微信）</b>
+          <span class="muted">· ${x.kind === 'group' ? '群' : '私聊'}${x.count ? ` · 收到过 ${x.count} 条` : ''}</span>
         </label>
       </div>`).join('');
   })();
@@ -5373,15 +5376,27 @@ function chatNameOf(chatKey) {
 }
 
 /**
- * 会话标题：群名（群号） / 群 群号 / 私聊 号
+ * 会话标题：群名（群号） / 群 群号 / 私聊 号  —— 微信来源的末尾再加「（微信）」
+ *
  * 拿到群名时显示"群名（群号）"，既好认又能确认身份；拿不到就退回原来的"群 群号"。
+ * ⚠️ **QQ 侧的显示必须逐字不变**（"不许为了微信把 QQ 改坏"是硬要求）⇒ 只有微信加后缀。
  */
 function formatChatTitle(chatKey, name = '') {
   const m = /^group:(\d+)$/.exec(String(chatKey || ''));
-  if (m) return name ? `${name}（${m[1]}）` : `群 ${m[1]}`;
+  if (m) return (name ? `${name}（${m[1]}）` : `群 ${m[1]}`) + platformSuffix(chatKey);
   const p = /^private:(\d+)$/.exec(String(chatKey || ''));
-  if (p) return name ? `${name}（${p[1]}）` : `私聊 ${p[1]}`;
+  if (p) return (name ? `${name}（${p[1]}）` : `私聊 ${p[1]}`) + platformSuffix(chatKey);
   return String(chatKey || '');
+}
+
+/**
+ * 平台后缀：**只有微信**才加「（微信）」，QQ 不加。
+ * 为什么要单独一个函数：这段判断有三处要用（会话标题 / "已发送到"徽标 / 联系人列表），
+ * 各写一份必然漂移；而"QQ 不加"这条是硬要求，集中在一处才好守住。
+ * 数据来自 refreshSourceMap 那张 chatKey→source 表（`/api/sessions` 不带 source，只能查表）。
+ */
+function platformSuffix(chatKey) {
+  return sessionPlatform({ chatKey }) === 'wechat' ? '（微信）' : '';
 }
 
 function clampInt(raw, min, max, fallback) {
