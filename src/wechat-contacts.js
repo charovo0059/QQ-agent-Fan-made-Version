@@ -99,8 +99,10 @@ export function listContacts({ kind = null } = {}) {
         kind: k,
         id,
         name: v?.name || '',
-        // 界面上没有名字时至少显示 id，别让它看着像"空条目"
-        display: v?.name ? `${v.name} · ${id}` : id,
+        // 显示串：与 QQ 侧「名字（号码）」同构，末尾多一个平台括号（用户 2026-09-20 要求）。
+        // 微信侧的号码是桥派生的 10 位数字（不是微信号），光看它认不出是谁 ⇒ 名字必须带上。
+        // ⚠️ 别再退回 `${name} · ${id}` 那种写法 —— 两套格式并存会让人以为是两个东西。
+        display: v?.name ? `${v.name}（${id}）（微信）` : `${id}（微信）`,
         firstSeen: v?.firstSeen || 0,
         lastSeen: v?.lastSeen || 0,
         count: v?.count || 0
