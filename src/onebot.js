@@ -221,9 +221,11 @@ export function forwardIdFromData(d) {
  * 把 OneBot 消息段数组转成 AI 可读的纯文本。
  * resolveReply: async (mid) => { sender, text } | null —— 解析引用原文。
  * resolveAtName: async (qq) => string | null —— 把 @ 的 QQ 号解析成群名片。
+ * selfId: 机器人自己的 QQ 号（**有它才敢标"在叫别人"**，见下面 `at` 分支的注释）。
  */
-export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true } = {}) {
+export async function segmentsToText(segments, { resolveReply = null, resolveAtName = null, includeReply = true, selfId = '' } = {}) {
   if (typeof segments === 'string') return sanitizeUserText(segments.trim());
+  const self = String(selfId ?? '').trim();
   const out = [];
   for (const seg of segments ?? []) {
     const d = seg?.data ?? {};
@@ -234,8 +236,24 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
           out.push('@全体成员');
         } else {
           let name = null;
-          try { name = resolveAtName ? await resolveAtName(String(d.qq)) : null; } catch { name = null; }
-          out.push(name ? `@${name}` : `@${d.qq}`);
+          try { name = resolveAtName ? await resolveAtName(String(d.qq)) : null } catch { name = null }
+          const who = name ? `@${name}` : `@${d.qq}`;
+          // 🆕 「@别人」明确标出来（2026-09-20 第八对话，用户提供截图）。
+          //
+          // ── 为什么需要它 ────────────────────────────────────────────────
+          // 实测那一轮：群里 `@年灬少ゞ 妈妈`（**在叫别人**），她引用了那条并回「嗯？怎么啦」，
+          // 自述写「达困叫妈妈，简短接住了」——她把"妈妈"当成了在叫她（人设是萝莉妈妈气质版）。
+          // 提示词里**没有任何一条规则**覆盖这种情况：场景规则那条只管「引用」
+          // （"引用对象不是你时别抢话"），而 @别人 既不是引用也不含她的名字。
+          // ⇒ 与其再加一条"要她记住"的规则（规则会被忽略），不如让"这不是叫你"变成
+          //   她**看得见的事实**：`@年灬少ゞ（在叫别人） 妈妈`。
+          //
+          // ⚠️ **只有知道 selfId 时才标**：不知道自己的号就无法判断"别人"是谁，
+          //    那时候乱标会把"在叫我"也标成"在叫别人" —— 比不标更糟。
+          // ⚠️ 标在**入库时**（而不是渲染时）是刻意的：引用原文、过去状态、本次唤醒
+          //    三处都读同一份 text，入库时标一次就全都有了，不会出现三处口径不一。
+          //    代价：存档/界面里也会带上这五个字 —— 那是**如实**的（它确实在叫别人）。
+          out.push(self && String(d.qq) !== self ? `${who}（在叫别人）` : who);
         }
         break;
       }
