@@ -2833,3 +2833,64 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
 .platform-switch .plat-btn.active { color: var(--accent-strong); }
 /* 微信模式下给顶栏一点视觉提示：状态点换成绿色（QQ 是蓝），一眼能看出在看哪边 */
 .platform-switch.wechat-mode .plat-btn.active { background: rgba(var(--green-rgb), .26); color: var(--green); }
+
+/* ══ 阶段 C2：侧栏搜索框 + 状态筛选胶囊 ══════════════════════════════════
+   概念版（K3 方案 C2）的侧栏顶部有搜索与筛选，线上原来没有。
+   两条实现原则：
+   1) 不套新容器 —— 搜索框/胶囊直接做 #session-list 的 flex 子项，
+      与 .list-head / #session-items / .pt-stickyfoot 同级。
+   2) 复用 .chip（style.css:2521）做胶囊，不另造一套视觉。
+   ⚠️ .pt-search 用 margin 而不是让 .pt-filters 承担上边距：搜索框与
+      标题之间要贴合，胶囊与搜索框之间才需要留白。 */
+.pt-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  margin: 6px 12px 0;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  transition: border-color var(--dur-base) var(--ease-in-out), box-shadow var(--dur-base) var(--ease-in-out);
+}
+.pt-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .12);
+}
+.pt-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+}
+.pt-search input::placeholder { color: var(--faint); }
+/* 搜索框的清除按钮（type=search 自带）：暗色下默认是浅色方块，压掉换成透明 */
+.pt-search input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* 筛选胶囊一行：横向可滚，窄宽度下不换行把列表挤下去 */
+.pt-filters {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: none;
+}
+.pt-filters::-webkit-scrollbar { display: none; }
+.pt-filters .chip { flex: none; }
+/* 「没有匹配」提示：沿用 .list-head 的位置感，但用独立类，
+   因为它是**过滤结果为空**（列表里有数据、只是都不匹配），
+   与 .list-head「还没有会话记录」是两种不同的空状态。 */
+.session-nomatch {
+  padding: 14px 14px 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}

@@ -100,6 +100,25 @@
              安全依据：app.js 对 #session-count 与 #sessions-clear-btn 都是 **by-id 引用**，
              DOM 挪动无感（方案 B3 已核实）。 -->
         <div class="list-head muted" data-page-node-id="aSFyF0LvBNUq4BH2sydWl0">会话</div>
+        <!-- ⚠️ 阶段 C2（K3 方案 C2 / 概念版侧栏）：搜索框 + 状态胶囊。
+             ⚠️ 两者都是 **常驻元素**（不在 #session-items 里）——列表每 15 秒被
+             整体 innerHTML 重建一次，若把它们放进列表块，输入框与焦点会被销毁
+             （这正是本项目踩过的「打字打一半被打断」，见 SnowLuma 页的同类修复）。
+             过滤在 renderSessionList() 的**数据层**做（不是在 DOM 上切 display），
+             这样分页计数与「向下滚动加载更多」都按过滤后的集合算。 -->
+        <label class="pt-search">
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true" style="color:var(--faint);flex:none">
+            <circle cx="6.2" cy="6.2" r="4.2" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M9.4 9.4 12.2 12.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <input id="session-filter-input" type="search" placeholder="搜索会话或关键词" aria-label="搜索会话" />
+        </label>
+        <div class="pt-filters" id="session-filters">
+          <span class="chip on" data-v="all">全部</span>
+          <span class="chip" data-v="active">进行中</span>
+          <span class="chip" data-v="ended">已结束</span>
+          <span class="chip" data-v="noreply">未回复</span>
+        </div>
         <div id="session-items" data-page-node-id="q9NIG3lrlhe4Pg8LqGJIuV"></div>
         <div id="session-more" class="list-more muted" data-page-node-id="sm1"></div>
         <div class="pt-stickyfoot" data-page-node-id="ptStickyfootB3">
