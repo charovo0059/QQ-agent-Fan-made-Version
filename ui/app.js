@@ -18,6 +18,9 @@ const state = {
   sessions: [],          // 摘要列表
   currentSessionId: null,
   sessionDetail: null,   // 完整记录
+  // 阶段 C2：侧栏本地过滤（搜索关键词 + 状态档位）。纯前端状态，不落盘、不发给后端。
+  // status: 'all' | 'active' | 'ended' | 'noreply'（口径见 matchSessionFilter）
+  sessionFilter: { query: '', status: 'all' },
   chats: [],
   currentChatKey: null,
   chatMessages: [],
@@ -1454,6 +1457,136 @@ function startListPoller() {
 }
 startListPoller();
 
+/**
+ * 会话侧栏的本地过滤（阶段 C2）：关键词 + 状态。
+ *
+ * 设计取舍 —— **为什么在数据层过滤，而不是像原型那样切 display**：
+ *   原型（index.prototype.html 的 applySessionFilter）是对已渲染的行
+ *   `el.style.display = 'none'`。线上列表有分页（SESSION_PAGE/SESSION_PAGE），
+ *   切 display 只会过滤"当前已经渲染出来的那一批"：关键词命中的会话若在第 2 页，
+ *   用户搜不到；而且 `#session-count` 的「已显示/总数」与
+ *   「向下滚动加载更多（还有 N 条）」的 N 都会算错 —— 正是本项目反复踩的
+ *   「显示的数字与实际不符」。放在这里过滤，分页与两个数字天然一致。
+ *
+ * 关键词范围：群名/好友名、触发内容、chatKey。
+ *   `formatChatTitle(chatKey, chatNameOf(chatKey))` 与列表行上**印出来的字符串
+ *   同源**，用户"照着自己看到的字去搜"必然命中，不会出现"屏幕上明明有这几个字
+ *   却搜不到"。
+ *
+ * 状态口径（4 档，覆盖全部可能的 status，不漏项）：
+ *   all      全部
+ *   active   进行中 = running | waiting
+ *   ended    已结束 = done | error | aborted | 以及任何未知/空状态
+ *   noreply  未回复 = noreply
+ *   ⚠️ 若把「已结束」写成 `status === 'done'`，那么 error/aborted 的会话
+ *      在不选「全部」时会**静默消失**。所以这里用"排除法"兜底：不属于
+ *      active、也不是 noreply 的一律算已结束。
+ */
+function matchSessionFilter(s, query, filter) {
+  if (filter === 'active') {
+    if (s.status !== 'running' && s.status !== 'waiting') return false;
+  } else if (filter === 'ended') {
+    if (s.status === 'running' || s.status === 'waiting' || s.status === 'noreply') return false;
+  } else if (filter === 'noreply') {
+    if (s.status !== 'noreply') return false;
+  }
+  if (!query) return true;
+  const text = `${formatChatTitle(s.chatKey, chatNameOf(s.chatKey))} ${s.chatKey || ''} ${s.trigger || ''}`.toLowerCase();
+  return text.includes(query);
+}
+
+/** 把 state.sessionFilter 落到 DOM（胶囊选中态 + 输入框值，防止重建后视觉不同步）。 */
+function syncSessionFilterUI() {
+  const q = state.sessionFilter.query || '';
+  const f = state.sessionFilter.status || 'all';
+  const input = $('#session-filter-input');
+  if (input && input.value !== q) input.value = q;
+  $$('#session-filters .chip').forEach((el) => {
+    el.classList.toggle('on', (el.dataset.v || 'all') === f);
+  });
+}
+
+/**
+ * 绑定侧栏搜索/筛选（**只绑一次**）。
+ *
+ * ⚠️ 这两个元素是 index.html 里的常驻元素，不在 #session-items 内 —— 列表每
+ *    15 秒被整体 innerHTML 重建一次，若把监听器挂在重建范围里就会丢。
+ *    与 renderSessionList 末尾那两个 `__bound` 守卫同一个道理。
+ * ⚠️ 输入用 debounce：每敲一个字符都重排列表会让人输入发涩，而且
+ *    renderSessionList 是整块 innerHTML 重建。150ms 与项目其它处的节流同量级。
+ */
+function initSessionFilter() {
+  // 兜底：state 里没有这个键（例如别处重建过 state）也不至于在这里抛错
+  if (!state.sessionFilter) state.sessionFilter = { query: '', status: 'all' };
+  const input = $('#session-filter-input');
+  if (input && !input.__bound) {
+    input.__bound = true;
+    let timer = null;
+    input.addEventListener('input', () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        const q = input.value.trim().toLowerCase();
+        if (q === (state.sessionFilter.query || '')) return;   // 没变就别重建
+        state.sessionFilter.query = q;
+        state.sessionLimit = SESSION_PAGE;                     // 换过滤条件 → 回到第一页
+        renderSessionList();
+      }, 150);
+    });
+  }
+  const bar = $('#session-filters');
+  if (bar && !bar.__bound) {
+    bar.__bound = true;
+    // 事件委托：胶囊是静态的，但用委托可以让将来加档不必再动这里
+    bar.addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip');
+      if (!chip) return;
+      const v = chip.dataset.v || 'all';
+      if (v === (state.sessionFilter.status || 'all')) return;  // 重复点同一档不重建
+      state.sessionFilter.status = v;
+      state.sessionLimit = SESSION_PAGE;
+      syncSessionFilterUI();
+      renderSessionList();
+    });
+  }
+  syncSessionFilterUI();
+}
+
+/** 筛选胶囊的档位文案：**唯一来源是 index.html 的 data-v ↔ 文字**，这里只是回读，
+ *  让「没有匹配」那句提示与用户在胶囊上看到的字完全一致（不另写一份中文字符串）。 */
+function chipLabelOf(v) {
+  const el = $$('#session-filters .chip').find((x) => (x.dataset.v || 'all') === v);
+  return el ? el.textContent.trim() : v;
+}
+
+/**
+ * 写侧栏底部两个数字：`#session-more`（还有多少条没显示）与 `#session-count`（已显示/总数）。
+ *
+ * ⚠️ 过滤生效时**分母是过滤后的集合**（`totalOverride` 与 `filtered` 都为此设）——
+ *    用户搜出来的"N 条"必须是他眼前这个集合的 N，而不是全部会话的条数。
+ *    空结果时也走这里（totalOverride=0），把上一次的数字清掉；
+ *    否则会出现"列表说没有匹配的会话，页脚却还写着 12/40"的自相矛盾。
+ */
+function setSessionFootCounts({ shown = 0, total = 0, totalOverride = null, filtered = false } = {}) {
+  const more = $('#session-more');
+  if (more) {
+    const rest = Math.max(0, total - shown);
+    if (!total) more.textContent = '';
+    else if (rest > 0) more.textContent = `向下滚动加载更多（还有 ${rest} 条）`;
+    else more.textContent = (total > SESSION_PAGE || filtered) ? `已显示全部 ${total} 条` : '';
+  }
+  const cnt = $('#session-count');
+  if (cnt) {
+    const t = totalOverride === null ? total : totalOverride;
+    cnt.textContent = t ? `${Math.min(shown, t)}/${t}` : '';
+  }
+}
+
+/** 空结果（没有匹配 / 没有记录）时把页脚数字清空，避免与列表内容自相矛盾。 */
+function resetSessionFootCounts() {
+  setSessionFootCounts({ shown: 0, total: 0 });
+}
+
 function renderSessionList() {
   const box = $('#session-items');
   state.seenSessionIds = state.seenSessionIds || new Set();
@@ -1465,17 +1598,33 @@ function renderSessionList() {
   // ⚠️ 空列表要说清原因 —— "切到微信却什么都没有"与"被过滤掉了"是两种不同的状态，
   //    不区分的话用户会以为坏了（这正是本项目反复踩的"静默失效"）。
   const allPlatforms = state.sessions || [];
-  const all = allPlatforms.filter(matchPlatformSession);
+  const byPlatform = allPlatforms.filter(matchPlatformSession);
+  // 阶段 C2：平台过滤之后再叠加关键词 + 状态过滤（见 matchSessionFilter 注释）
+  const q = (state.sessionFilter && state.sessionFilter.query) || '';
+  const f = (state.sessionFilter && state.sessionFilter.status) || 'all';
+  const filtering = !!q || f !== 'all';
+  const all = byPlatform.filter((s) => matchSessionFilter(s, q, f));
   if (!all.length) {
-    box.innerHTML = `<div class="list-head muted">${isWechatMode()
-      ? (allPlatforms.length
-        ? `这里只显示微信会话 —— 当前 ${allPlatforms.length} 条记录都属于 QQ。切回「QQ」能看到它们。`
-        : '还没有微信会话记录。中继与 Bridge 跑起来、且白名单放行之后才会有。')
-      : '还没有会话记录。'}</div>`;
+    // ⚠️ 三种"空"必须说清是哪一种，否则用户会以为坏了：
+    //    ① 有记录但被**平台**过滤掉（切到微信时最常见）
+    //    ② 有记录但被**搜索/状态**过滤掉（本轮 C2 新增）
+    //    ③ 真的没有任何记录
+    if (byPlatform.length && filtering) {
+      box.innerHTML = `<div class="session-nomatch">没有匹配的会话。<br>当前平台共 ${byPlatform.length} 条，`
+        + `${q ? `关键词「${esc(q)}」` : ''}${q && f !== 'all' ? ' + ' : ''}`
+        + `${f !== 'all' ? `筛选「${esc(chipLabelOf(f))}」` : ''}之下一条都没有。`
+        + `<br>把筛选切回「全部」、或清空关键词就能看到它们。</div>`;
+    } else {
+      box.innerHTML = `<div class="list-head muted">${isWechatMode()
+        ? (allPlatforms.length
+          ? `这里只显示微信会话 —— 当前 ${allPlatforms.length} 条记录都属于 QQ。切回「QQ」能看到它们。`
+          : '还没有微信会话记录。中继与 Bridge 跑起来、且白名单放行之后才会有。')
+        : '还没有会话记录。'}</div>`;
+    }
+    resetSessionFootCounts();
     return;
   }
   const shown = all.slice(0, state.sessionLimit);
-  const rest = all.length - shown.length;
   box.innerHTML = shown.map((s) => {
     const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
     const waitHtml = s.status === 'waiting' && s.waitUntil
@@ -1504,18 +1653,8 @@ function renderSessionList() {
         </div>
       </div>`;
   }).join('');
-  // 底部提示：还有多少条没显示 / 已全部显示
-  const more = $('#session-more');
-  if (more) {
-    more.textContent = rest > 0
-      ? `向下滚动加载更多（还有 ${rest} 条）`
-      : (all.length > SESSION_PAGE ? `已显示全部 ${all.length} 条` : '');
-  }
-  // 头部显示总数（已显示 / 总数），便于确认分页是否真的加载完了
-  const cnt = $('#session-count');
-  if (cnt) {
-    cnt.textContent = all.length ? `${shown.length}/${all.length}` : '';
-  }
+  // 底部提示 + 头部计数：过滤生效时分母用过滤后的集合（见 setSessionFootCounts 注释）
+  setSessionFootCounts({ shown: shown.length, total: all.length, filtered: filtering });
   for (const s of state.sessions) state.seenSessionIds.add(s.id);
   $$('.session-item', box).forEach((el) => {
     el.addEventListener('click', () => selectSession(el.dataset.id));
@@ -8795,4 +8934,5 @@ $$('.tab').forEach((tab) => {
   loadSessions();
   loadMemoryView();
   initSessionScrollLoader();
+  initSessionFilter();
 })();
