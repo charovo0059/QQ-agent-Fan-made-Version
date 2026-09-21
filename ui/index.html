@@ -5,10 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="6HjAQtPOvWz7Elp6uKOeUp" />
   <title>QQ Agent</title>
   <link rel="stylesheet" href="/style.css" data-page-node-id="x8F6i7W4lVVFQuDLeTBT6x" />
-  <!-- 苹果风改造层（阶段 0 试挂）。⚠️ 顺序不能反：必须在 style.css 之后，
-       否则同权重规则被压掉、pt- 样式**静默失效**（不报错，只看着没生效）。
-       阶段 A 把改造层合并进 style.css 完成后，删掉这一行即回退。 -->
-  <link rel="stylesheet" href="/prototype.css" />
+  <!-- ⚠️ 阶段 D（2026-09-22）：阶段 0 那条 `<link rel="stylesheet" href="/prototype.css">`
+       已删除。改造层（A/B/C 三个阶段）全部并进了上面的 style.css，
+       `工具-设计改造\验证-阶段A完整性.mjs` 早就用「禁用该 link 后与基线逐字节相同」证明过这一点。
+       删除的**理由不只是清理**：`ui/` 是控制台的静态根，
+       ① 它会被 `GET /prototype.css` 直接服务出去（实测 200 / 26667 字节）；
+       ② `工具-打包\build-overrides.json` 的 `build.files` 是 `**/*` ⇒ 它会**进安装包**。
+       本文件本身即"样式全在 style.css 里"的最终证据 —— 少一条 link 还能长得对，才算真搬完。
+       ⚠️ `ui/prototype.css` 与 `ui/index.prototype.html` 两份**文件仍留在原地**：
+       `审计-阶段A搬全没有.mjs` / `校验-结构.mjs` 要读它们的路径做完整性审计，
+       而 app 仓库 history 里没有它们（未被跟踪）。这是**有意保留**，不是漏删。 -->
   <script>
     /* 主题预置：在样式生效前就定好 data-theme，避免首屏闪白/闪黑。
        优先级：localStorage 里的显式选择 > 亮色（默认）；仅当选了「跟随系统」才读系统偏好。
