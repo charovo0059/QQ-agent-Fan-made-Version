@@ -33,17 +33,23 @@
   --text: #1d1d1f;
   --muted: #5f6675;
   --faint: #646b79;
-  --accent: #0ea5e9;
-  --accent-strong: #0369a1;
-  --on-accent: #082f49;
+  --accent: #0071E3;
+  --accent-strong: #0060C0;
+  /* ⚠️ 由 #082f49（深海军蓝）改为白：新 --accent #0071E3 比原 #0ea5e9 深得多，
+     深蓝字压上去对比度不足。prototype.css 里 .nav-btn-hot 写死了 #fff 绕开了这个变量，
+     但 .btn-primary / .settings-menu-item.egg-hot 等仍走 --on-accent ⇒ 必须改值。
+     （K3 方案 A1 点名的"主动修正一处 prototype 的遗漏"。） */
+  --on-accent: #ffffff;
   --on-green: #ffffff;
-  --green: #15803d;
-  --red: #dc2626;
-  --orange: #c2410c;
-  --accent-rgb: 14, 165, 233;
-  --green-rgb: 21, 128, 61;
-  --red-rgb: 220, 38, 38;
-  --orange-rgb: 194, 65, 12;
+  --green: #1D7A3A;
+  --red: #D70015;
+  --orange: #B25000;
+  /* rgb 三元组取 **Apple 亮色**（不是上面压深后的文字色）—— 它专供 rgba() 底色/辉光用，
+     底色要鲜、文字才要深，两者本来就该是两个值（原文件也是这么分的）。 */
+  --accent-rgb: 0, 113, 227;
+  --green-rgb: 52, 199, 89;
+  --red-rgb: 255, 59, 48;
+  --orange-rgb: 255, 159, 10;
 
   /* 交互态：亮色下用黑色压暗 */
   --hover: rgba(0, 0, 0, .045);
@@ -55,6 +61,22 @@
   --shadow-lg: 0 12px 40px rgba(16, 24, 40, .14);
 
   --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+
+  /* ── 苹果风改造层的私有变量（阶段 A 并入；原 prototype.css :root）─────────
+     pt- 前缀 = 改造层专有，**不覆盖**任何既有 token 名（既有 token 只改值）。
+     发丝线/玻璃/抬升/内高光/三层投影/三档模糊，全部只在这里定义一次。 */
+  --pt-hairline: rgba(0, 0, 0, .08);
+  --pt-glass-0: rgba(255, 255, 255, .78);
+  --pt-glass-1: rgba(255, 255, 255, .58);
+  --pt-glass-2: rgba(255, 255, 255, .72);
+  --pt-raised: rgba(255, 255, 255, .92);
+  --pt-inner: inset 0 1px 0 rgba(255, 255, 255, .55);
+  --pt-sh-window: 0 1px 2px rgba(16,24,40,.05), 0 12px 28px rgba(16,24,40,.07), 0 36px 68px rgba(16,24,40,.10);
+  --pt-sh-1: 0 1px 2px rgba(16,24,40,.04), 0 4px 12px rgba(16,24,40,.05);
+  --pt-sh-2: 0 2px 4px rgba(16,24,40,.05), 0 8px 20px rgba(16,24,40,.07), 0 18px 44px rgba(16,24,40,.06);
+  --pt-blur-0: blur(28px) saturate(180%);
+  --pt-blur-1: blur(18px) saturate(180%);
+  --pt-blur-2: blur(14px) saturate(170%);
 }
 
 /* ── 暗色 ──
@@ -70,17 +92,17 @@
   --text: #dfe3ec;
   --muted: #8b93a7;
   --faint: #646c80;
-  --accent: #5b8cff;
-  --accent-strong: #5b8cff;
+  --accent: #0A84FF;
+  --accent-strong: #6FB5FF;
   --on-accent: #ffffff;
   --on-green: #06351c;
-  --green: #3fce7a;
-  --red: #ff6b6b;
-  --orange: #ffb454;
-  --accent-rgb: 91, 140, 255;
-  --green-rgb: 63, 206, 122;
-  --red-rgb: 255, 107, 107;
-  --orange-rgb: 255, 180, 84;
+  --green: #30D158;
+  --red: #FF453A;
+  --orange: #FFB454;
+  --accent-rgb: 10, 132, 255;
+  --green-rgb: 48, 209, 88;
+  --red-rgb: 255, 69, 58;
+  --orange-rgb: 255, 159, 10;
 
   /* 交互态：暗色下用白色提亮 */
   --hover: rgba(255, 255, 255, .05);
@@ -92,6 +114,55 @@
   --shadow-lg: 0 12px 40px rgba(0, 0, 0, .45);
 
   --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+
+  /* ── 苹果风改造层：暗色值（阶段 A 并入；原 prototype.css [data-theme='dark']）──
+     ⚠️ 注意 --pt-hairline 在这里**只写一次**：原 prototype.css 分两处写了 .12 与 .16，
+        合并后只能用最终值 .16（12% 那处在原型里就被后面覆盖，是死值）。
+        ⇒ 合并类改动最容易把这种"被覆盖的死值"一起搬进来，看着像两个来源其实是同一个。 */
+  --pt-glass-0: rgba(28, 28, 30, .78);
+  --pt-glass-1: rgba(38, 38, 41, .62);
+  --pt-glass-2: rgba(44, 44, 47, .66);
+  --pt-raised: rgba(60, 60, 66, .92);
+  --pt-inner: inset 0 1px 0 rgba(255, 255, 255, .08);
+  --pt-sh-window: 0 1px 2px rgba(0,0,0,.40), 0 12px 28px rgba(0,0,0,.34), 0 36px 68px rgba(0,0,0,.44);
+  --pt-sh-1: 0 1px 2px rgba(0,0,0,.30), 0 4px 12px rgba(0,0,0,.26);
+  --pt-sh-2: 0 2px 4px rgba(0,0,0,.32), 0 8px 20px rgba(0,0,0,.30), 0 18px 44px rgba(0,0,0,.34);
+  /* 暗色校准（原 prototype.css 末尾那三条实测结论，这里就地并进 token 块）：
+     ① 次要文字在玻璃面上只有 2.9:1 ⇒ 提到 ≈4.5:1，同时保住 muted/faint 两级层次；
+     ② 发丝边框 #2a3142 压 #161a22 仅 1.4:1（等于消失）⇒ 换半透明白；
+     ③ 阴影语义：暗色不靠重阴影造纵深（黑压黑只会糊），改「弱阴影 + 描边 + 微发光」。 */
+  --muted: #9aa3b5;
+  --faint: #828b9e;
+  --border: rgba(255, 255, 255, .14);
+  --pt-hairline: rgba(255, 255, 255, .16);
+  --pt-sh-window:
+      0 1px 2px rgba(0,0,0,.45),
+      0 20px 52px rgba(0,0,0,.40),
+      0 0 0 1px rgba(255,255,255,.05);
+  --pt-sh-1: 0 1px 1px rgba(0,0,0,.26);
+  --pt-sh-2: 0 2px 8px rgba(0,0,0,.34), 0 0 0 1px rgba(255,255,255,.06);
+}
+
+/* ── 阶段 A：暗色专属（原 prototype.css 末尾）───────────────────────────
+   暗色不该靠重阴影造纵深（黑压黑只会糊）⇒ 用 1px 高光 + 彩色微发光替代。 */
+[data-theme='dark'] .session-item.selected,
+[data-theme='dark'] .chat-item.selected {
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .55), 0 0 22px rgba(var(--accent-rgb), .22);
+}
+[data-theme='dark'] .model-modal,
+[data-theme='dark'] .skill-modal {
+  box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+}
+
+/* ── 阶段 A：暗色专属（原 prototype.css 末尾）───────────────────────────
+   暗色不该靠重阴影造纵深（黑压黑只会糊）⇒ 用 1px 高光 + 彩色微发光替代。 */
+[data-theme='dark'] .session-item.selected,
+[data-theme='dark'] .chat-item.selected {
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .55), 0 0 22px rgba(var(--accent-rgb), .22);
+}
+[data-theme='dark'] .model-modal,
+[data-theme='dark'] .skill-modal {
+  box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -200,7 +271,10 @@ body,
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  background: var(--bg);
+  /* 阶段 A：底色交给 body::before 的环境光层（它自己以 var(--bg) 收尾兜底），
+     所以这里改 transparent —— 否则环境光被不透明底盖住，玻璃层等于白/黑底，看不出材质。 */
+  position: relative;
+  background: transparent;
   color: var(--text);
   font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
   font-size: 14px;
@@ -208,6 +282,25 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 环境光：给毛玻璃提供可折射的底层内容（概念版的三团径向渐变）。
+   亮度按实测调高一档 —— 太淡的话玻璃层等于白底，看不出材质。
+   底色必须走 var(--bg)，否则暗色下会亮成一块白板。 */
+body::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(58% 52% at 10% 6%, rgba(0,113,227,.34), transparent 64%),
+    radial-gradient(48% 44% at 90% 94%, rgba(52,199,89,.26), transparent 66%),
+    radial-gradient(46% 40% at 64% 56%, rgba(120,80,255,.20), transparent 72%),
+    var(--bg);
+}
+[data-theme='light'] body::before {
+  background:
+    radial-gradient(58% 52% at 10% 6%, rgba(0,113,227,.30), transparent 64%),
+    radial-gradient(48% 44% at 90% 94%, rgba(52,199,89,.22), transparent 66%),
+    radial-gradient(46% 40% at 64% 56%, rgba(120,80,255,.18), transparent 72%),
+    linear-gradient(160deg, #eef1f6 0%, #f5f5f7 42%, #eef2ee 100%);
 }
 
 /* ── 启动 loading 壳 ── */
@@ -253,8 +346,10 @@ body {
   justify-content: space-between;
   gap: 16px;
   padding: 10px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-2);
+  border-bottom: 1px solid var(--pt-hairline);
+  background: var(--pt-glass-1);
+  -webkit-backdrop-filter: var(--pt-blur-1);
+  backdrop-filter: var(--pt-blur-1);
   flex-shrink: 0;
 }
 .brand {
@@ -269,7 +364,8 @@ body {
   font-size: 12px; flex-wrap: wrap; justify-content: flex-end;
 }
 .muted { color: var(--muted); }
-.sep { width: 1px; height: 14px; background: var(--border); flex-shrink: 0; }
+.sep { width: auto; height: auto; background: none; flex-shrink: 0; }
+.sep::before { content: '·'; color: var(--faint); }
 
 /* 状态点：加描边，亮色主题下更清晰 */
 .dot {
@@ -283,26 +379,30 @@ body {
 
 /* ── 页签栏右侧的社区功能按钮（意见收集 / 金句上传）── */
 .nav-spacer { flex: 1; }
+/* 阶段 A：由「描边按钮」改为「文字链」形态（概念版顶栏右侧长这样） */
 .nav-btn {
-  background: none;
-  border: 1px solid var(--border);
+  background: transparent;
+  border: 0;
   color: var(--muted);
-  padding: 5px 14px;
+  padding: 4px 2px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
   border-radius: 6px;
-  margin: 4px 0 6px;
-  margin-left: 6px;
+  margin: 0 0 0 12px;
   white-space: nowrap;
-  transition: color .14s ease, border-color .14s ease, background .14s ease;
+  transition: color var(--dur-base) var(--ease-in-out);
 }
-.nav-btn:hover { color: var(--text); border-color: var(--accent); }
+.nav-btn:hover { color: var(--text); border-color: transparent; background: transparent; }
 .nav-btn.nav-btn-primary { color: var(--accent-strong); border-color: var(--accent); }
 /* 醒目版（打开网站！）：实心 accent 底 + 白字，在页签栏里一眼能看到 */
-.nav-btn.nav-btn-hot { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 700; }
-.nav-btn.nav-btn-hot:hover { background: var(--accent); color: var(--on-accent); border-color: var(--accent); filter: brightness(1.15); }
+.nav-btn.nav-btn-hot {
+  background: var(--accent); color: #fff; border: 0; border-radius: 9px;
+  padding: 7px 14px; font-weight: 600; margin-left: 14px;
+  box-shadow: 0 1px 2px rgba(var(--accent-rgb), .24), 0 4px 12px rgba(var(--accent-rgb), .22);
+}
+.nav-btn.nav-btn-hot:hover { background: var(--accent); color: #fff; border-color: transparent; filter: brightness(1.06); }
 
 /* 屏蔽名单弹窗：群员行 */
 .bl-member { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
@@ -358,10 +458,12 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 /* ── 标签页 ── */
 #tabs {
   display: flex;
-  gap: 2px;
-  padding: 6px 14px 0;
-  background: var(--bg-2);
-  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  padding: 6px 14px 8px;
+  background: var(--pt-glass-1);
+  -webkit-backdrop-filter: var(--pt-blur-1);
+  backdrop-filter: var(--pt-blur-1);
+  border-bottom: 1px solid var(--pt-hairline);
   flex-shrink: 0;
   overflow-x: auto;
 }
@@ -373,23 +475,28 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
   background: none;
   border: none;
   color: var(--muted);
-  padding: 9px 18px;
+  padding: 6px 14px;
   cursor: pointer;
   font-size: 14px;
   font-weight: 500;
   font-family: inherit;
-  border-bottom: 2px solid transparent;
-  border-radius: 6px 6px 0 0;
-  margin-bottom: -1px;
+  border-radius: 9px;
   white-space: nowrap;
-  transition: color .14s ease, border-color .14s ease, background .14s ease;
+  transition: background-color var(--dur-base) var(--ease-in-out),
+              color var(--dur-base) var(--ease-in-out),
+              box-shadow var(--dur-base) var(--ease-in-out),
+              transform var(--dur-fast) var(--ease-out-quart);
 }
 .tab:hover { color: var(--text); background: var(--hover); }
 .tab.active {
-  color: var(--accent-strong);
-  border-bottom-color: var(--accent);
-  background: var(--bg);
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--pt-raised);
+  box-shadow: var(--pt-sh-1), var(--pt-inner);
 }
+.tab:active { transform: scale(.96); }
+/* 切页签整页上浮淡入（复用既有 keyframes pageIn，不新增曲线） */
+.view.active { animation: pageIn var(--dur-slow) var(--ease-out-quart); }
 
 /* ── 布局 ── */
 #layout { flex: 1; display: flex; min-height: 0; gap: 16px; padding: 14px 16px 16px; }
@@ -399,25 +506,29 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .list-pane {
   width: 320px;
   flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--pt-hairline);
+  border-radius: 14px;
+  box-shadow: var(--pt-sh-1), var(--pt-inner);
   overflow-y: auto;
-  background: var(--bg-2);
+  background: var(--pt-glass-2);
+  -webkit-backdrop-filter: var(--pt-blur-2);
+  backdrop-filter: var(--pt-blur-2);
 }
 /* 列表头：字号从 11px 提到 12px 并加字重，此前过小且与正文层级脱节 */
 .list-head {
   padding: 11px 14px;
   font-size: 12px;
   font-weight: 500;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
   position: sticky;
   top: 0;
-  background: var(--bg-2);
+  /* 透明悬浮（概念版形态）：滚动时条目从头下穿过。
+     ⚠️ 这是截图复核点 —— 原型已接受的形态，若观感不对再回退成玻璃底。 */
+  background: transparent;
   z-index: 2;
 }
 
-.detail-pane { flex: 1; overflow-y: auto; padding: 20px 24px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-sm); }
+.detail-pane { flex: 1; overflow-y: auto; padding: 20px 24px; background: var(--pt-glass-2); -webkit-backdrop-filter: var(--pt-blur-2); backdrop-filter: var(--pt-blur-2); border: 1px solid var(--pt-hairline); border-radius: 14px; box-shadow: var(--pt-sh-1), var(--pt-inner); }
 /* 空状态：用 flex 居中而非固定 vh 偏移，窗口高度变化时始终居中 */
 .empty-hint {
   color: var(--muted);
@@ -439,17 +550,42 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 }
 
 /* ── 会话列表 ── */
+/* 阶段 A：由「通栏行 + 行分隔线」改为「独立卡片 + 悬停抬升」（概念版形态）。
+   ⚠️ 删掉原来 hover 的 background: var(--bg-3) —— 它是不透明底，会把玻璃面压掉。 */
 .session-item, .chat-item {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  margin: 6px 8px; padding: 12px;
+  border: 1px solid var(--pt-hairline); border-radius: 12px;
+  background: var(--pt-glass-2);
+  -webkit-backdrop-filter: var(--pt-blur-2);
+  backdrop-filter: var(--pt-blur-2);
   cursor: pointer;
+  transition: background-color var(--dur-base) var(--ease-in-out),
+              border-color var(--dur-base) var(--ease-in-out),
+              transform var(--dur-fast) var(--ease-out-quart),
+              box-shadow var(--dur-fast) var(--ease-out-quart);
 }
-.session-item:hover, .chat-item:hover { background: var(--bg-3); }
-.session-item.selected, .chat-item.selected { background: var(--bg-3); border-left: 3px solid var(--accent); padding-left: 11px; }
+.session-item:hover, .chat-item:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--pt-sh-2), var(--pt-inner);
+}
+.session-item.selected, .chat-item.selected {
+  padding: 12px; border-left-width: 1px; border-color: var(--accent);
+  box-shadow: 0 2px 4px rgba(var(--accent-rgb), .12),
+              0 8px 20px rgba(var(--accent-rgb), .16),
+              var(--pt-inner);
+}
+/* 卡片化后容器加一点上下留白，卡片之间自然分开 */
+#session-items, #chat-items, #memory-items { padding: 4px 0 8px; }
 .session-title { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .session-chat { font-weight: 600; font-size: 13px; }
 .session-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
-.session-trigger { color: var(--muted); font-size: 12px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-trigger {
+  color: var(--muted); font-size: 12px; margin-top: 3px;
+  /* 阶段 A：概念版放两行（线上是单行省略）—— 一行放不下时直接截断，扫读时信息量太少 */
+  white-space: normal;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; line-height: 1.55;
+}
 .session-meta { display: flex; gap: 8px; margin-top: 4px; font-size: 11px; color: var(--muted); align-items: center; }
 
 .status-badge { font-size: 11px; padding: 1px 7px; border-radius: 9px; }
@@ -460,12 +596,13 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .status-error { background: rgba(var(--red-rgb),.15); color: var(--red); }
 .status-aborted { background: rgba(var(--orange-rgb),.15); color: var(--orange); }
 .session-wait { font-size: 11px; color: var(--orange); font-variant-numeric: tabular-nums; }
-.session-item.session-waiting-row { border-left: 3px solid var(--orange); padding-left: 11px; }
+/* 阶段 A：卡片化后 3px 左条 + padding 偏移会破坏对齐 ⇒ 改整圈橙描边，橙色=等待的语义不变 */
+.session-item.session-waiting-row { border-color: var(--orange); }
 .session-activity { font-size: 11px; color: var(--accent-strong); }
 
 /* ── 会话详情 ── */
 .detail-header { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.detail-header h2 { font-size: 16px; margin-bottom: 6px; }
+.detail-header h2 { font-size: 22px; font-weight: 600; letter-spacing: -.3px; margin-bottom: 6px; }
 .detail-header .sub { color: var(--muted); font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
 
 .collapsible { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 14px; background: var(--bg); }
@@ -672,7 +809,16 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 #sl-notify-count { font-size: 12px; font-variant-numeric: tabular-nums; }
 #sl-notify-count.over { color: var(--orange); font-weight: 600; }
 
+/* 阶段 A：时间列原来只有 nowrap、没有宽度约束 ⇒ 它吃掉全部剩余宽度，
+   把说话人和正文顶到右边、中间空出一大块。压到 1%（table-layout:auto 下缩到 min-content），
+   正文列自然吃掉剩余宽度。 */
+/* 阶段 A：时间列原来只有 nowrap、没有宽度约束 ⇒ 它吃掉全部剩余宽度，
+   把说话人和正文顶到右边、中间空出一大块。压到 1%（table-layout:auto 下缩到 min-content），
+   正文列自然吃掉剩余宽度。 */
 .archive-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.archive-table td.t { width: 1%; }
+.archive-table td.t { width: 1%; }
+.archive-table td.text { word-break: break-word; }
 .archive-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .archive-table .t { color: var(--muted); white-space: nowrap; font-family: var(--mono); font-size: 12px; }
 .archive-table .w { white-space: nowrap; max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
@@ -1134,7 +1280,7 @@ details.hint-more code {
   background: var(--bg-3);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 7px;
+  border-radius: 9px;
   padding: 7px 16px;
   cursor: pointer;
   font-size: 13px;
@@ -1159,8 +1305,8 @@ details.hint-more code {
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn-primary:hover { background: var(--accent); border-color: var(--accent); color: var(--on-accent); opacity: .92; }
 .btn-small { padding: 4px 12px; font-size: 12px; }
-.btn-danger { border-color: rgba(var(--red-rgb),.5); color: var(--red); }
-.btn-danger:hover { border-color: var(--red); color: var(--red); background: rgba(var(--red-rgb),.1); }
+.btn-danger { border-color: transparent; background: rgba(var(--red-rgb), .12); border-radius: 999px; color: var(--red); }
+.btn-danger:hover { border-color: transparent; background: rgba(var(--red-rgb), .18); color: var(--red); }
 
 .checkbox-row input[type=checkbox] { accent-color: var(--accent); transition: transform .1s ease; }
 .checkbox-row input[type=checkbox]:checked { animation: checkPop .18s ease; }
@@ -1349,7 +1495,7 @@ details.hint-more code {
 @media (max-width: 860px) {
   .usage-cards { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 }
-.usage-card { background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; box-shadow: var(--shadow-sm); }
+.usage-card { background: var(--pt-glass-2); -webkit-backdrop-filter: var(--pt-blur-2); backdrop-filter: var(--pt-blur-2); border: 1px solid var(--pt-hairline); border-radius: 12px; padding: 14px 16px; min-width: 0; box-shadow: var(--pt-sh-1), var(--pt-inner); }
 .usage-card.accent { border-color: rgba(var(--accent-rgb),.45); background: rgba(var(--accent-rgb),.07); }
 .uc-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .uc-value { font-size: 22px; font-weight: 600; font-family: var(--mono); line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1437,8 +1583,11 @@ details.hint-more code {
 
 /* ── 模型单价卡片 + 批量编辑 ── */
 .price-card {
-  background: var(--bg-2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 12px 14px; margin-top: 8px;
+  background: var(--pt-glass-2);
+  -webkit-backdrop-filter: var(--pt-blur-2); backdrop-filter: var(--pt-blur-2);
+  border: 1px solid var(--pt-hairline);
+  border-radius: 12px; padding: 12px 14px; margin-top: 8px;
+  box-shadow: var(--pt-sh-1), var(--pt-inner);
 }
 .price-card.locked { opacity: .82; border-style: dashed; }
 .pc-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -1586,7 +1735,10 @@ details.hint-more code {
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
 /* 过渡：颜色变化时平滑，避免切换主题时"咔"一下 */
-body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
+/* ⚠️ 阶段 A 前置修复（K3 方案 A2）：这里**删掉 .btn 与 .tab**。
+   本条规则在 .btn 与 .tab 各自的完整 transition 之后，会把它们覆盖成"只剩颜色过渡"
+   ⇒ 分段页签与卡片阴影动效会被它废掉。这不是顺手重构，是 A3 生效的前提。 */
+body, .model-modal, .price-card, .tier-btn, .icon-btn {
   transition: background-color .16s ease, color .16s ease, border-color .16s ease;
 }
 
@@ -2366,26 +2518,34 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
    为什么放在顶栏：它决定"下面所有页看的是哪一边"，是全局上下文，不是某一页的筛选。
    ⚠️ 它**只切显示** —— 两个平台的后端都照常跑（用户 2026-09-20 明确要的）。
    样式刻意做小、贴着 sep，避免改动顶栏的布局节奏。 */
+/* 阶段 A：由「描边分段 + 竖线分隔」改为「双色胶囊」——
+   两个渠道各带本色，当前生效那一侧再加一档强度，保住"我现在看的是哪边"这个信号。 */
 .platform-switch {
   display: inline-flex;
   align-items: center;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  overflow: visible;
   flex-shrink: 0;
 }
 .platform-switch .plat-btn {
-  background: transparent;
   border: 0;
   color: var(--muted);
   font-size: 12px;
   padding: 3px 10px;
   cursor: pointer;
   line-height: 1.6;
+  border-radius: 999px;
+  font-weight: 600;
 }
-.platform-switch .plat-btn + .plat-btn { border-left: 1px solid var(--border); }
+.platform-switch .plat-btn[data-platform='qq'] { background: rgba(var(--accent-rgb), .10); color: var(--accent-strong); }
+.platform-switch .plat-btn[data-platform='wechat'] { background: rgba(var(--green-rgb), .12); color: var(--green); }
+.platform-switch .plat-btn.active { background: rgba(var(--accent-rgb), .24); }
+.platform-switch.wechat-mode .plat-btn[data-platform='qq'] { background: rgba(var(--accent-rgb), .10); }
+.platform-switch.wechat-mode .plat-btn.active { background: rgba(var(--green-rgb), .26); }
+.platform-switch .plat-btn + .plat-btn { border-left: 0; }
 .platform-switch .plat-btn:hover { background: var(--hover); color: var(--text); }
-.platform-switch .plat-btn.active { background: var(--accent); color: var(--on-accent); }
+.platform-switch .plat-btn.active { color: var(--accent-strong); }
 /* 微信模式下给顶栏一点视觉提示：状态点换成绿色（QQ 是蓝），一眼能看出在看哪边 */
-.platform-switch.wechat-mode .plat-btn.active { background: var(--green); color: var(--on-green); }
+.platform-switch.wechat-mode .plat-btn.active { background: rgba(var(--green-rgb), .26); color: var(--green); }
