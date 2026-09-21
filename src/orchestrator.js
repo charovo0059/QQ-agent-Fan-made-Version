@@ -558,6 +558,16 @@ export class Orchestrator {
     } finally {
       this.activeRuns.delete(chatKey);
       this.runningChats.delete(chatKey);
+      // 🆕 2026-09-21（第十对话）：把「上次看到记忆」推到本次唤醒算出来的时间点。
+      //
+      // 为什么放在 finally（而不是算提示词时顺手推）：
+      //   · 提示词**每一轮都重新渲染**（多轮工具调用会有第 2、3 轮）。若在渲染时推，
+      //     第 1 轮渲染完就把时间戳推掉了 ⇒ 第 2 轮算出"没有变化" ⇒ 提示凭空消失，
+      //     而第 1 轮恰恰可能只是去调了个工具、根本没说话。
+      //   · 这里每个会话只走一次，且**已经**把带提示的提示词递给过模型了
+      //     （哪怕这一轮最后出错/中止，模型也已看过），所以推时间戳不算"漏看"。
+      //   没有变化时 commitChangedNote 返回 false 且什么都不写（见它的注释）。
+      try { this.memory.commitChangedNote(chatKey); } catch { /* 绝不因为它影响收尾 */ }
       this.emit('chat-update', chatKey);
     }
 
