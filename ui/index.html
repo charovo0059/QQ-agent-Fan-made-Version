@@ -28,11 +28,22 @@
   </script>
 </head>
 <body data-page-node-id="5GGvlGz5NSrqH40BenIGFr">
+  <!-- ⚠️ 阶段 B1（2026-09-21）：「窗口外壳」包壳。
+       概念版是「18px 圆角浮窗 + 三层投影 + 毛玻璃」，需要一个统一容器来挂这些样式。
+       取舍已定（K3 方案 B1）：**加 DOM 包壳，不改挂 body** ——
+       body 现在是 flex 列 + 100vh + overflow:hidden，把外壳样式挂 body 要同时重排
+       高度/溢出/背景三件事，还得给 loading-overlay 与 banner 让位；加一层 wrapper 零牵扯。
+       ⚠️ #loading-overlay 刻意**留在 shell 外面**（见下面）：开机全屏罩不该有 18px 边距。 -->
+  <div id="shell" data-page-node-id="shellB1">
   <header id="topbar" data-page-node-id="DeBgpH1MJHGjjjZ348ThQJ">
     <div class="brand" data-page-node-id="eJBHX5RA8yyNceHXSG3HE3">QQ Agent <span class="brand-sub" data-page-node-id="VbspRAGex84VDC4rlmYz0x"></span></div>
     <div class="top-status" data-page-node-id="bJ0ckrJT6G2Tmd3CRV0BDG">
-      <span id="onebot-dot" class="dot dot-off" title="OneBot 连接状态" data-page-node-id="kZj99OAhFFri832S3xi5AY"></span>
-      <span id="onebot-label" class="muted" data-page-node-id="fFZerwgFQ1Y2b5Ypm3z9jJ">OneBot 未连接</span>
+      <!-- ⚠️ 阶段 B2：连接状态做成胶囊。用 <span class="pt-status"> 把状态点与文字**成组**包住。
+           app.js:663 改的是内层 #onebot-label 的 className（by-id），DOM 包一层不影响它。 -->
+      <span class="pt-status" data-page-node-id="ptStatusB2">
+        <span id="onebot-dot" class="dot dot-off" title="OneBot 连接状态" data-page-node-id="kZj99OAhFFri832S3xi5AY"></span>
+        <span id="onebot-label" class="muted" data-page-node-id="fFZerwgFQ1Y2b5Ypm3z9jJ">OneBot 未连接</span>
+      </span>
       <!-- 平台切换（2026-09-20）：**只切显示**，两个平台的后端都照常跑。
            ⚠️ 刻意放在状态点**紧后面**（而不是最右）—— 顶栏是 flex-wrap，
            右边的东西在窄窗口下会先被挤到下一行/看不见；放在这儿保证永远够得着。
@@ -54,14 +65,9 @@
 
   <div id="banner" class="banner hidden" data-page-node-id="XwcKf16gobwX1Rec9tqlEn"></div>
 
-  <div id="loading-overlay" class="loading-overlay" data-page-node-id="MpXTOwnEFQFI3iciufCGwk">
-    <div class="loading-card" data-page-node-id="boXG4AHTg9zdLRzAkPQU0d">
-      <div class="loading-title" data-page-node-id="Jd8xjaha2bCfyriCNfs8Tn">QQ Agent 正在启动</div>
-      <div class="loading-sub" id="loading-status" data-page-node-id="pnFkOCeJYMuEWqSGBEF5NX">正在启动 SnowLuma 与 OneBot 服务，请稍候…</div>
-      <div class="loading-spinner" data-page-node-id="pVvSFcW7FhjA5K8LpxpM5o"></div>
-      <pre class="loading-logs" id="loading-logs" data-page-node-id="qCOILAMT7FkCZFYCEKYo4o"></pre>
-    </div>
-  </div>
+  <!-- ⚠️ 阶段 B1：`#loading-overlay` 原本在这里（shell 内），已挪到 </main> 之后。
+       理由：它是**开机全屏罩**，放进 18px 圆角浮窗里会出现"罩子也有边距"的怪状。
+       ⇒ 它在 shell **外面**，全屏铺满。 -->
 
   <nav id="tabs" data-page-node-id="E9BCxQoSdlNgyXwJBELj6z">
     <button class="tab active" data-tab="sessions" data-page-node-id="QA2pcdHYdARJK2APBNKZmC">会话</button>
@@ -88,9 +94,20 @@
     <!-- 会话视图 -->
     <section id="view-sessions" class="view active" data-page-node-id="EfuI6TFTs4KY9veb0pkva1">
       <aside id="session-list" class="list-pane" data-page-node-id="NNTSUz4evxhvLGzuY26viB">
-        <div class="list-head muted" style="display:flex;align-items:center;gap:8px" data-page-node-id="aSFyF0LvBNUq4BH2sydWl0"><span id="session-count"></span><button class="btn btn-small btn-danger" id="sessions-clear-btn" style="margin-left:auto;padding:2px 10px">清空全部会话</button></div>
+        <!-- ⚠️ 阶段 B3（K3 方案 B3）：`#session-count` 从 list-head **挪到吸底页脚**；
+             「清空全部会话」也一起挪下去 —— 它是要常年够得着的操作，
+             留在 list-head 会在滚动时被顶走/被窄宽度挤掉。list-head 只留标题「会话」。
+             安全依据：app.js 对 #session-count 与 #sessions-clear-btn 都是 **by-id 引用**，
+             DOM 挪动无感（方案 B3 已核实）。 -->
+        <div class="list-head muted" data-page-node-id="aSFyF0LvBNUq4BH2sydWl0">会话</div>
         <div id="session-items" data-page-node-id="q9NIG3lrlhe4Pg8LqGJIuV"></div>
         <div id="session-more" class="list-more muted" data-page-node-id="sm1"></div>
+        <div class="pt-stickyfoot" data-page-node-id="ptStickyfootB3">
+          <div class="pt-foot">
+            <span id="session-count"></span>
+            <button class="btn btn-small btn-danger" id="sessions-clear-btn" style="padding:2px 10px">清空全部会话</button>
+          </div>
+        </div>
       </aside>
       <div id="session-detail" class="detail-pane" data-page-node-id="ShN02boOBGv1NU6WhJA1OM">
         <div class="empty-hint" data-page-node-id="yFzcOSD1JKed0mMWexk6QE">← 选择左侧会话查看完整过程</div>
@@ -170,6 +187,17 @@
       <div id="settings-form" class="settings-pane" data-page-node-id="EsfgJ2QGHHSAtdlHW1RQyT"></div>
     </section>
   </main>
+  </div><!-- /#shell（阶段 B1 的外壳闭合） -->
+
+  <!-- 开机全屏罩：刻意留在 #shell **外面**（见上方 B1 的说明） -->
+  <div id="loading-overlay" class="loading-overlay" data-page-node-id="MpXTOwnEFQFI3iciufCGwk">
+    <div class="loading-card" data-page-node-id="boXG4AHTg9zdLRzAkPQU0d">
+      <div class="loading-title" data-page-node-id="Jd8xjaha2bCfyriCNfs8Tn">QQ Agent 正在启动</div>
+      <div class="loading-sub" id="loading-status" data-page-node-id="pnFkOCeJYMuEWqSGBEF5NX">正在启动 SnowLuma 与 OneBot 服务，请稍候…</div>
+      <div class="loading-spinner" data-page-node-id="pVvSFcW7FhjA5K8LpxpM5o"></div>
+      <pre class="loading-logs" id="loading-logs" data-page-node-id="qCOILAMT7FkCZFYCEKYo4o"></pre>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>
