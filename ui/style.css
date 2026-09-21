@@ -302,6 +302,138 @@
 }
 #session-list .pt-stickyfoot { position: static; flex: none; }
 
+/* ── 阶段 A：暗色专属（原 prototype.css 末尾）───────────────────────────
+   暗色不该靠重阴影造纵深（黑压黑只会糊）⇒ 用 1px 高光 + 彩色微发光替代。 */
+[data-theme='dark'] .session-item.selected,
+[data-theme='dark'] .chat-item.selected {
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .55), 0 0 22px rgba(var(--accent-rgb), .22);
+}
+[data-theme='dark'] .model-modal,
+[data-theme='dark'] .skill-modal {
+  box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+}
+
+/* ── 阶段 B1：窗口外壳（需 index.html 里的 <div id="shell">）─────────────────
+   概念版的「浮窗」形态：18px 圆角 + 三层柔和投影 + 毛玻璃 + 一圈发丝描边。
+   ⚠️ #loading-overlay 刻意**不在** shell 内（开机全屏罩不该有 18px 边距）。 */
+#shell {
+  margin: 18px 18px 22px;
+  border-radius: 18px;
+  border: 1px solid var(--pt-hairline);
+  box-shadow: var(--pt-sh-window), var(--pt-inner);
+  background: var(--pt-glass-0);
+  -webkit-backdrop-filter: var(--pt-blur-0);
+  backdrop-filter: var(--pt-blur-0);
+  /* 撑满剩余高度并让内部滚动（原来这些在 body 上；包壳后 body 只剩 margin 与背景） */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── 阶段 B2：顶栏连接状态做成浅底胶囊 ─────────────────────────────────── */
+.pt-status {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 4px 10px; border-radius: 999px;
+  background: rgba(0, 0, 0, .05);
+}
+.pt-status #onebot-label { color: var(--text); }
+[data-theme='dark'] .pt-status { background: rgba(255, 255, 255, .08); }
+[data-theme='dark'] .pt-status #onebot-label { color: var(--text); }
+
+/* ── 阶段 B3：侧栏吸底页脚（计数 + 清空按钮固定在列表下方）────────────────
+   ⚠️ 风险与预案（K3 方案 B3）：.list-pane 是 overflow-y:auto 的滚动容器，
+      sticky bottom 在原型里验证过有效；**若真机失效**，备选是把 .list-pane
+      改成 flex 列 + 让 #session-items 单独滚动。 */
+.pt-stickyfoot {
+  position: sticky; bottom: 0; z-index: 2;
+  background: var(--pt-glass-2);
+  -webkit-backdrop-filter: var(--pt-blur-2);
+  backdrop-filter: var(--pt-blur-2);
+  border-top: 1px solid var(--pt-hairline);
+}
+.pt-foot {
+  display: flex; justify-content: space-between; gap: 8px; align-items: center;
+  padding: 8px 14px; font-size: 11px; color: var(--faint);
+}
+/* 列表末条卡片与吸底页脚之间留一点呼吸，别贴死 */
+#session-items { padding-bottom: 6px; }
+
+/* 🔴 阶段 B3 备选预案（**实测踩到了**）：
+   第一版按原型用 `.pt-stickyfoot { position: sticky; bottom: 0 }` ——
+   截图一看，页脚**压在最后一条会话上**而不是浮在列表下方。
+   根因：`.list-pane` 是 `overflow-y:auto` 的**滚动容器**，sticky 定位的页脚
+   仍在滚动内容流里 ⇒ 它只是"贴在视口底部"，**不占位**，于是盖住末条。
+   ⇒ 改用 flex 列：`.list-pane` 不再自己滚，让中间那段（`#session-items`）单独滚，
+     页脚成为真正的 flex 兄弟节点，**天然占位、不会覆盖**。
+   ⚠️ 存档页（`#chat-list`）与记忆页（`#memory-items`）结构不同，这里只对会话侧栏改，
+     它们的滚动行为保持原样（`.list-pane` 同时被它们使用，所以下面用 `#session-list` 限定）。 */
+#session-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;          /* 容器不滚，交给内部 */
+}
+#session-list #session-items {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;          /* 真正的滚动区 */
+}
+#session-list .pt-stickyfoot { position: static; flex: none; }
+
+/* ── 阶段 C1：运行详情的结构件（原 prototype.css 的第③组）───────────────────
+   这些类由 `app.js` 的 renderSessionDetail 产出（阶段 C1 已改用它们）。
+   ⚠️ `.pt-sum-row` 是**本阶段新加的**、原型里没有 —— 概念版摘要卡是"键值格"形态，
+      原型那份用的是别的写法，这里按 C1 实际产出的 DOM 补上。 */
+.pt-summary {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px 14px; margin-bottom: 12px;
+  border: 1px solid var(--pt-hairline); border-radius: 12px;
+  background: var(--pt-glass-2);
+  -webkit-backdrop-filter: var(--pt-blur-2); backdrop-filter: var(--pt-blur-2);
+  box-shadow: var(--pt-sh-1), var(--pt-inner);
+}
+.pt-sum-row { display: flex; gap: 10px; font-size: 12px; line-height: 1.6; }
+.pt-sum-row .k { flex: none; width: 3.2em; color: var(--faint); }
+.pt-sum-row .v { color: var(--text); min-width: 0; word-break: break-word; }
+
+.pt-fold { border: 1px solid var(--pt-hairline); border-radius: 12px; background: var(--bg-3); margin-bottom: 10px; overflow: hidden; }
+.pt-sec {
+  display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+  font-size: 13px; font-weight: 600; color: var(--text);
+  cursor: pointer; list-style: none;
+}
+.pt-sec::-webkit-details-marker { display: none; }
+.pt-sec .chev { color: var(--muted); flex: none; transition: transform var(--dur-base) var(--ease-out-quart); }
+.pt-sec .m { font-size: 11px; font-weight: 400; color: var(--muted); }
+details.pt-fold[open] > summary.pt-sec .chev { transform: rotate(90deg); }
+
+.pt-code { border-top: 1px solid var(--pt-hairline); background: var(--bg); overflow: hidden; }
+.pt-code-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  height: 30px; padding: 0 12px; border-bottom: 1px solid var(--pt-hairline);
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+.pt-code pre {
+  margin: 0; padding: 12px 14px; font-family: var(--mono); font-size: 12px; line-height: 1.65;
+  color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.pt-tag { padding: 1px 7px; border-radius: 5px; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.pt-tag.blue { background: rgba(var(--accent-rgb), .12); color: var(--accent-strong); }
+.pt-tag.grey { background: var(--bg-3); color: var(--muted); }
+.pt-tag.green { background: rgba(var(--green-rgb), .14); color: var(--green); }
+
+.pt-out {
+  display: flex; flex-direction: column; gap: 6px; padding: 12px 14px;
+  border: 1px solid rgba(var(--green-rgb), .4); border-radius: 12px;
+  background: rgba(var(--green-rgb), .10);
+}
+.pt-out-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 600; color: var(--green); }
+.pt-out-head .who { display: flex; align-items: center; gap: 8px; }
+.pt-out p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--text); }
+.pt-endline { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+.pt-endline .dot { background: var(--border); }
+
 /* ══════════════════════════════════════════════════════════════
    动效 token
    ══════════════════════════════════════════════════════════════
@@ -958,11 +1090,16 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 /* 阶段 A：时间列原来只有 nowrap、没有宽度约束 ⇒ 它吃掉全部剩余宽度，
    把说话人和正文顶到右边、中间空出一大块。压到 1%（table-layout:auto 下缩到 min-content），
    正文列自然吃掉剩余宽度。 */
+/* 阶段 A：时间列原来只有 nowrap、没有宽度约束 ⇒ 它吃掉全部剩余宽度，
+   把说话人和正文顶到右边、中间空出一大块。压到 1%（table-layout:auto 下缩到 min-content），
+   正文列自然吃掉剩余宽度。 */
 .archive-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .archive-table td.t { width: 1%; }
 .archive-table td.t { width: 1%; }
 .archive-table td.t { width: 1%; }
 .archive-table td.t { width: 1%; }
+.archive-table td.t { width: 1%; }
+.archive-table td.text { word-break: break-word; }
 .archive-table td.text { word-break: break-word; }
 .archive-table td.text { word-break: break-word; }
 .archive-table td.text { word-break: break-word; }
