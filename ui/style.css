@@ -2894,3 +2894,62 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
   line-height: 1.7;
   color: var(--muted);
 }
+
+/* ══ 性能：会动的面板一律不用 backdrop-filter（2026-09-22）══════════════════
+ *
+ * 🔴 为什么（真机实测，不是理论）：
+ *   `electron/main.js` 里有一句 `app.disableHardwareAcceleration()`
+ *   （注释说是为了躲"部分显卡驱动导致渲染进程黑屏"）⇒ **整个应用跑软件合成**，
+ *   而 `backdrop-filter` 在软件合成下**每帧**都要：拷贝背板 → 离屏模糊 → 混合回来。
+ *   它不是一次性栅格化，成本与"有没有"几乎成正比。
+ *
+ *   在真机同尺寸（1346×823、dpr 1.5）下测得：
+ *     · 滚动：现状 **13.8ms/帧（72 FPS）** → 全关毛玻璃 **4.2ms/帧（240 FPS）**
+ *     · 空闲：两边都是 4.2ms（240 FPS）⇒ 代价**只在滚动/重绘时**发生
+ *     · 逐层定位：`.detail-pane` 一层 72→89、再加 `#shell` 一层 → **225**；
+ *       其余（topbar/tabs/list-pane/50 个 session-item/pt-stickyfoot）加起来只占 6%
+ *     · ⇒ **贵的不是"层数多"，是"大面积 + 会动"**：#shell 是全屏（实际像素 1488×1304）
+ *
+ *   另一个反直觉的实测：**模糊半径几乎不影响成本** —— blur(8px) 与 blur(28px)
+ *   都是 ~114 FPS。所以"把 28px 降成 8px"这种优化没用；要么不用，要么就贵。
+ *
+ * ✅ 替代做法：**把模糊交给永不滚动的那层背景**。
+ *   `body::before` 是全屏静态渐变，它上面的 `filter: blur()` 结果**可以一直复用**
+ *   （实测：给静态层加 filter:blur 后滚动仍是 240 FPS，成本 0）。
+ *   而玻璃观感**本来就主要来自半透明底色**，不是模糊 —— 会动面板底下已经是
+ *   糊过的静态背景，"再糊一遍"人眼看不出来（对比图见
+ *   `_设计改造-截图\性能\玻璃-现状.png` vs `玻璃-候选2.png`）。
+ *
+ * ⚠️ 保留 `backdrop-filter` 的是**不参与滚动合成**的那些：模态/遮罩/浮层
+ *   （`.model-modal` / `.skill-modal` / 弹窗 / 加载遮罩 / 「？」主题的 VHS 层）——
+ *   它们盖在内容上时"透出背后的内容"是**有意义的视觉功能**，而且它们不随滚动重绘。
+ *
+ * ⚠️ 这里用 `!important` 是**有意**的：文件里同一批元素前面已经写过 11 处
+ *   `backdrop-filter`（阶段 A/B 陆续加的，分在 #shell / #topbar / #tabs /
+ *   .list-pane / .detail-pane / .session-item / .pt-stickyfoot / .pt-summary /
+ *   .list-head / .price-card 各处）。逐处去删容易漏（漏一处就等于没优化，
+ *   而且**不报错、只是慢**）。集中成一条，是"显式覆盖"而不是"风格"。
+ *   将来要恢复毛玻璃，**删掉这一块即可**（前面的声明都还在，会立刻生效）。
+ */
+#shell,
+#topbar,
+#tabs,
+.list-pane,
+.detail-pane,
+.list-head,
+.pt-stickyfoot,
+.pt-summary,
+.price-card,
+.usage-card,
+.session-item,
+.chat-item,
+.empty-hint {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+/* 模糊感改由静态背景层承担：它不随滚动重绘，成本为 0（实测证实）。
+   比原来"每个面板各糊一遍"更接近 macOS 观感 —— 整块背板是柔的，面板只是半透明。 */
+body::before {
+  filter: blur(28px) saturate(1.8);
+}
+

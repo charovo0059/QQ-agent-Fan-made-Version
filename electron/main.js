@@ -8,6 +8,25 @@ import { fileURLToPath } from 'node:url';
 // Windows 上部分显卡驱动会导致渲染进程黑屏；禁用硬件加速是最稳妥的修复
 app.disableHardwareAcceleration();
 
+// ── 真机调试端口（2026-09-22 第十对话加）──────────────────────────────────
+// 为什么需要：本项目所有"界面快不快"的测量**一直是在 Edge 里做的**，而 Edge 有 GPU 加速、
+//   这个应用没有（上一行就关掉了）⇒ 量出来的数字与用户实际感受**不是一个程序**。
+//   实测差距：同一页面同一尺寸，浏览器里 69 层毛玻璃只花 ~11ms/帧，
+//   而软件合成下同样这些东西是实打实的 CPU 像素运算（还是 1.5 倍缩放）。
+//   ⇒ 要判断"卡不卡"，必须能连进真机窗口量。
+//
+// 用法：设了环境变量才开，**默认不影响任何行为**：
+//     $env:QQ_AGENT_DEBUG_PORT=9222; & "QQ Agent.exe"
+//   然后 node "工具-设计改造\探页面.mjs" --url=http://127.0.0.1:3210/ --port=9222 …
+// ⚠️ 不要无条件打开：远程调试端口等于把渲染进程的完全控制权暴露在本机端口上。
+if (process.env.QQ_AGENT_DEBUG_PORT) {
+  const p = Number(process.env.QQ_AGENT_DEBUG_PORT);
+  if (Number.isFinite(p) && p > 0) {
+    app.commandLine.appendSwitch('remote-debugging-port', String(p));
+    console.log(`[debug] 已按 QQ_AGENT_DEBUG_PORT 打开远程调试端口 ${p}`);
+  }
+}
+
 // ── 数据目录解析（2026-09-18 重做：**默认移到安装目录之外**）──
 //
 // 🔴 为什么必须移出安装目录（三轮实测的结论，别再改回去）：
