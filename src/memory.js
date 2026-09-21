@@ -26,6 +26,17 @@ function metaFile(chatKey) {
   return path.join(chatDir(chatKey), '_meta.json');
 }
 
+/**
+ * 🆕 2026-09-21（第十对话）：把某个会话的记忆目录暴露出来。
+ * 为什么需要导出：目录名由内部的 `chatDirName()` 决定（含转义规则），
+ * 而**测试需要往 `_meta.json` 里写 `lastSeenAt`** 来构造场景。
+ * 不导出的话测试只能去猜目录名或"先写一条占位再到处找" —— 那是在测实现细节，
+ * 而且 chatDirName 一改测试就碎（本项目已经把"测试硬编码实现细节"吃过好几次亏）。
+ */
+export function memoryDirOf(chatKey) {
+  return chatDir(String(chatKey || ''));
+}
+
 function memberFileName(userId, name = '') {
   if (String(userId ?? '').trim()) {
     const id = String(userId).trim();
@@ -265,6 +276,17 @@ export class MemoryStore {
     // 见 platformOf 的注释：不能 import store.js（循环依赖），所以这里自己读 + 缓存。
     this._platCache = null;
     this._platStamp = -1;
+    // 🆕 2026-09-21（第十对话，提案 16:45「希望记忆的增删改对本人可见/可感知」）：
+    //    chatKey -> { at, items:[{name,userId,delta,at}] } —— **本次唤醒周期内**算出来的
+    //    "记忆变过"的那一份。
+    //
+    //    为什么要缓存在内存里而不是每次现算：
+    //    提示词**每一轮都重新渲染**（多轮工具调用时会有第 2、3 轮）。若每次渲染都
+    //    重新比对并把 lastSeenAt 推到现在，那么第 2 轮就再也算不出"变过"了
+    //    ⇒ 提示只在第一轮出现，而第一轮恰恰可能只是去调了个工具。
+    //    ⇒ 所以"算一次、记在内存里、整个唤醒周期都用它"，并在**真正跑完**时调
+    //      `commitChangedNote(chatKey)` 才把 lastSeenAt 推上去（见那里的注释）。
+    this._changedNote = new Map();
   }
 
   /** 扫描所有有记忆的会话（文件夹或旧版单文件）。 */
@@ -811,7 +833,90 @@ export class MemoryStore {
           + '对方自己提起来再接。）';
       lines.splice(2, 0, note);
     }
+    // 🆕 2026-09-21（第十对话）：把"你不在时记忆被动过"那句也插进说明区。
+    //    放在这里而不是末尾，理由与上面两句相同：它是**关于这份材料的说明**，
+    //    不是一条印象 —— 混在印象列表末尾会被当成"某个群友的事"。
+    //    没有变化时 changedSinceLastWake 返回 ''，`lines.splice` 一条都不插 ⇒ 零开销。
+    const changedNote = this.changedSinceLastWake(chatKey, now);
+    if (changedNote) lines.splice(2, 0, changedNote);
     return lines.join('\n');
+  }
+
+  /**
+   * 🆕 2026-09-21（第十对话）——「睡了一觉发现书被翻过」的那一声招呼。
+   *
+   * 起因：她自己的提案（16:45，原话）：
+   *   「希望在管理端对记忆做增删改时，小鲸鱼这边能收到一点可感知的变化，而不是完全无感……
+   *     目的是减少『睡了一觉发现书被翻过』的不确定感，**不是要监督或审计管理端操作**。」
+   *
+   * 判据只用**已有的数据**，不新造账本：
+   *   · `_meta.json` 里记一个 `lastSeenAt` = 上一次真正跑完时的时间；
+   *   · 每个成员文件本来就有 `updatedAt`（每次写印象都会刷新，见 #appendRaw / editMemberImpression）。
+   *   ⇒ `updatedAt > lastSeenAt` 就是"她不在的这段时间里，这个人的印象被动过"。
+   *
+   * ⚠️ 这条判据**分不清"管理端改的"和"别的东西改的"**（整理/互通同步/她自己上一轮写记忆
+   *    都会刷新 updatedAt）。⇒ 提示的措辞刻意说得**保守**："变了 N 个人的记忆"，
+   *    而不是"管理员改了 N 条" —— 不编造它区分不出来的因果。
+   *    （这正是她提案里那句"不是要监督或审计"的分寸：她要知道的是"书被动过"，
+   *      不是"谁动的、动了几笔"。）
+   *
+   * @returns {string} 给提示词用的一行；没有变化时返回 ''（**不占 token**）
+   */
+  changedSinceLastWake(chatKey, now = Date.now()) {
+    // ⚠️ 只在**有内容**时缓存（第一版把"算出来是空"也缓存了，被测试当场抓住）：
+    //    缓存空结果会让"这次没有变化"永远粘住 —— 之后真的变了也不再提示。
+    //    空的时候每次重算的代价只是读几个已缓存的成员对象，可以接受；
+    //    而正确的、已提交的"没有变化"是由 `_meta.json` 的 lastSeenAt 表达的，
+    //    不靠内存缓存。
+    const hit = this._changedNote.get(chatKey);
+    if (hit && hit.items.length) return hit.text;
+
+    // ⚠️ 这里**不能**用 `loadMeta()`：那个函数只挑出 `lastConsolidatedAt`
+    //    （见它的实现与调用方，返回的是一个**裁剪过**的对象），`lastSeenAt` 会被丢掉
+    //    ⇒ 读回来恒为 0 ⇒ 永远算不出"有变化"。
+    //    （第一版就是这么写的，被 测试-现行\test-记忆变更对bot可见.mjs 当场抓住。）
+    //    直接读原始 `_meta.json` 才拿得到自己写进去的那个字段。
+    const lastSeen = Number(readJson(metaFile(chatKey), null)?.lastSeenAt) || 0;
+    const items = lastSeen > 0
+      // lastSeen===0（第一次跑这个会话 / 老数据没这个字段）⇒ **不出提示**：
+      // 那时全部成员都"比它新"，说"变了 15 个人"是假信息，不如不说。
+      ? this.members(chatKey)
+        .filter((m) => m.userId && Number(m.updatedAt) > lastSeen)
+        .map((m) => ({ userId: m.userId, name: m.name || '', at: Number(m.updatedAt) }))
+        .slice(0, 6)
+      : [];
+
+    let text = '';
+    if (items.length) {
+      const who = items.map((x) => x.name || x.userId).slice(0, 4).join('、');
+      const more = items.length > 4 ? ` 等 ${items.length} 个人` : '';
+      text = items.length <= 4
+        ? `（你不在的时候，${who} 的印象被更新过。）`
+        : `（你不在的时候，有 ${items.length} 个人的印象被更新过：${who}${more}。）`;
+      // 只缓存有内容的这一支 —— 见上面的说明
+      this._changedNote.set(chatKey, { at: now, items, text });
+    } else {
+      this._changedNote.delete(chatKey);
+    }
+    return text;
+  }
+
+  /**
+   * 把「上次看到」推到"本次唤醒算出来的那个时间点"。
+   *
+   * ⚠️ **必须在真正跑完之后调**，不能在算提示词时顺手调 —— 否则第一次渲染就把
+   *    `lastSeenAt` 推掉了，同一轮里后面的重渲染（多轮工具调用）会算出"没有变化"。
+   *    调用点在 orchestrator 的一轮结束处（见那里的注释）。
+   */
+  commitChangedNote(chatKey) {
+    const hit = this._changedNote.get(chatKey);
+    if (!hit) return false;
+    this._changedNote.delete(chatKey);
+    // 有新内容才推时间戳；否则只清缓存（不推，免得把没读到的变化一起"标记成已读"）
+    if (!hit.items.length) return false;
+    const prev = loadMeta(chatKey);
+    writeJson(metaFile(chatKey), { ...prev, lastSeenAt: Number(hit.at) || Date.now() });
+    return true;
   }
 
   // ── 跨会话互通 ──────────────────────────────────────────────────────

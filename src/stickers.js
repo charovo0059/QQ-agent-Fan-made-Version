@@ -157,7 +157,11 @@ export function formatStickerList(entries, query = '', limit = 48) {
     desc: e.desc || '',
     localNote: e.localNote || '',
     tags: e.tags || [],
-    useCount: e.useCount || 0
+    useCount: e.useCount || 0,
+    // 🆕 2026-09-21（第十对话）：把 `lastUsedAt` 也发出来。
+    //    她反馈"只有累计次数看不出刚才有没有发过"（提案 16:29）；数据本来就在库里，
+    //    这里只是把它暴露给管理端与 `list_stickers` 的调用方。
+    lastUsedAt: e.lastUsedAt || 0
   }));
   return { total: list.length, matched: filtered.length, truncated: filtered.length > max, stickers: items };
 }
@@ -181,9 +185,32 @@ export function buildStickerContext(entries, max = 10) {
     // ⚠️ usage（"什么时候用"）原来**根本没进提示词** —— 管理端能填、库里存着，
     //    但模型看不到，等于白写。现在附在后面（2026-09-12 修）。
     const usage = e.usage ? `｜用法：${e.usage}` : '';
-    return `- ${label}${extra}${used}${usage}`;
+    // 🆕 2026-09-21（第十对话，提案 16:29）：补"最近用过"。
+    //    她的原话：只有累计次数时不好判断刚才有没有发过，容易短时间内重复发同一个。
+    //    `lastUsedAt` 数据**早就在**（本文件 :62 定义、:262 写入），只是从没进过提示词
+    //    ⇒ 这条提案的成本几乎为零，是"存了但没接线"的又一例。
+    //    ⚠️ 只在**最近 2 小时内**才写出来：这是"避免马上重复"需要的精度，
+    //    写成绝对时间（"9月21日 15:04"）既费 token 又对判断没帮助。
+    const fresh = lastUsedLabel(e.lastUsedAt);
+    return `- ${label}${extra}${used}${fresh}${usage}`;
   });
   return `【可用表情包】你的 QQ 收藏表情里有 ${list.length} 个表情（以下为常用/有备注的 ${top.length} 个，完整列表可用 list_stickers 查询）：\n${lines.join('\n')}`;
+}
+
+/**
+ * 把 `lastUsedAt` 说成一句人话，**只给"最近用过"这个判断所需的精度**。
+ * 超过阈值就返回空串 —— 理由是省 token：一个表情上次用是三天前，对她"要不要现在再用一次"
+ * 没有任何影响，写进提示词纯属浪费。
+ */
+export function lastUsedLabel(ts, { freshWithinMs = 2 * 60 * 60 * 1000 } = {}) {
+  const t = Number(ts) || 0
+  if (!t) return ''
+  const diff = Date.now() - t
+  if (diff < 0 || diff > freshWithinMs) return ''
+  const min = Math.round(diff / 60000)
+  if (min < 1) return '（刚刚用过）'
+  if (min < 60) return `（${min} 分钟前用过）`
+  return `（${Math.floor(min / 60)} 小时前用过）`
 }
 
 /** 发送前的表情包策略提示（软策略）。 */

@@ -28,7 +28,19 @@ import { compressImage } from './image-compress.js';
 // 工具注册表（Skills 基础设施，来自上游 0.3.1）：原生工具与技能工具都在这里登记，
 // 技能工具（带 skillId）的可用性统一问 getToolAvailability()。
 import { registerTool, listTools, getToolAvailability } from './tool-registry.js';
-import { appendProposal, PROPOSAL_KINDS } from './proposals.js';
+import { appendProposal, listProposals, PROPOSAL_KINDS } from './proposals.js';
+
+/**
+ * 提案状态 → 给她看的中文（🆕 2026-09-21 第十对话，配合 get_my_proposals）。
+ * ⚠️ 与 `ui/app.js` 的 STATUS_LABEL 不共用：那一份是**讨论状态**（等待中/已发言），
+ *    与提案状态是两回事，别混。
+ */
+const PROPOSAL_STATUS_LABEL = {
+  pending: '待审（管理员还没看过）',
+  accepted: '已采纳（列进待办了，改动由人来做）',
+  rejected: '不采纳',
+  done: '已实现'
+};
 import { splitDreamText } from './dream.js';
 
 /**
@@ -487,7 +499,11 @@ export function buildToolDefs() {
     },
     {
       name: 'list_stickers',
-      description: '查看/搜索你的 QQ 收藏表情（含备注和你的本地笔记）。',
+      // 🆕 2026-09-21（第十对话，提案 16:29）：把"最近用过"写进描述 ——
+      //    数据本来就有（lastUsedAt），但模型不知道有这个字段就等于没有。
+      description: '查看/搜索你的 QQ 收藏表情（含备注、你的本地笔记，'
+        + '以及各项的累计使用次数与"最近一次使用时间"）。'
+        + '想避免短时间内重复发同一个表情时，看 lastUsedAt 判断。',
       parameters: {
         type: 'object',
         properties: {
@@ -1023,6 +1039,72 @@ export function buildToolDefs() {
     },
 
     {
+      // 🆕 2026-09-21（第十对话）：她自己的提案（2026-09-21 03:20）。
+      //   原话："提交建议后没有任何回音，无法知道建议是被采纳、拒绝还是已经实现，只能等管理员转述。"
+      //   ⇒ 只读查询，**不改变任何状态**、也不新增数据 —— 数据本来就在 proposals.json 里，
+      //     缺的只是"她自己能看见"这条路（和表情 lastUsedAt 是同一类"存了但没接线"）。
+      name: 'get_my_proposals',
+      description: '查看你自己提交过的**改进提案**现在到哪一步了（待审 / 已采纳 / 已实现 / 不采纳）。'
+        + '当你想起"我是不是提过这件事"、或者想跟人确认进度时用；也可以只看某一条。'
+        + '⚠️ 这是只读的，不会改动任何东西。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '可选：只看这一条提案的编号（submit_proposal 返回过）' },
+          status: {
+            type: 'string',
+            enum: ['all', 'pending', 'accepted', 'rejected', 'done'],
+            description: '可选：按状态筛。默认 all（全看）。'
+          }
+        }
+      },
+      async execute(ctx, args) {
+        try {
+          const want = String(args?.status || 'all');
+          const state = listProposals({ status: 'all', limit: 300 });
+          const all = Array.isArray(state.items) ? state.items : [];
+          const id = String(args?.id || '').trim();
+          const picked = id
+            ? all.filter((x) => String(x.id) === id)
+            : (want === 'all' ? all : all.filter((x) => x.status === want));
+          if (id && !picked.length) return err(`找不到编号为 ${id} 的提案（可以用 get_my_proposals 不带 id 看全部）`);
+          const when = (t) => {
+            const n = Number(t) || 0;
+            if (!n) return '';
+            const d = new Date(n);
+            const p = (x) => String(x).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+          };
+          const items = picked.slice(0, 50).map((x) => ({
+            id: x.id,
+            title: x.title,
+            kindLabel: x.kindLabel,
+            statusLabel: PROPOSAL_STATUS_LABEL[x.status] || x.status,
+            submittedAt: when(x.at),
+            reviewedAt: when(x.reviewedAt),
+            // 管理员留的话只在她点进某一条时给全；列表态截断，省上下文
+            reviewNote: id ? String(x.reviewNote || '') : String(x.reviewNote || '').slice(0, 160)
+          }));
+          const count = (s) => all.filter((x) => x.status === s).length;
+          return ok({
+            total: all.length,
+            counts: {
+              待审: count('pending'),
+              已采纳: count('accepted'),
+              已实现: count('done'),
+              不采纳: count('rejected')
+            },
+            hint: '「已采纳」= 管理员认可了、列进待办，**改动由人来做**，所以可能还要等；'
+              + '「已实现」= 已经真的改好了（这个状态在管理端界面上不显示，只在这里和你问的时候能看到）。',
+            items
+          });
+        } catch (error) {
+          return err(`查提案失败：${error?.message ?? error}`);
+        }
+      }
+    },
+
+    {
       name: 'report_feedback',
       description: '向管理员（控制台）反馈你遇到的问题、困惑或需要人工介入的情况。不要用于聊天。',
       parameters: {
@@ -1070,7 +1152,17 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
-          const result = await webFetch(String(args.url ?? ''));
+          // 🆕 2026-09-21（第十对话）接线：`browseLocked` 从上游吸收进来后，
+          //    `web_fetch` 这个入口一直**没传** ⇒ `security.browseLock` 形同虚设
+          //    （另外两个入口 tools 的图片下载走 safeFetchBinary 也没传，这里只补 web_fetch，
+          //      因为它是"她自己决定去访问哪个站"的那一个，也是上游设计的管控点）。
+          //
+          // ⚠️ 传 true **不改变任何默认行为**：`config.js` 的 browseLock 默认
+          //    `enabled: false`，而 `assertBrowseLock` 在 `!browseLocked` 时直接 return、
+          //    在 enabled!==true 时也放行 ⇒ 只有管理员显式打开锁定才生效。
+          //    打开时的语义（config.js:170-181 写明的）：**空名单 = 全部拒绝**，
+          //    比"全部放行"安全，所以这里不额外兜底、以免把那条语义改掉。
+          const result = await webFetch(String(args.url ?? ''), { browseLocked: true });
           const body = String(result.body || '');
           return ok({
             url: result.url,
