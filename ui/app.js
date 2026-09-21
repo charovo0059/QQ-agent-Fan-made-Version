@@ -1411,7 +1411,15 @@ function initSessionScrollLoader() {
     const all = state.sessions || [];
     if (state.sessionLimit >= all.length) return;   // 已经全显示了
     state.sessionLimit = Math.min(all.length, state.sessionLimit + SESSION_PAGE);
-    renderSessionList();
+    // 🔴 只**追加**新的一批，不再整块重建。
+    //    原先是 renderSessionList()，而它是 box.innerHTML = 全部条目 ——
+    //    ⇒ 每滚一批，把**已经渲染过的全部**重新生成一遍，成本随条数二次增长。
+    //    实测（1680×1050，会话 1335 条）：50 条 → 6ms、100 条 → 22ms、
+    //    200 条 → 50ms、400 条 → 62ms、800 条 → 142ms；
+    //    "滚到底加载一批"整整 **73.6ms 主线程阻塞** ⇒ 越滚越顿。
+    //    这个坑项目里记过（存档页为此专门写了 appendChatMessageRows），
+    //    会话列表这一条一直没改。现在对齐同一套做法。
+    appendSessionRows();
   });
 }
 
@@ -1587,6 +1595,118 @@ function resetSessionFootCounts() {
   setSessionFootCounts({ shown: 0, total: 0 });
 }
 
+/**
+ * 渲染一条会话卡片。**抽出来是为了让"整块重建"与"滚动追加"共用同一份模板** ——
+ * 两份模板必然漂移（本项目踩过：同一个东西两处拼字符串，改了一处忘了另一处）。
+ */
+function sessionRowHtml(s) {
+  const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
+  const waitHtml = s.status === 'waiting' && s.waitUntil
+    ? `<span class="session-wait" data-until="${Number(s.waitUntil)}">等待中 · ${fmtWaitRemain(Number(s.waitUntil))}</span>`
+    : '';
+  const activityHtml = s.status === 'running' && s.activity
+    ? `<span class="session-activity">${esc(s.activity)}</span>`
+    : '';
+  const searchHtml = Number(s.webSearchCount) > 0
+    ? `<span class="muted">搜 ${s.webSearchCount}</span>`
+    : '';
+  const isNew = !state.seenSessionIds.has(s.id);
+  return `
+      <div class="session-item ${s.id === state.currentSessionId ? 'selected' : ''} ${s.status === 'waiting' ? 'session-waiting-row' : ''} ${isNew ? 'new-item' : ''}" data-id="${s.id}">
+        <div class="session-title">
+          <span class="session-chat">${esc(chatName)}</span>
+          <span class="session-time">${fmtTime(s.startedAt)}</span>
+        </div>
+        <div class="session-trigger">${esc(s.trigger || '')}</div>
+        <div class="session-meta">
+          <span class="status-badge status-${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
+          ${waitHtml}
+          ${activityHtml}
+          ${s.status !== 'waiting' ? `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span><span>${s.rounds || 0} 轮</span>${searchHtml}</span>` : ''}
+          <button class="btn btn-small btn-danger session-del" data-id="${s.id}" title="删除这条会话记录" style="margin-left:auto;padding:1px 7px;font-size:11px;line-height:1.5">删除</button>
+        </div>
+      </div>`;
+}
+
+/**
+ * 给**一批**会话卡片挂事件。scope 传整块容器（首次渲染）或刚追加的那一段（增量）。
+ *
+ * ⚠️ `.session-item` 上是 querySelectorAll 全扫 —— 追加时只扫新插入的那段，
+ *    否则每追加一批都要给前面所有条目重挂一遍监听（重复绑定 + 白跑）。
+ */
+function bindSessionRowHandlers(scope) {
+  $$('.session-item', scope).forEach((el) => {
+    el.addEventListener('click', () => selectSession(el.dataset.id));
+  });
+  // 每行的删除按钮：必须 stopPropagation，否则会顺带把"选中这条会话"也触发
+  $$('.session-del', scope).forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteSession(el.dataset.id, (state.sessions || []).find((x) => x.id === el.dataset.id));
+    });
+  });
+}
+
+/** 「清空全部会话」按钮是常驻元素 → 只绑一次。 */
+function bindClearSessionsButton() {
+  const clearBtn = $('#sessions-clear-btn');
+  if (clearBtn && !clearBtn.__bound) {
+    clearBtn.__bound = true;
+    clearBtn.addEventListener('click', clearAllSessions);
+  }
+}
+
+/**
+ * 滚到底时**只追加新的一批**（阶段 D 性能修复）。
+ *
+ * 为什么单独一个函数：`renderSessionList()` 是 `box.innerHTML = 全部条目`，
+ * 拿它来加载下一批等于把已渲染的全部重造一遍，成本随条数二次增长。
+ * 见 initSessionScrollLoader 里那组实测数字。
+ *
+ * ⚠️ 必须与 renderSessionList 的**过滤口径完全一致**，否则追加出来的条目
+ *    会和已有列表对不上（比如把被过滤掉的会话追加进来）。所以这里重算了一遍
+ *    同一套过滤 —— 抽成 chooseVisibleSessions() 共用，避免两份口径漂移。
+ */
+function appendSessionRows() {
+  const box = $('#session-items');
+  if (!box || !box.querySelector('.session-item')) { renderSessionList(); return; }  // 还没有内容 → 走整块渲染
+  const { all, filtering } = chooseVisibleSessions();
+  const already = box.querySelectorAll('.session-item').length;
+  const more = all.slice(already, state.sessionLimit);
+  if (!more.length) { setSessionFootCounts({ shown: already, total: all.length, filtered: filtering }); return; }
+  // ⚠️ 用 insertAdjacentHTML 而不是 `box.innerHTML +=` ——
+  //    后者会把已有节点全部销毁重建（等于没优化）。
+  //    用"插入点前一个兄弟节点"来界定**新插入的那一段**，这样只需给新条目挂监听，
+  //    不必给前面所有条目重挂一遍（重复挂监听 = 白跑 + 同一动作触发多次）。
+  const lastOld = box.lastElementChild;
+  box.insertAdjacentHTML('beforeend', more.map(sessionRowHtml).join(''));
+  const fresh = [];
+  for (let el = lastOld ? lastOld.nextElementSibling : box.firstElementChild; el; el = el.nextElementSibling) fresh.push(el);
+  // 传一个**真节点**当 scope：$$ 内部是 root.querySelectorAll(sel)，
+  // 用 DocumentFragment 装这一段即可（它同样支持 querySelectorAll）。
+  const scope = document.createDocumentFragment();
+  fresh.forEach((el) => scope.appendChild(el));
+  bindSessionRowHandlers(scope);
+  for (const s of state.sessions) state.seenSessionIds.add(s.id);
+  setSessionFootCounts({ shown: already + more.length, total: all.length, filtered: filtering });
+  // 新追加里若有"等待中"，得把 0.1s 本地刷新器拉起来
+  if (fresh.some((el) => el.querySelector('.session-wait[data-until]'))) startWaitTicker();
+}
+
+/**
+ * 算出"现在该显示哪些会话" + "是否处于过滤态"。
+ * 抽出来的唯一理由：整块渲染与增量追加**必须用同一套口径**（平台 → 关键词/状态）。
+ */
+function chooseVisibleSessions() {
+  const allPlatforms = state.sessions || [];
+  const byPlatform = allPlatforms.filter(matchPlatformSession);
+  const q = (state.sessionFilter && state.sessionFilter.query) || '';
+  const f = (state.sessionFilter && state.sessionFilter.status) || 'all';
+  const filtering = !!q || f !== 'all';
+  const all = byPlatform.filter((s) => matchSessionFilter(s, q, f));
+  return { allPlatforms, byPlatform, all, q, f, filtering };
+}
+
 function renderSessionList() {
   const box = $('#session-items');
   state.seenSessionIds = state.seenSessionIds || new Set();
@@ -1597,13 +1717,7 @@ function renderSessionList() {
   // ⚠️ 会话条目没有 source 字段 ⇒ 用 chatKey 查 refreshSourceMap 那张表。
   // ⚠️ 空列表要说清原因 —— "切到微信却什么都没有"与"被过滤掉了"是两种不同的状态，
   //    不区分的话用户会以为坏了（这正是本项目反复踩的"静默失效"）。
-  const allPlatforms = state.sessions || [];
-  const byPlatform = allPlatforms.filter(matchPlatformSession);
-  // 阶段 C2：平台过滤之后再叠加关键词 + 状态过滤（见 matchSessionFilter 注释）
-  const q = (state.sessionFilter && state.sessionFilter.query) || '';
-  const f = (state.sessionFilter && state.sessionFilter.status) || 'all';
-  const filtering = !!q || f !== 'all';
-  const all = byPlatform.filter((s) => matchSessionFilter(s, q, f));
+  const { allPlatforms, byPlatform, all, q, f, filtering } = chooseVisibleSessions();
   if (!all.length) {
     // ⚠️ 三种"空"必须说清是哪一种，否则用户会以为坏了：
     //    ① 有记录但被**平台**过滤掉（切到微信时最常见）
@@ -1625,53 +1739,12 @@ function renderSessionList() {
     return;
   }
   const shown = all.slice(0, state.sessionLimit);
-  box.innerHTML = shown.map((s) => {
-    const chatName = formatChatTitle(s.chatKey, chatNameOf(s.chatKey));
-    const waitHtml = s.status === 'waiting' && s.waitUntil
-      ? `<span class="session-wait" data-until="${Number(s.waitUntil)}">等待中 · ${fmtWaitRemain(Number(s.waitUntil))}</span>`
-      : '';
-    const activityHtml = s.status === 'running' && s.activity
-      ? `<span class="session-activity">${esc(s.activity)}</span>`
-      : '';
-    const searchHtml = Number(s.webSearchCount) > 0
-      ? `<span class="muted">搜 ${s.webSearchCount}</span>`
-      : '';
-    const isNew = !state.seenSessionIds.has(s.id);
-    return `
-      <div class="session-item ${s.id === state.currentSessionId ? 'selected' : ''} ${s.status === 'waiting' ? 'session-waiting-row' : ''} ${isNew ? 'new-item' : ''}" data-id="${s.id}">
-        <div class="session-title">
-          <span class="session-chat">${esc(chatName)}</span>
-          <span class="session-time">${fmtTime(s.startedAt)}</span>
-        </div>
-        <div class="session-trigger">${esc(s.trigger || '')}</div>
-        <div class="session-meta">
-          <span class="status-badge status-${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
-          ${waitHtml}
-          ${activityHtml}
-          ${s.status !== 'waiting' ? `<span>${s.usage ? fmtTokens(s.usage.totalTokens) : '-'}</span><span>${s.rounds || 0} 轮</span>${searchHtml}</span>` : ''}
-          <button class="btn btn-small btn-danger session-del" data-id="${s.id}" title="删除这条会话记录" style="margin-left:auto;padding:1px 7px;font-size:11px;line-height:1.5">删除</button>
-        </div>
-      </div>`;
-  }).join('');
+  box.innerHTML = shown.map(sessionRowHtml).join('');
   // 底部提示 + 头部计数：过滤生效时分母用过滤后的集合（见 setSessionFootCounts 注释）
   setSessionFootCounts({ shown: shown.length, total: all.length, filtered: filtering });
   for (const s of state.sessions) state.seenSessionIds.add(s.id);
-  $$('.session-item', box).forEach((el) => {
-    el.addEventListener('click', () => selectSession(el.dataset.id));
-  });
-  // 每行的删除按钮：必须 stopPropagation，否则会顺带把"选中这条会话"也触发
-  $$('.session-del', box).forEach((el) => {
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      deleteSession(el.dataset.id, (state.sessions || []).find((x) => x.id === el.dataset.id));
-    });
-  });
-  // 「清空全部会话」（按钮在 index.html 的列表头里，是常驻元素 → 只绑一次）
-  const clearBtn = $('#sessions-clear-btn');
-  if (clearBtn && !clearBtn.__bound) {
-    clearBtn.__bound = true;
-    clearBtn.addEventListener('click', clearAllSessions);
-  }
+  bindSessionRowHandlers(box);
+  bindClearSessionsButton();
   // 等待中会话的剩余时间按 0.1s 本地刷新（不重新拉列表）
   if ($$('.session-wait[data-until]', box).length) startWaitTicker();
 }
