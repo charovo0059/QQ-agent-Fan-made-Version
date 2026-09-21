@@ -165,6 +165,143 @@
   box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
 }
 
+/* ── 阶段 A：暗色专属（原 prototype.css 末尾）───────────────────────────
+   暗色不该靠重阴影造纵深（黑压黑只会糊）⇒ 用 1px 高光 + 彩色微发光替代。 */
+[data-theme='dark'] .session-item.selected,
+[data-theme='dark'] .chat-item.selected {
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .55), 0 0 22px rgba(var(--accent-rgb), .22);
+}
+[data-theme='dark'] .model-modal,
+[data-theme='dark'] .skill-modal {
+  box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+}
+
+/* ── 阶段 B1：窗口外壳（需 index.html 里的 <div id="shell">）─────────────────
+   概念版的「浮窗」形态：18px 圆角 + 三层柔和投影 + 毛玻璃 + 一圈发丝描边。
+   ⚠️ #loading-overlay 刻意**不在** shell 内（开机全屏罩不该有 18px 边距）。 */
+#shell {
+  margin: 18px 18px 22px;
+  border-radius: 18px;
+  border: 1px solid var(--pt-hairline);
+  box-shadow: var(--pt-sh-window), var(--pt-inner);
+  background: var(--pt-glass-0);
+  -webkit-backdrop-filter: var(--pt-blur-0);
+  backdrop-filter: var(--pt-blur-0);
+  /* 撑满剩余高度并让内部滚动（原来这些在 body 上；包壳后 body 只剩 margin 与背景） */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── 阶段 B2：顶栏连接状态做成浅底胶囊 ─────────────────────────────────── */
+.pt-status {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 4px 10px; border-radius: 999px;
+  background: rgba(0, 0, 0, .05);
+}
+.pt-status #onebot-label { color: var(--text); }
+[data-theme='dark'] .pt-status { background: rgba(255, 255, 255, .08); }
+[data-theme='dark'] .pt-status #onebot-label { color: var(--text); }
+
+/* ── 阶段 B3：侧栏吸底页脚（计数 + 清空按钮固定在列表下方）────────────────
+   ⚠️ 风险与预案（K3 方案 B3）：.list-pane 是 overflow-y:auto 的滚动容器，
+      sticky bottom 在原型里验证过有效；**若真机失效**，备选是把 .list-pane
+      改成 flex 列 + 让 #session-items 单独滚动。 */
+.pt-stickyfoot {
+  position: sticky; bottom: 0; z-index: 2;
+  background: var(--pt-glass-2);
+  -webkit-backdrop-filter: var(--pt-blur-2);
+  backdrop-filter: var(--pt-blur-2);
+  border-top: 1px solid var(--pt-hairline);
+}
+.pt-foot {
+  display: flex; justify-content: space-between; gap: 8px; align-items: center;
+  padding: 8px 14px; font-size: 11px; color: var(--faint);
+}
+/* 列表末条卡片与吸底页脚之间留一点呼吸，别贴死 */
+#session-items { padding-bottom: 6px; }
+
+/* ── 阶段 A：暗色专属（原 prototype.css 末尾）───────────────────────────
+   暗色不该靠重阴影造纵深（黑压黑只会糊）⇒ 用 1px 高光 + 彩色微发光替代。 */
+[data-theme='dark'] .session-item.selected,
+[data-theme='dark'] .chat-item.selected {
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .55), 0 0 22px rgba(var(--accent-rgb), .22);
+}
+[data-theme='dark'] .model-modal,
+[data-theme='dark'] .skill-modal {
+  box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+}
+
+/* ── 阶段 B1：窗口外壳（需 index.html 里的 <div id="shell">）─────────────────
+   概念版的「浮窗」形态：18px 圆角 + 三层柔和投影 + 毛玻璃 + 一圈发丝描边。
+   ⚠️ #loading-overlay 刻意**不在** shell 内（开机全屏罩不该有 18px 边距）。 */
+#shell {
+  margin: 18px 18px 22px;
+  border-radius: 18px;
+  border: 1px solid var(--pt-hairline);
+  box-shadow: var(--pt-sh-window), var(--pt-inner);
+  background: var(--pt-glass-0);
+  -webkit-backdrop-filter: var(--pt-blur-0);
+  backdrop-filter: var(--pt-blur-0);
+  /* 撑满剩余高度并让内部滚动（原来这些在 body 上；包壳后 body 只剩 margin 与背景） */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── 阶段 B2：顶栏连接状态做成浅底胶囊 ─────────────────────────────────── */
+.pt-status {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 4px 10px; border-radius: 999px;
+  background: rgba(0, 0, 0, .05);
+}
+.pt-status #onebot-label { color: var(--text); }
+[data-theme='dark'] .pt-status { background: rgba(255, 255, 255, .08); }
+[data-theme='dark'] .pt-status #onebot-label { color: var(--text); }
+
+/* ── 阶段 B3：侧栏吸底页脚（计数 + 清空按钮固定在列表下方）────────────────
+   ⚠️ 风险与预案（K3 方案 B3）：.list-pane 是 overflow-y:auto 的滚动容器，
+      sticky bottom 在原型里验证过有效；**若真机失效**，备选是把 .list-pane
+      改成 flex 列 + 让 #session-items 单独滚动。 */
+.pt-stickyfoot {
+  position: sticky; bottom: 0; z-index: 2;
+  background: var(--pt-glass-2);
+  -webkit-backdrop-filter: var(--pt-blur-2);
+  backdrop-filter: var(--pt-blur-2);
+  border-top: 1px solid var(--pt-hairline);
+}
+.pt-foot {
+  display: flex; justify-content: space-between; gap: 8px; align-items: center;
+  padding: 8px 14px; font-size: 11px; color: var(--faint);
+}
+/* 列表末条卡片与吸底页脚之间留一点呼吸，别贴死 */
+#session-items { padding-bottom: 6px; }
+
+/* 🔴 阶段 B3 备选预案（**实测踩到了**）：
+   第一版按原型用 `.pt-stickyfoot { position: sticky; bottom: 0 }` ——
+   截图一看，页脚**压在最后一条会话上**而不是浮在列表下方。
+   根因：`.list-pane` 是 `overflow-y:auto` 的**滚动容器**，sticky 定位的页脚
+   仍在滚动内容流里 ⇒ 它只是"贴在视口底部"，**不占位**，于是盖住末条。
+   ⇒ 改用 flex 列：`.list-pane` 不再自己滚，让中间那段（`#session-items`）单独滚，
+     页脚成为真正的 flex 兄弟节点，**天然占位、不会覆盖**。
+   ⚠️ 存档页（`#chat-list`）与记忆页（`#memory-items`）结构不同，这里只对会话侧栏改，
+     它们的滚动行为保持原样（`.list-pane` 同时被它们使用，所以下面用 `#session-list` 限定）。 */
+#session-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;          /* 容器不滚，交给内部 */
+}
+#session-list #session-items {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;          /* 真正的滚动区 */
+}
+#session-list .pt-stickyfoot { position: static; flex: none; }
+
 /* ══════════════════════════════════════════════════════════════
    动效 token
    ══════════════════════════════════════════════════════════════
@@ -815,9 +952,19 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 /* 阶段 A：时间列原来只有 nowrap、没有宽度约束 ⇒ 它吃掉全部剩余宽度，
    把说话人和正文顶到右边、中间空出一大块。压到 1%（table-layout:auto 下缩到 min-content），
    正文列自然吃掉剩余宽度。 */
+/* 阶段 A：时间列原来只有 nowrap、没有宽度约束 ⇒ 它吃掉全部剩余宽度，
+   把说话人和正文顶到右边、中间空出一大块。压到 1%（table-layout:auto 下缩到 min-content），
+   正文列自然吃掉剩余宽度。 */
+/* 阶段 A：时间列原来只有 nowrap、没有宽度约束 ⇒ 它吃掉全部剩余宽度，
+   把说话人和正文顶到右边、中间空出一大块。压到 1%（table-layout:auto 下缩到 min-content），
+   正文列自然吃掉剩余宽度。 */
 .archive-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .archive-table td.t { width: 1%; }
 .archive-table td.t { width: 1%; }
+.archive-table td.t { width: 1%; }
+.archive-table td.t { width: 1%; }
+.archive-table td.text { word-break: break-word; }
+.archive-table td.text { word-break: break-word; }
 .archive-table td.text { word-break: break-word; }
 .archive-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .archive-table .t { color: var(--muted); white-space: nowrap; font-family: var(--mono); font-size: 12px; }
