@@ -37,6 +37,12 @@ export class SendQueue {
     this.chains = new Map();      // chatKey -> enqueue fn
     this.minuteTimes = new Map(); // chatKey -> [ts]
     this.hourTimes = new Map();   // chatKey -> [ts]
+    // 🆕 2026-09-21（第十对话）：拍一拍限频的滑动窗口。
+    //    chatKey -> [ts]，以及 chatKey -> Map(targetUserId|'self' -> [ts])。
+    //    为什么用 Map 而不是写进 store：这是**发送侧的自我保护**、不是需要持久化的业务数据；
+    //    重启后窗口清空是可以接受的（重启本身也意味着隔了一段时间）。
+    this.pokeTimes = new Map();        // chatKey -> [ts]
+    this.pokeTargetTimes = new Map();  // chatKey -> Map(target -> [ts])
   }
 
   /**
@@ -191,13 +197,94 @@ export class SendQueue {
     const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
+      // 🆕 2026-09-21（第十对话）：限频。放在**这里**而不是 send_poke 工具里，
+      //    因为 poke() 是**所有**发送路径的必经点（工具、以后可能的主动行为），
+      //    只拦工具那条路等于留个后门。
+      //    ⚠️ 放在 chain 内部：chain 是每会话串行的，这样"查窗口→计数"不会有竞态。
+      //    超限时**抛错**（与文件顶部写明的既有惯例一致："超限直接拒绝，
+      //    工具会把错误告诉模型"）—— 不静默丢弃，否则她会以为自己拍过了。
+      this.#assertPokeAllowed(chatKey, targetUserId);
       await sleep(randInt(300, 900));
       const data = await this.onebot.sendPoke(kind, id, targetUserId);
       const ts = Date.now();
+      this.#recordPoke(chatKey, targetUserId, ts);
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';
       this.store.appendSelf(chatKey, { text: `[拍一拍] 你拍了拍${target}`, ts, mid: data?.message_id ?? null });
       this.onSent?.({ chatKey, text: `[拍一拍]${target}`, messageId: null });
       return data;
     });
   }
+
+  /** 拍一拍限频的窗口长度与两个上限（都从 config 现读，改设置不用重启）。 */
+  #pokeLimits() {
+    let c = {};
+    try { c = getConfig()?.send?.poke || {}; } catch { /* 读不到就用下面的默认 */ }
+    const num = (v, d) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : d;
+    };
+    return {
+      windowMs: 10 * 60 * 1000,
+      // 默认值写在这里，同时 config.js 的 DEFAULT_CONFIG.send.poke 也有一份 ——
+      // 两处一致由 test-poke限频.mjs 钉住（那个测试直接 import config 比对）。
+      maxPerChat: num(c.maxPerChatPer10Min, 3),
+      maxPerTarget: num(c.maxPerTargetPer10Min, 2)
+    };
+  }
+
+  #prunePokes(arr, now, windowMs) {
+    return (arr || []).filter((t) => now - t < windowMs);
+  }
+
+  #assertPokeAllowed(chatKey, targetUserId) {
+    const { windowMs, maxPerChat, maxPerTarget } = this.#pokeLimits();
+    const now = Date.now();
+    if (maxPerChat > 0) {
+      const hist = this.#prunePokes(this.pokeTimes.get(chatKey), now, windowMs);
+      this.pokeTimes.set(chatKey, hist);
+      if (hist.length >= maxPerChat) {
+        throw new Error(describePokeLimit('chat', maxPerChat, hist[0] + windowMs));
+      }
+    }
+    const key = targetUserId == null ? 'self' : String(targetUserId);
+    if (maxPerTarget > 0) {
+      const perTarget = this.pokeTargetTimes.get(chatKey) || new Map();
+      const hist = this.#prunePokes(perTarget.get(key), now, windowMs);
+      perTarget.set(key, hist);
+      this.pokeTargetTimes.set(chatKey, perTarget);
+      if (hist.length >= maxPerTarget) {
+        throw new Error(describePokeLimit('target', maxPerTarget, hist[0] + windowMs));
+      }
+    }
+  }
+
+  #recordPoke(chatKey, targetUserId, ts) {
+    const list = this.pokeTimes.get(chatKey) || [];
+    list.push(ts);
+    this.pokeTimes.set(chatKey, list);
+    const perTarget = this.pokeTargetTimes.get(chatKey) || new Map();
+    const key = targetUserId == null ? 'self' : String(targetUserId);
+    const tl = perTarget.get(key) || [];
+    tl.push(ts);
+    perTarget.set(key, tl);
+    this.pokeTargetTimes.set(chatKey, perTarget);
+  }
+}
+
+/**
+ * 把"拍不成了"说成一句**对模型说**的话（不是给用户看的）。
+ *
+ * 为什么要单独写：这句话会被 `send_poke` 工具原样回给模型，用词会直接影响她怎么处理
+ * （是"换个方式表达"还是"反复重试"）。所以：
+ *   · 说清是**限频**、不是坏掉（否则她会以为工具出错而重试）；
+ *   · 给出"过多久可以再来"，让她能自己判断要不要等；
+ *   · 提醒"这次没拍成"，避免她把没发生的事当成发生了（本项目最忌静默失败）。
+ * ⚠️ 措辞归 K3 的地盘只限于**人设/系统提示词**；这一句是工具返回的错误信息
+ *    （等同于 `errUnsaved` 那一类内部文案），所以留在工程侧。
+ */
+export function describePokeLimit(scope, max, nextAllowedAt) {
+  const wait = Math.max(1, Math.round((nextAllowedAt - Date.now()) / 60000));
+  const who = scope === 'target' ? '对同一个人' : '在这个会话里';
+  return `拍一拍被限频拦下了：${who} 10 分钟内最多 ${max} 次，还要等约 ${wait} 分钟。`
+    + '**这次没有拍出去**，别当成已经拍了；也不用重试，过一会儿自然就好了。';
 }
