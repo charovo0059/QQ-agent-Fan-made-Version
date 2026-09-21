@@ -1666,20 +1666,22 @@ function renderSessionDetail(s) {
   const usage = s.usage || {};
 
   const html = [];
+  // ── 阶段 C1（2026-09-21 苹果风改造）：头部改「标题行 + 摘要卡」──────────────
+  // 概念版把那一长串平铺字段收进一张摘要卡里，视觉重心落回标题。
+  // ⚠️ 字段一个没删、也没改数据来源；只换了承载它们的 DOM（`.sub` 的 span → 摘要卡的格子）。
   html.push(`
     <div class="detail-header">
       <h2>${esc(chatName)} ${statusBadge}
         <button class="btn btn-small" id="json-mode-btn" style="margin-left:10px">JSON 模式</button>
         <button class="btn btn-small btn-danger" id="session-del-btn" style="margin-left:6px">删除本次会话</button>
       </h2>
-      <div class="sub">
-        <span>触发：${esc(s.triggerSummary || (s.trigger === 'proactive' ? '主动机会' : '-'))}</span>
-        <span>开始 ${fmtClock(s.startedAt)}${s.endedAt ? ` · 结束 ${fmtClock(s.endedAt)}` : ' · 进行中'}</span>
-        <span>模型 ${esc(s.model || '-')}</span>
-        <span>${usage.calls || 0} 次调用 · ${fmtTokens(usage.promptTokens)} 入 / ${fmtTokens(usage.completionTokens)} 出 / ${fmtTokens(usage.totalTokens)} 总</span>
-        <span>${s.rounds || 0} 轮工具</span>
-        <span>联网搜索 ${Number(s.webSearchCount) || 0} 次</span>
-      </div>
+    </div>
+    <div class="pt-summary">
+      <div class="pt-sum-row"><span class="k">触发</span><span class="v">${esc(s.triggerSummary || (s.trigger === 'proactive' ? '主动机会' : '-'))}</span></div>
+      <div class="pt-sum-row"><span class="k">时间</span><span class="v">开始 ${fmtClock(s.startedAt)}${s.endedAt ? ` · 结束 ${fmtClock(s.endedAt)}` : ' · 进行中'}</span></div>
+      <div class="pt-sum-row"><span class="k">模型</span><span class="v">${esc(s.model || '-')}</span></div>
+      <div class="pt-sum-row"><span class="k">用量</span><span class="v">${usage.calls || 0} 次调用 · ${fmtTokens(usage.promptTokens)} 入 / ${fmtTokens(usage.completionTokens)} 出 / ${fmtTokens(usage.totalTokens)} 总</span></div>
+      <div class="pt-sum-row"><span class="k">过程</span><span class="v">${s.rounds || 0} 轮工具 · 联网搜索 ${Number(s.webSearchCount) || 0} 次</span></div>
     </div>`);
 
   const jsonMode = state.sessionJsonMode === s.id;
@@ -1717,17 +1719,27 @@ function renderSessionDetail(s) {
       </details>`);
   } else {
     if (s.systemPrompt) {
+      // 阶段 C1：`.collapsible`/`.coll-body` → `details.pt-fold` + `.pt-code`
+      //（⚠️ 类名仍是 collapsible，见函数末尾"展开状态保留"那段要按类名+序号恢复）
       html.push(`
-        <details class="collapsible">
-          <summary>系统提示（${s.systemPrompt.length} 字符，每次运行重发）</summary>
-          <div class="coll-body">${esc(s.systemPrompt)}</div>
+        <details class="collapsible pt-fold">
+          <summary class="pt-sec"><span class="chev">▸</span>系统提示
+            <span class="m">${s.systemPrompt.length} 字符 · 每次运行重发</span></summary>
+          <div class="pt-code">
+            <div class="pt-code-head"><span>text</span><span class="pt-tag grey">${s.systemPrompt.length} 字符</span></div>
+            <pre>${esc(s.systemPrompt)}</pre>
+          </div>
         </details>`);
     }
     if (s.userPrompt) {
       html.push(`
-        <details class="collapsible" open>
-          <summary>本次输入（${s.userPrompt.length} 字符 —— 零对话历史，全部来自 JSON 存档）</summary>
-          <div class="coll-body">${esc(s.userPrompt)}</div>
+        <details class="collapsible pt-fold" open>
+          <summary class="pt-sec"><span class="chev">▸</span>本次输入
+            <span class="m">${s.userPrompt.length} 字符 —— 零对话历史，全部来自 JSON 存档</span></summary>
+          <div class="pt-code">
+            <div class="pt-code-head"><span>text</span><span class="pt-tag grey">${s.userPrompt.length} 字符</span></div>
+            <pre>${esc(s.userPrompt)}</pre>
+          </div>
         </details>`);
     }
   }
@@ -1771,15 +1783,17 @@ function renderSessionDetail(s) {
       // 🔴 这里原来写死「已发送到 QQ」—— 微信的回复也显示成 QQ，用户一眼就发现"它不知道自己在微信"。
       //    平台要从**这条会话的 chatKey** 查（列表接口不带 source）。
       const plat = sessionPlatform({ chatKey: s.chatKey }) === 'wechat' ? '微信' : 'QQ';
+      // 阶段 C1：`.sent-badge` → `.pt-out` 绿色输出卡（概念版形态）
       html.push(`
-        <div class="sent-badge">
-          <div class="asr-label">已发送到 ${plat}${sent.at ? ` · ${sent.at}` : ''}</div>
-          ${esc(sent.text)}
+        <div class="pt-out">
+          <div class="pt-out-head"><span class="who">已发送到 ${plat}</span>${sent.at ? `<span class="muted">${esc(sent.at)}</span>` : ''}</div>
+          <p>${esc(sent.text)}</p>
         </div>`);
     }
   }
   if (s.error) html.push(`<div class="session-error">${esc(s.error)}</div>`);
-  if (s.finishReason) html.push(`<div class="bubble bubble-user">finish：${esc(s.finishReason)}</div>`);
+  // 阶段 C1：结束行用 `.pt-endline`（带一个圆点，与概念版一致）
+  if (s.finishReason) html.push(`<div class="pt-endline"><span class="dot"></span>finish：${esc(s.finishReason)}</div>`);
   html.push('</div>');
 
   // 折叠面板的展开状态也要保留（否则每次刷新"系统提示"都被折回去）
