@@ -73,7 +73,28 @@ export function loadStickerStore(file = STICKER_FILE) {
     const parsed = JSON.parse(text);
     if (!Array.isArray(parsed)) return [];
     return parsed.map(normalizeStickerEntry).filter(Boolean);
-  } catch {
+  } catch (e) {
+    // ⚠️ 首次运行：文件还不存在（ENOENT）⇒ 空库是对的，静默即可。
+    if (e?.code === 'ENOENT') return [];
+    // 🔴 2026-09-22（第十一对话 · 隐患排查）：**文件在、但读不出来**时**绝不能静默返回空**。
+    //
+    // 为什么这是数据丢失级：调用链是
+    //     `new StickerManager()` → `this.entries = loadStickerStore()`（本函数）
+    //   → `sync()`（`list()` 的正常路径）→ `saveStickerStore(this.entries)`
+    // 一旦这里返回 `[]`，下一次同步就会把**空库（或只剩刚拉到的那几条）rename 回原路径**
+    // ⇒ 本地攒下来的表情包**无声消失**。
+    //
+    // ⚠️ 作者其实已经防住了**另一头** —— `sticker-manager.js:40` 写着
+    //   "只有拿到合法数组才合并，避免异常响应清空本地库"；
+    //   但**读入这一头没有防**，于是"响应异常"防住了、"文件损坏/读不出来"没防。
+    //
+    // ⇒ 做法：把原文件**另存为 `.corrupt-<时间戳>`（保命）**，并**大声报**；
+    //   返回值仍按空库（不改契约，调用方一行都不用动），但**原数据还在盘上，可人工恢复**。
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const bak = `${file}.corrupt-${stamp}`;
+    try { fs.copyFileSync(file, bak); } catch { /* 连备份都失败也得继续报出来 */ }
+    console.error(`[stickers] ${file} 存在但读不出来（${e?.message || e}）—— 已另存为 ${path.basename(bak)}；`
+      + `本次按空库启动。⚠️ 原库没有被覆盖，可人工恢复。`);
     return [];
   }
 }
