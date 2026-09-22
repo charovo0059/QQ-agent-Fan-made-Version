@@ -1560,6 +1560,74 @@ function initSessionFilter() {
   syncSessionFilterUI();
 }
 
+/**
+ * 无边框窗口：自绘标题栏的接线（2026-09-22）。
+ *
+ * 依据《无边框窗口改造实施方案》v1.0。窗口已由 electron/main.js 的 `frame: false`
+ * 去掉系统标题栏，所以原生能做的事要在这里补齐：
+ *
+ *   ① 三个控制按钮 → IPC 到主进程（`window.qqaWin`，由 electron/preload.js 暴露）
+ *   ② 顶栏空白区双击 = 最大化 / 还原
+ *      （拖拽本身不用 JS：CSS 的 `-webkit-app-region: drag` 由系统接管，见 style.css）
+ *   ③ 最大化状态 → 图标切换 + `html.maximized` 类（后者驱动 #shell 去圆角/去边距）
+ *
+ * ⚠️ 三件必须注意的事：
+ *
+ *   1）**普通浏览器里没有 `window.qqaWin`** —— 控制台页面在 Edge 里也能打开
+ *      （我就是靠它做界面验证的）。所以这里必须优雅降级：把 #win-ctrl 保持
+ *      `.hidden`、不绑 dblclick，而不是抛错或显示三个点不动的按钮。
+ *      按钮在 HTML 里**默认就带 `hidden` 类**，这里只负责在 Electron 里摘掉它。
+ *
+ *   2）**状态必须以主进程的推送为准**，不能只跟按钮点击走。用户还能用
+ *      Win+↑/↓、任务栏右键、Aero Snap 贴边、双击拖拽区 改变窗口状态 ——
+ *      只跟点击走的话图标会与实际状态不一致（方案 §5 列为中风险）。
+ *      主进程在 maximize / unmaximize / 全屏切换 / resize 时推 `win:state`。
+ *
+ *   3）**首帧要主动查一次**：页面可能在窗口已经最大化时被加载（比如重启前就是最大化），
+ *      只等推送的话首帧图标是错的。
+ */
+function initWindowControls() {
+  const bridge = window.qqaWin;
+  const box = $('#win-ctrl');
+  if (!bridge || !box) return;    // 浏览器里就是这条路：什么都不做，保持 hidden
+
+  box.classList.remove('hidden');
+
+  // 图标与外壳形态的唯一开关：一个 html 类，CSS 负责长相（见 style.css）
+  const applyMaximized = (on) => {
+    document.documentElement.classList.toggle('maximized', !!on);
+    const btn = $('#win-max');
+    if (btn) {
+      const label = on ? '还原' : '最大化';
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+    }
+  };
+
+  $('#win-min')?.addEventListener('click', () => { bridge.minimize(); });
+  $('#win-max')?.addEventListener('click', () => { bridge.toggleMaximize(); });
+  $('#win-close')?.addEventListener('click', () => { bridge.close(); });
+
+  // ② 双击拖拽区 = 最大化/还原。
+  // ⚠️ 挂在 #topbar 与 #tabs 上（那两处才是 drag 区），而且必须**排除可点击元素** ——
+  //    否则双击「暂停」按钮会顺带把窗口最大化，那是很烦人的误触。
+  const dblTargets = ['#topbar', '#tabs'];
+  for (const sel of dblTargets) {
+    const el = $(sel);
+    if (!el) continue;
+    el.addEventListener('dblclick', (e) => {
+      if (e.target.closest('button, input, select, textarea, a, label, summary, [role="tab"], [role="button"]')) return;
+      bridge.toggleMaximize();
+    });
+  }
+
+  // ③ 状态同步：先订阅（避免首查与首推之间漏事件），再主动查一次
+  bridge.onState((s) => applyMaximized(s && s.maximized));
+  Promise.resolve(bridge.isMaximized())
+    .then((r) => applyMaximized(r && r.maximized))
+    .catch(() => { /* 查不到就保持默认（未最大化），比抛错好 */ });
+}
+
 /** 筛选胶囊的档位文案：**唯一来源是 index.html 的 data-v ↔ 文字**，这里只是回读，
  *  让「没有匹配」那句提示与用户在胶囊上看到的字完全一致（不另写一份中文字符串）。 */
 function chipLabelOf(v) {
@@ -9025,4 +9093,6 @@ $$('.tab').forEach((tab) => {
   loadMemoryView();
   initSessionScrollLoader();
   initSessionFilter();
+  // 无边框窗口：自绘标题栏的按钮与拖拽（普通浏览器里会自动跳过，见函数注释）
+  initWindowControls();
 })();

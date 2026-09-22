@@ -66,6 +66,28 @@
       <span id="search-count-label" class="muted" title="今日联网搜索次数（web_search / web_fetch）" data-page-node-id="OLNka4FykNQRaxEpBoEK6t">搜索：-</span>
       <button id="theme-btn" class="icon-btn" title="切换主题（亮 → 暗 → 跟随系统）" aria-label="切换主题" data-page-node-id="v47iM0LsuM4VppZ5WLh7Qi"></button>
       <button id="pause-btn" class="btn btn-small" data-page-node-id="plyqWsDjnlKP1Td6wSVJaD">暂停</button>
+      <!-- ⚠️ 无边框窗口（2026-09-22）：自绘的三个窗口控制按钮，必须在顶栏**最右侧**。
+           用内联 SVG 而不用 emoji/图片（方案 4.2）：高分屏清晰、且能跟着 currentColor 变色。
+           ⚠️ 这段只在 Electron 里显示：普通浏览器里 window.qqaWin 为 undefined，
+              app.js 的 initWindowControls() 会把 #win-ctrl 加上 .hidden（不是删掉）。
+              所以**别在 CSS 里给它 display:flex** —— 那会压过 [hidden] 的 display:none、
+              让三个按钮在浏览器里变成点不动的装饰（本项目踩过同一类坑，见 style.css 里
+              [hidden] 那条规则）。 -->
+      <div id="win-ctrl" class="win-ctrl hidden" aria-label="窗口控制">
+        <button class="win-btn" id="win-min" title="最小化" aria-label="最小化">
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" stroke-width="1.1"/></svg>
+        </button>
+        <button class="win-btn" id="win-max" title="最大化" aria-label="最大化">
+          <svg class="ic-max" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.55" y="0.55" width="8.9" height="8.9" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+          <svg class="ic-restore" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <rect x="0.55" y="2.55" width="6.9" height="6.9" fill="none" stroke="currentColor" stroke-width="1.1"/>
+            <path d="M2.55 2.55V0.55h6.9v6.9h-2" fill="none" stroke="currentColor" stroke-width="1.1"/>
+          </svg>
+        </button>
+        <button class="win-btn win-close" id="win-close" title="关闭到托盘（应用继续在后台跑，从托盘菜单可真正退出）" aria-label="关闭">
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0.7 0.7l8.6 8.6M9.3 0.7L0.7 9.3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>
+        </button>
+      </div>
     </div>
   </header>
 
