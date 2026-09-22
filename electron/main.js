@@ -153,6 +153,100 @@ function showWindow() {
   }
 }
 
+/**
+ * 「窗口出现后强制重排一次」—— 修**首帧/托盘恢复时页面只画了一半**的 bug。
+ *
+ * 症状（用户报的）：「应用窗口现在显示不全，我拖一下窗口边界又能正常显示」。
+ * 截图特征：黑带从**内容下方一直贯到窗口底部**（而不是"四周一圈"）——
+ *   说明不是底色问题（`backgroundColor` 早就改成 `#FFFFFF` 了），
+ *   而是**渲染进程第一次合成时用的视口还没等于最终窗口尺寸**：
+ *   窗口表面是 861 DIP 高，页面只画了上面一块，下面那块根本没内容。
+ *
+ * 根因：无边框 + `app.disableHardwareAcceleration()`（软件合成）下，
+ *   窗口尺寸的最终值可能在首帧合成**之后**才被应用 ⇒ 渲染进程拿着旧视口布局。
+ *   拖一下窗口边界会触发真正的 resize ⇒ 渲染进程重新布局 ⇒ 看起来"又正常了"。
+ *
+ * 🔴 修法**刻意不碰窗口尺寸**（考虑过 `setBounds` 到当前尺寸来"钉一下"，**否决**）：
+ *   把尺寸重新下发会真的挪窗口 —— 而 `'show'` 这条路径**也可能在用户拖拽/双击最大化
+ *   的过程中触发**（从托盘恢复、或者用户正在操作时窗口被 show）。
+ *   那样就会把用户的操作打回去，或者在最大化时误触发 `unmaximize`。
+ *   ⇒ **代价大于收益**：真正需要修的只是渲染进程那一侧的视口，窗口尺寸本身是对的
+ *     （实测 `innerWidth/Height` 与窗口 1:1 对得上）。
+ *
+ * 做法：让渲染进程自己量一次视口并强制一次样式重算 —— 就是"拖边界"所做的事的最小版。
+ *
+ * ⚠️ 为什么挂在 `'show'` 事件上而不是逐个 patch（`ready-to-show` / `did-finish-load` /
+ *   托盘恢复 / 用户再打开）：`'show'` 是**所有**"窗口变可见"路径的汇合点，
+ *   逐个 patch 必然漏一条（这个项目反复踩"补丁式修法永远有第 N+1 处"）。
+ * ⚠️ 用 `once` + 每次 show 时重挂：一次性监听只跑第一次，
+ *   而托盘恢复是同 `mainWindow` 实例的**第二次** show。
+ * ⚠️ 延迟 50ms：太早的话窗口还没真正显示完，改了也白改。
+ * ⚠️ 只做"读一下布局 + 派发 resize"这类**幂等**操作：即使重复触发也什么都不改变，
+ *   所以不需要判断"用户是不是正在拖拽"。
+ */
+function nudgeRepaint() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.executeJavaScript(
+      'window.dispatchEvent(new Event("resize"));' +
+      'void document.documentElement.offsetHeight;'
+    ).catch(() => { /* 渲染进程还没就绪：下次 show 会再试 */ });
+  } catch { /* ignore */ }
+}
+
+/**
+ * 「重排之后自检一次，没好就再重排一次」。
+ *
+ * ⚠️ 为什么需要这一步：`nudgeRepaint` 派发的是**合成事件** —— 它能让页面重新布局，
+ *   但**改不了渲染进程自己那份视口尺寸**。如果根因是"视口尺寸本身是旧的"
+ *   （而不是"页面没重排"），那一次重排不够：得等视口尺寸被真正更新之后再排一次。
+ *   所以这里量一下"页面是不是真的铺满了窗口"，没铺满就再来一次。
+ *
+ * ⚠️ 这个自检**不是万能的**，必须说清楚它能证明什么、不能证明什么：
+ *   · 能证明：渲染进程量到的布局尺寸与窗口尺寸一致了（这正是"显示不全"的直接原因）
+ *   · 不能证明：合成器已经把这个新布局**画到屏幕上**（这一步我们从主进程看不到）
+ *   ⇒ 所以它只是个"尽力而为的收敛"，不是保证。真机效果仍需人眼确认。
+ *
+ * ⚠️ 只在"差得多"时才重排（阈值 8px）：亚像素/滚动条那点差异是正常的，
+ *   拿它当信号会变成每隔一会儿就重排一次 —— 那是自己制造抖动。
+ * ⚠️ 限一次重试：不做循环。真收敛不了就停手，别把 CPU 烧在一个改不了的渲染进程上。
+ */
+function verifyThenNudgeAgain() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  let winH = 0;
+  try { winH = mainWindow.getBounds().height; } catch { return; }
+  if (!winH) return;
+  mainWindow.webContents.executeJavaScript(
+    'JSON.stringify({ h: document.documentElement.clientHeight, w: document.documentElement.clientWidth })'
+  ).then((raw) => {
+    let got = null;
+    try { got = JSON.parse(raw); } catch { return; }
+    if (!got || !got.h) return;
+    // 页面的 CSS 高度 vs 窗口的逻辑高度：差 8px 以上才认为"没铺满"
+    // ⚠️ 视口高度已经含了 DPI 折算效果（window.innerHeight 就是 CSS px），
+    //    所以这里**不要再按缩放比换算一次** —— 换算了就永远对不上、每次都重排。
+    const gap = Math.abs(Number(got.h) - winH);
+    if (gap > 8) {
+      console.log(`[window] 重排自检：视口 ${got.h} 与窗口 ${winH} 仍差 ${Math.round(gap)}px，再重排一次`);
+      nudgeRepaint();
+    }
+  }).catch(() => { /* 渲染进程没就绪就算了 */ });
+}
+
+/** 给"窗口出现"这条路径挂上重排（每次 show 都挂，因为 once 只跑第一次）。 */
+function armRepaintNudge() {
+  if (!mainWindow) return;
+  mainWindow.once('show', () => {
+    setTimeout(() => {
+      nudgeRepaint();
+      // 再量一次：如果视口仍与窗口对不上（根因是"视口尺寸本身旧了"而不是"页面没重排"），
+      // 补一次重排。详见 verifyThenNudgeAgain 的注释（含它能证明什么、不能证明什么）。
+      setTimeout(verifyThenNudgeAgain, 120);
+      armRepaintNudge();   // 为下一次 show（托盘恢复）重新挂上
+    }, 50);
+  });
+}
+
 function createTray() {
   const icon = nativeImage.createFromPath(ICON_PATH);
   tray = new Tray(icon);
@@ -221,6 +315,9 @@ function createWindow(port) {
     }
   });
   Menu.setApplicationMenu(null);
+  // ⚠️ 先挂"窗口出现后强制重排"（见 nudgeRepaint 的注释：修"显示不全、拖一下边界才好"）。
+  //    必须在任何 show() 之前挂上 —— 包括下面那两处。
+  armRepaintNudge();
   // 窗口打开先显示 loading 壳，等页面真正加载完成再亮相，避免白屏和用户反复双击
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
