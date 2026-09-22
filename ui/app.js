@@ -125,23 +125,41 @@ const USAGE_RANGES = [
 const CONSOLE_MARKER = 'qq-agent-console';
 
 /* ══════════════════════════════════════════════════════════════
-   主题（明/暗/系统/？）
+   主题（明/暗/系统）
    ══════════════════════════════════════════════════════════════
-   四种取值：'dark' | 'light' | 'system'（跟随系统偏好）| '?'（整活主题）。
+   三种取值：'dark' | 'light' | 'system'（跟随系统偏好）。
    持久化两层：
      1. localStorage —— 立即生效，避免每次启动都等接口
      2. 后端 config.ui.theme —— 跨设备/重装后保留（尽力而为，失败不阻塞）
    首屏防闪由 index.html 的内联脚本负责（读 localStorage 直接设 data-theme）。
+
+   ⛔ 2026-09-23（第十二对话，用户点名）：**删掉第四种主题 '?'（整活/VHS）**。
+      用户理由："用不上，还有很多卡顿 bug"。实测对得上：
+        · 它那层 CSS 是几百行高频动画（steps() 抖动 + will-change + 逐元素 rotate/translate），
+          而且**对每个列表项都生效**（`.session-item:nth-child(4n)` 那一组）；
+        · JS 层还挂着一个**全局 click 监听**：'?' 下每次点击都新建 3~5 个 span、850ms 后再移除；
+        · `工具-设计改造\截图.mjs` 里已经记着被它坑过（想要 `--theme=light`，结果被带偏成 '?'）。
+      ⇒ 取值只剩三种；**老配置/localStorage 里的 '?' 落到"跟随系统"**（用户选的回退目标），
+        不会卡在一个已经不存在的主题上（见下面的 THEME_RETIRED）。
 */
-const THEME_ICON = { dark: '🌙', light: '☀️', system: '🖥️', '?': '❓' };
-const THEME_LABEL = { dark: '暗色', light: '亮色', system: '跟随系统', '?': '？' };
-const THEME_VALUES = ['light', 'dark', 'system', '?'];
+const THEME_ICON = { dark: '🌙', light: '☀️', system: '🖥️' };
+const THEME_LABEL = { dark: '暗色', light: '亮色', system: '跟随系统' };
+const THEME_VALUES = ['light', 'dark', 'system'];
+/** 已下线的主题取值 → 迁移目标。读到就地改写，别让它每轮都走迁移分支。 */
+const THEME_RETIRED = { '?': 'system' };
 
 /** 读取当前主题设置（localStorage 优先，其次系统偏好）。 */
 function getThemePref() {
   try {
-    const v = localStorage.getItem('qqa-theme');
-    if (THEME_VALUES.includes(v)) return v;
+    const raw = localStorage.getItem('qqa-theme');
+    if (raw && THEME_RETIRED[raw]) {
+      const to = THEME_RETIRED[raw];
+      // 老版本存过已下线的主题 ⇒ 迁到替代值并**就地改写 localStorage**，
+      // 否则每次启动都要再走一遍这个分支（后端那份旧值也该被顺手覆盖，见 applyTheme）
+      try { localStorage.setItem('qqa-theme', to); } catch { /* 忽略 */ }
+      return to;
+    }
+    if (THEME_VALUES.includes(raw)) return raw;
   } catch { /* 隐私模式下 localStorage 可能不可用 */ }
   return 'dark';
 }
@@ -149,7 +167,7 @@ function getThemePref() {
 /** 把设置解析成实际要应用的主题名。 */
 function resolveTheme(pref) {
   if (THEME_VALUES.includes(pref) && pref !== 'system') return pref;
-  // system：跟随系统
+  // system（以及任何认不出的取值）：跟随系统
   try {
     return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
   } catch { return 'dark'; }
@@ -157,53 +175,19 @@ function resolveTheme(pref) {
 
 /** 应用主题到 <html>，并同步按钮图标。 */
 function applyTheme(pref) {
-  const actual = resolveTheme(pref);
+  // 已下线的取值先迁移（用户可能从老配置/老 localStorage 里带过来）
+  const p = THEME_RETIRED[pref] || pref;
+  const actual = resolveTheme(p);
   document.documentElement.setAttribute('data-theme', actual);
-  syncChaosLayers(actual === '?');
   const btn = $('#theme-btn');
   if (btn) {
-    btn.textContent = THEME_ICON[pref] || THEME_ICON.dark;
-    btn.title = `主题：${THEME_LABEL[pref] || '暗色'}（点击切换）`;
+    btn.textContent = THEME_ICON[p] || THEME_ICON.dark;
+    btn.title = `主题：${THEME_LABEL[p] || '暗色'}（点击切换）`;
   }
-  try { localStorage.setItem('qqa-theme', pref); } catch { /* 忽略 */ }
+  try { localStorage.setItem('qqa-theme', p); } catch { /* 忽略 */ }
 }
 
-/* ── 「？」主题的 JS 层：VHS 覆盖层 + 点击爆粒子 ──
-   CSS 管不了的就这两件需要一个真实 DOM 层（body 的 ::before/::after 已被占用）。
-   主题切走即移除，零残留。 */
-function syncChaosLayers(on) {
-  let vhs = document.getElementById('chaos-vhs');
-  if (on && !vhs) {
-    vhs = document.createElement('div');
-    vhs.id = 'chaos-vhs';
-    vhs.innerHTML = '<div class="vhs-track"></div>';   // 白闪太刺眼已移除，只留扫描线+追踪误差带
-    document.body.appendChild(vhs);
-  } else if (!on && vhs) {
-    vhs.remove();
-  }
-}
-
-// 点击爆「？」粒子：只在「？」主题下生效（判断放点击时，不绑状态）
-document.addEventListener('click', (e) => {
-  if (document.documentElement.getAttribute('data-theme') !== '?') return;
-  // 一次爆 3~5 个，方向随机（抽象 = 不统一）
-  const n = 3 + Math.floor(Math.random() * 3);
-  for (let i = 0; i < n; i++) {
-    const el = document.createElement('span');
-    el.className = 'chaos-pop';
-    el.textContent = '？';
-    el.style.left = `${e.clientX}px`;
-    el.style.top = `${e.clientY}px`;
-    el.style.setProperty('--dx', `${(Math.random() - 0.5) * 160}px`);
-    el.style.setProperty('--dy', `${-40 - Math.random() * 90}px`);
-    el.style.setProperty('--rot', `${(Math.random() - 0.5) * 540}deg`);
-    el.style.fontSize = `${14 + Math.random() * 20}px`;
-    document.body.appendChild(el);
-    setTimeout(() => el.remove(), 850);
-  }
-}, { passive: true });
-
-/** 点击按钮：暗 → 亮 → 跟随系统 → ？ → 暗。 */
+/** 点击按钮：暗 → 亮 → 跟随系统 → 暗。 */
 function cycleTheme() {
   const order = THEME_VALUES;
   const next = order[(order.indexOf(getThemePref()) + 1) % order.length];
@@ -1078,7 +1062,7 @@ function renderSkillSettingsModal(skill) {
       <button class="icon-btn" id="skset-x" title="关闭" aria-label="关闭">✕</button>
     </div>
     <div class="skill-modal__body">
-      <div class="skill-modal__note">共 <b>${keys.length}</b> 项设置 · 保存在 <code>config.skills['${esc(skillId)}']</code>，只有这个扩展会读到它们。</div>
+      <div class="skill-modal__note">共 <b>${keys.length}</b> 项设置 · 保存在 <code>${esc(skill.configPath || `config.skills['${skillId}']`)}</code>，只有这个扩展会读到它们。</div>
       <div class="skill-form">${keys.map(fieldHtml).join('')}</div>
       ${internalKeys.length ? `<div class="skill-modal__internal">
         <div class="skill-modal__internal-head">以下设置不在这里改</div>
@@ -1143,6 +1127,13 @@ function openSkillSettingsInline(skillId, btn) {
   const bodyHtml = tmp.querySelector('.skill-modal__body')?.innerHTML || '';
   const footHtml = tmp.querySelector('.skill-modal__foot')?.innerHTML || '';
 
+  // 少数扩展还有「动作区」（不是配置字段，通用表单渲染不了）—— 见 SKILL_ACTION_PANELS
+  const panel = SKILL_ACTION_PANELS[skillId];
+  const actionsHtml = panel ? panel.html(skill) : '';
+  // 这些字段真正落在哪个配置键下：默认 `config.skills[<id>]`；
+  // 被后端覆盖的（本子查询）显示**真实的那个键** —— 否则用户照提示去 config.json 里找不到。
+  const savePath = skill.configPath || `config.skills['${skillId}']`;
+
   host.hidden = false;
   host.innerHTML = `<div class="skinline">
     <div class="skinline-head">
@@ -1151,13 +1142,17 @@ function openSkillSettingsInline(skillId, btn) {
       <span class="muted" style="font-size:12px">改动即时生效，无需重启</span>
     </div>
     ${bodyHtml}
+    ${actionsHtml}
     <div class="skinline-foot">
-      <span class="muted" style="font-size:12px">保存在 <code>config.skills['${esc(skillId)}']</code></span>
+      <span class="muted" style="font-size:12px">保存在 <code>${esc(savePath)}</code></span>
       <span class="ph-spacer"></span>
       <button class="btn btn-small" id="skinline-cancel">取消</button>
       <button class="btn btn-primary" id="skinline-save">保存</button>
     </div>
   </div>`;
+  // ⚠️ 动作区的接线必须在**节点已经进 DOM 之后**：它按全局 id 取元素
+  //    （全页同时只展开一个配置表单，见上面"收起别的卡片"那段）。
+  if (panel) panel.bind(skill);
   if (btn) {
     if (!btn.dataset.label) btn.dataset.label = btn.textContent;
     btn.textContent = '收起';
@@ -1783,11 +1778,21 @@ function logLevelOf(line) {
   return 'info';
 }
 
+/**
+ * 折叠时显示最后几行（🆕 2026-09-23 第十二对话，用户点名："给运行日志加个折叠和滑条，
+ * 折叠的时候只显示部分日志"）。取 3：够看出"最近在发生什么"，又不占地方。
+ * ⚠️ 裁剪在 `apply()` 里做（不是 CSS 的 `overflow:hidden`）——
+ *    因为要留的是**最后** N 行，而 CSS 裁切只会留下**最前** N 行。
+ */
+const LOGPANEL_COLLAPSED_ROWS = 3;
+
 /** LogPanel 的静态骨架（页头工具 + 空的日志体）。 */
 function logPanelShell(title, idPrefix, opts = {}) {
   const tabs = [['all', '全部'], ['key', '关键'], ['warn', '警告'], ['error', '错误']]
     .map(([v, label]) => `<span class="chip${v === 'all' ? ' on' : ''}" data-logtab="${v}">${label}</span>`).join('');
-  return `<div class="logpanel" id="${idPrefix}">
+  // ⚠️ 初始就带 `is-collapsed`（默认折叠），初始文案是「展开」—— 与 JS 侧的
+  //    `box.__collapsed = box.classList.contains('is-collapsed')` 成对，别只改一边。
+  return `<div class="logpanel is-collapsed" id="${idPrefix}">
     <div class="logpanel-head">
       <span class="logpanel-title">${esc(title)}</span>
       <span class="logpanel-tabs">${tabs}</span>
@@ -1797,6 +1802,7 @@ function logPanelShell(title, idPrefix, opts = {}) {
       <button class="btn btn-small" data-logact="scroll" title="有新日志时自动滚到底部">自动滚动</button>
       <button class="btn btn-small" data-logact="copy">复制</button>
       <button class="btn btn-small btn-quiet" data-logact="clear">清空</button>
+      <button class="btn btn-small" data-logact="fold" title="折叠 / 展开日志区（折叠时只看最后 ${LOGPANEL_COLLAPSED_ROWS} 行）">展开</button>
     </div>
     <div class="logpanel-body" data-logbody>${opts.emptyText ? `<div class="logpanel-empty">${esc(opts.emptyText)}</div>` : ''}</div>
   </div>`;
@@ -1835,12 +1841,26 @@ function initLogPanel(idPrefix) {
   box.__search = '';
   box.__noise = false;
   box.__autoscroll = true;
+  // 折叠态默认**折叠**（见 logPanelShell 里初始的 `is-collapsed`，两边必须一致）
+  box.__collapsed = box.classList.contains('is-collapsed');
+  const syncFoldBtn = () => {
+    const b = box.querySelector('[data-logact="fold"]');
+    if (!b) return;
+    // 按钮上写的是"点一下会发生什么"，不是当前状态（点了才知道往哪走）
+    b.textContent = box.__collapsed ? '展开' : '收起';
+    b.classList.toggle('on', !box.__collapsed);
+  };
+  syncFoldBtn();
 
   const apply = () => {
     const body = box.querySelector('[data-logbody]');
     if (!body) return;
     const q = box.__search;
-    for (const row of body.querySelectorAll('.logrow')) {
+    const rows = Array.from(body.querySelectorAll('.logrow'));
+    // ── 第一遍：算"本该显示"的集合（档位 + 搜索）──
+    // ⚠️ 这一份**与折叠无关**，`复制` 按它走：折叠只是"少显示几行"，
+    //    不该把"复制"也变成只复制 3 行（那是个很容易踩的坑）。
+    const shows = rows.map((row) => {
       const lvl = row.dataset.lvl || 'info';
       let show = true;
       // 档位：key 档连 error 一起显示（关键行常伴随报错，分开看反而漏）；
@@ -1849,8 +1869,18 @@ function initLogPanel(idPrefix) {
       else if (box.__filter === 'warn') show = lvl !== 'info';
       else if (box.__filter === 'error') show = lvl === 'error' || lvl === 'key';
       if (show && q) show = row.textContent.toLowerCase().includes(q);
-      row.style.display = show ? '' : 'none';
+      return show;
+    });
+    box.__shows = shows;
+    // ── 第二遍：折叠时只留**末尾 N 条**本该显示的 ──
+    const keep = new Set();
+    if (box.__collapsed) {
+      let n = 0;
+      for (let i = rows.length - 1; i >= 0 && n < LOGPANEL_COLLAPSED_ROWS; i--) {
+        if (shows[i]) { keep.add(i); n++; }
+      }
     }
+    rows.forEach((row, i) => { row.style.display = (shows[i] && (!box.__collapsed || keep.has(i))) ? '' : 'none'; });
     box.classList.toggle('hide-noise', box.__noise);
     if (box.__autoscroll) body.scrollTop = body.scrollHeight;
   };
@@ -1875,10 +1905,18 @@ function initLogPanel(idPrefix) {
       box.__autoscroll = !box.__autoscroll;
       act.classList.toggle('on', box.__autoscroll);
       apply();
+    } else if (kind === 'fold') {
+      box.__collapsed = !box.__collapsed;
+      box.classList.toggle('is-collapsed', box.__collapsed);
+      syncFoldBtn();
+      apply();
     } else if (kind === 'copy') {
       const body = box.querySelector('[data-logbody]');
-      const text = body ? Array.from(body.querySelectorAll('.logrow'))
-        .filter((r) => r.style.display !== 'none').map((r) => r.textContent).join('\n') : '';
+      const rows = body ? Array.from(body.querySelectorAll('.logrow')) : [];
+      // ⚠️ 按 `__shows`（档位+搜索的结果）复制，**不按 `display`** ——
+      //    折叠时 display 只剩 3 行，照它复制会让人以为日志丢了。
+      const shows = box.__shows || rows.map((r) => r.style.display !== 'none');
+      const text = rows.filter((r, i) => shows[i]).map((r) => r.textContent).join('\n');
       try { await navigator.clipboard.writeText(text); act.textContent = '已复制'; }
       catch { act.textContent = '复制失败'; }
       setTimeout(() => { act.textContent = '复制'; }, 1200);
@@ -2345,6 +2383,23 @@ async function loadSessionDetail(id, { quiet = false } = {}) {
   }
 }
 
+/**
+ * 长文本折叠块（系统提示 / 本次输入）的**底部收起**入口。
+ *
+ * 🆕 2026-09-23（第十二对话，用户点名）：这两块展开后各几千字符，
+ * 翻到底想收起时得再滚回顶部点 summary —— 所以在内容末尾也放一个收起入口。
+ *
+ * ⚠️ 它必须是 `button` 而**不是** `summary`：`<details>` 只认第一个 `<summary>` 做开关，
+ *    把第二个 `summary` 放到内容末尾会被浏览器当成"摘要区的一部分"，
+ *    后面所有兄弟节点都会变成它的点击范围（内容被吞进标题里）。
+ *    ⇒ 收起动作由 `renderSessionDetail` 末尾统一挂（那里能一次拿到 details 本体）。
+ * 样式与顶部 `summary.pt-sec` 同族，见 style.css 的 `.pt-fold-foot`。
+ */
+function foldFootHtml(label) {
+  return `<button type="button" class="pt-fold-foot" data-fold-close="1">`
+    + `<span class="chev">▴</span>收起${esc(label)}</button>`;
+}
+
 function renderSessionDetail(s) {
   const detail = $('#session-detail');
   if (!detail) return;
@@ -2425,17 +2480,22 @@ function renderSessionDetail(s) {
           <div class="pt-code">
             <div class="pt-code-head"><span>text</span><span class="pt-tag grey">${s.systemPrompt.length} 字符</span></div>
             <pre>${esc(s.systemPrompt)}</pre>
+            ${foldFootHtml('系统提示')}
           </div>
         </details>`);
     }
     if (s.userPrompt) {
+      // ⚠️ 2026-09-23（第十二对话，用户点名）：**默认折叠**。
+      //    原来这里带 `open` ⇒ 一进会话详情就被几千字符的输入铺满整屏，
+      //    真正想先看的（触发/时间/模型/用量/过程）反而被顶到屏幕外。
       html.push(`
-        <details class="collapsible pt-fold" open>
+        <details class="collapsible pt-fold">
           <summary class="pt-sec"><span class="chev">▸</span>本次输入
             <span class="m">${s.userPrompt.length} 字符 —— 零对话历史，全部来自 JSON 存档</span></summary>
           <div class="pt-code">
             <div class="pt-code-head"><span>text</span><span class="pt-tag grey">${s.userPrompt.length} 字符</span></div>
             <pre>${esc(s.userPrompt)}</pre>
+            ${foldFootHtml('本次输入')}
           </div>
         </details>`);
     }
@@ -2498,6 +2558,19 @@ function renderSessionDetail(s) {
   detail.querySelectorAll('details.collapsible').forEach((d, i) => openStates.set(i, d.open));
   detail.innerHTML = html.join('');
   detail.querySelectorAll('details.collapsible').forEach((d, i) => { if (openStates.has(i)) d.open = openStates.get(i); });
+  // 底部「收起」入口要自己关所属的 details（它是 button 不是 summary，见 foldFootHtml 的注释）。
+  // ⚠️ 必须挂在**重渲染之后**的新 DOM 上 —— 上面那句 innerHTML 把旧节点全换掉了，
+  //    在渲染前挂等于挂在已经不在页面上的元素上（症状是"按钮点了没反应"，不报错）。
+  detail.querySelectorAll('[data-fold-close]').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      const d = b.closest('details.pt-fold');
+      if (!d) return;
+      d.open = false;
+      // 收起后这一块的高度骤减，别让人停在"半空"里：把折叠标题滚回可视区
+      d.scrollIntoView({ block: 'nearest' });
+    });
+  });
   const jsonBtn = $('#json-mode-btn');
   if (jsonBtn) jsonBtn.addEventListener('click', () => {
     state.sessionJsonMode = state.sessionJsonMode === s.id ? null : s.id;
@@ -4180,20 +4253,22 @@ function renderMemoryList() {
   //    详见 src/proposals.js 顶部的边界说明。
   renderProposalReview();
 
-  // 「显示空记忆」开关（**常驻元素、只绑一次**；状态记在 localStorage 里）
-  // ⚠️ UI 改造第二阶段条目 5：这个开关原来在**列表头**，现在移到记忆详情的「记忆」分区标题右侧
-  //    （方案要求"「显示空记忆」归位其右侧"——它管的是"详情里列哪些人"，放列表头语义错位）。
-  // ⚠️ 它现在住在**每轮重建的详情区**里 ⇒ 每次重建都会换一个新元素，
-  //    所以 `__bound` 这个"只绑一次"的守卫必须**每次渲染后清掉**，否则第二次渲染后
-  //    新元素上没有监听器 —— 开关变死件（点不动、也不报错）。
+  // 「显示空记忆」开关 —— 2026-09-23（第十二对话，用户点名）**归位左栏列表头**。
+  // ⚠️ 它现在是**常驻元素**（在 index.html 的 .list-head--row 里，`renderMemoryList` 只重绘
+  //    `#memory-items`，碰不到它）⇒ 监听器**只能绑一次**，用 `__bound` 守住。
+  //    它以前住在**每轮重建的详情区**里，那里必须每次重绑，还专门为此写过一段注释；
+  //    迁回列表头之后那个坑自然消失了 —— 但守卫必须留着：本函数每 15 秒被调一次。
   const showEmptyBox = $('#mem-show-empty');
   if (showEmptyBox) {
-    showEmptyBox.checked = state.showEmptyMemory === true;
-    showEmptyBox.addEventListener('change', () => {
-      state.showEmptyMemory = showEmptyBox.checked;
-      try { localStorage.setItem('dsh-mem-show-empty', showEmptyBox.checked ? '1' : '0'); } catch { /* ignore */ }
-      renderMemoryList();
-    });
+    showEmptyBox.checked = state.showEmptyMemory === true;   // 同步状态（幂等，每次都可以做）
+    if (!showEmptyBox.__bound) {
+      showEmptyBox.__bound = true;
+      showEmptyBox.addEventListener('change', () => {
+        state.showEmptyMemory = showEmptyBox.checked;
+        try { localStorage.setItem('dsh-mem-show-empty', showEmptyBox.checked ? '1' : '0'); } catch { /* ignore */ }
+        renderMemoryList();
+      });
+    }
   }
 
   // 空记忆（白名单里还没有记忆文件的会话）默认不显示；手动隐藏过的同理。
@@ -4403,14 +4478,10 @@ async function loadMemoryDetail(chatKey) {
         </div>
       </div>
       ${memInteropHtml(chatKey)}
-      <div class="pt-sec">记忆 <span class="muted" style="font-weight:400">这个会话记住的每个人</span>
-        <span class="ph-spacer"></span>
-        <label class="toggle" id="mem-empty-toggle-wrap" title="勾上之后，白名单里那些还没有记忆文件的会话也会出现在左侧列表里 —— 便于点进去手动添加印象">
-          <input type="checkbox" id="mem-show-empty">
-          <span class="tg-track"><span class="tg-knob"></span></span>
-          <span class="tg-text">显示空记忆</span>
-        </label>
-      </div>
+      <!-- 「显示空记忆」开关**已挪到左栏列表头**（2026-09-23 第十二对话，用户点名）。
+           ⚠️ 这里不要再放第二个：全页只能有一个 #mem-show-empty —— 同名 id 会让
+              $('#mem-show-empty') 静默只拿到第一个，第二个变成点不动的死件。 -->
+      <div class="pt-sec">记忆 <span class="muted" style="font-weight:400">这个会话记住的每个人</span></div>
       ${membersHtml}
       ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>'}
     `;
@@ -6474,73 +6545,286 @@ function renderApiSection(c) {
 }
 
 
+
+/**
+ * 本子查询的「动作区」HTML —— 检测连通 / 试查一次 / 离线库状态 + 导入。
+ *
+ * 🆕 2026-09-23（第十二对话）：从**设置页**搬到这里（用户点名："skill 和插件是为了方便
+ * 安装卸载新增才开发的，加到设置页有点不合理"）。
+ * 字段（返回几本 / 超时 / 群里允许 / 工具目录 / Python 解释器）**不在这里**：
+ * 它们由 skills/doujin-lookup/skill.json 的 configSchema 声明，走通用技能表单渲染 ——
+ * 所以这个函数只负责"通用表单渲染不了的东西"（按钮与状态行）。
+ */
+function doujinToolsHtml() {
+  return `
+      <div class="dj-tools">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-small" id="doujin-check-btn">检测连通</button>
+          <button class="btn btn-small" id="doujin-search-btn">试查"校园"</button>
+          <span id="doujin-check-hint" class="muted" style="font-size:12px"></span>
+        </div>
+        <div style="margin-top:10px">
+          <div id="doujin-db-line" class="muted" style="font-size:12px">离线库：读取中…</div>
+          <div id="doujin-db-note" class="muted" style="font-size:12px"></div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <!-- 原生 <input type=file> 的按钮是系统样式，与 UI 割裂：隐藏本体，用统一的 .btn 触发 -->
+            <input type="file" id="doujin-import-file" accept=".db,.sqlite,.csv" style="display:none" />
+            <button class="btn btn-small" id="doujin-import-btn">导入离线库（.db / .csv）</button>
+            <span id="doujin-import-hint" class="muted" style="font-size:12px"></span>
+          </div>
+          <!-- file.path 拿不到时的退路（较新的 Electron 只给 File 对象、不给真实路径）：
+               让用户直接把路径粘进来。默认隐藏，只有真拿不到才显示。 -->
+          <div id="doujin-import-manual" style="display:none;margin-top:6px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="text" id="doujin-import-path" placeholder="把离线库/CSV 的完整路径粘到这里，例如 D:\\data\\nh.db"
+                style="flex:1;min-width:320px" />
+              <button class="btn btn-small" id="doujin-import-go">用这个路径导入</button>
+            </div>
+          </div>
+          <div class="hint">
+            导入 <code>.csv</code> 会本地转成 <code>nh.db</code>（约几秒，期间别关窗口）；
+            导入 <code>.db</code>/<code>.sqlite</code> 是直接换库，旧库自动改名备份。
+            ⚠️ 只校验文件头/表头，表结构不对要到<b>下一次真实查询</b>才会暴露。
+          </div>
+          <details class="hint-more">
+            <summary>说明：表头要求、备份与回滚、耗时</summary>
+            <div class="hint-more-body">
+              表头要能对上 <code>id,title,upload_date,tags</code>；Excel 的 <code>.xlsx</code> 不行，
+              先在 Excel 里「另存为 → CSV UTF-8」。<br>
+              实测 52 万行 / 89.4MB 的表约 <b>2~3 秒</b>（本机 2.3 秒）；转换期间 JM 查询会排队等它跑完。<br>
+              旧库会改名成 <code>nh.db.bak-日期-时间</code> 留在原地；想回滚就把备份改回 <code>nh.db</code>。<br>
+              库文件在<b>你选的路径上就地生效</b>（即配置里的这个路径；改路径要保存才生效）。
+            </div>
+          </details>
+        </div>
+        <div class="hint">
+          JM 搜索是<b>真直连</b>（本机 Python 子进程，不需要代理）。<b>首次查询约 3 秒</b>，之后同一进程内就快了。
+          ⚠️ 兜底的 NH 离线库标题<b>几乎全是英文</b>，中文/日文关键词基本查不到 —— 模型会自己先翻成英文再查。
+        </div>
+      </div>`;
+}
+
+/**
+ * 少数扩展的**动作区**声明（不是配置字段，通用表单渲染不了）。
+ *
+ * 现状只有本子查询：「检测连通 / 试查一次 / 离线库导入」。
+ * ⚠️ 为什么用一张声明表，而不是给 configSchema 加一种新字段类型：
+ *    动作要绑事件、要读写 DOM、要发请求 —— 塞进 `renderSkillSettingsModal` 那套
+ *    "按 type 渲染一个输入框"的通用逻辑里，会把那份逻辑弄脏（那段代码顶部专门写了
+ *    "不重写表单"的理由）。与后端 `ENABLED_BY_PATH` / `CONFIG_BY_PATH` 同一取向：
+ *    **特例声明在明处**，不藏在通用路径里。
+ */
+const SKILL_ACTION_PANELS = {
+  'doujin-lookup': { html: () => doujinToolsHtml(), bind: () => bindDoujinTools() },
+};
+
+/** 给当前 DOM 里的本子查询动作区接线。 */
+function bindDoujinTools() {
+    // ── 本子查询：检测连通 / 试查一次 ──
+    const djHint = $('#doujin-check-hint');
+    const djSay = (t, color) => { if (djHint) { djHint.textContent = t; djHint.style.color = color || ''; } };
+
+    // 进设置页就顺手看一眼"工具目录 / 脚本 / 解释器 / NH 库"在不在。
+    // ⚠️ 不带 ping：那条会拉起 Python 子进程，进个设置页不该有这种副作用。
+    // 为什么要**主动**查：本子查询最容易的坏法是静默失效（开关开着、接口 200、就是查不到东西），
+    // 与其等模型查空了再回来猜，不如在这里直接说清"缺什么、本该在哪"。
+    (async () => {
+      if (!djHint) return;
+      try {
+        const r = await api('/api/doujin/status');
+        const p = r.paths || {};
+        if (p.hint) djSay(`⚠️ ${p.hint}`, 'var(--orange)');
+        else if (p.toolDir) djSay(`工具目录：${p.toolDir}　${p.toolDirFromConfig ? '（设置里指定的）' : '（自动找到的）'}`, 'var(--muted)');
+      } catch { /* 后端没起来就不显示 —— 设置页不该因为这一条显示不出来而报错 */ }
+    })();
+
+    $('#doujin-check-btn')?.addEventListener('click', async () => {
+      const btn = $('#doujin-check-btn');
+      btn.disabled = true; djSay('检测中…首次要 3 秒左右（拉子进程 + 探域名）');
+      try {
+        const r = await api('/api/doujin/status?ping=1');
+        const p = r.paths || {};
+        const okAll = p.serverExists && r.ping?.ok;
+        const detail = `脚本 ${p.serverExists ? '✓' : '✗'} · NH库 ${p.nhDbExists ? '✓' : '✗'} · ping ${r.ping?.ok ? '✓' : '✗ ' + (r.ping?.error || '')}`
+          + ` — 解释器：${p.pythonPath}`;
+        // 有 hint 就优先显示它 —— 那是一句人话（"工具目录不存在：… 找过这些位置都没有：…"），
+        // 比一串 ✓/✗ 更能直接告诉人该去干什么
+        djSay(p.hint ? `⚠️ ${p.hint}　〔${detail}〕` : detail, okAll ? 'var(--green)' : 'var(--orange)');
+      } catch (e) { djSay(`检测失败：${e.message}`, 'var(--orange)'); }
+      btn.disabled = false;
+    });
+    $('#doujin-search-btn')?.addEventListener('click', async () => {
+      const btn = $('#doujin-search-btn');
+      btn.disabled = true; djSay('查「校园」中…');
+      try {
+        const r = await api('/api/doujin/test', { method: 'POST', body: JSON.stringify({ keyword: '校园' }) });
+        const res = r.result || {};
+        if (!res.ok) djSay(`查询失败：${res.error}`, 'var(--orange)');
+        else {
+          const items = res.items || [];
+          const one = items[0];
+          djSay(`查到 ${res.total} 条（取前 ${items.length}）：${one ? `码 ${one.code}、标题 ${String(one.title).length} 字` : '（空）'}`
+            + `  用时 ${res.ms}ms`, 'var(--green)');
+        }
+      } catch (e) { djSay(`查询失败：${e.message}`, 'var(--orange)'); }
+      btn.disabled = false;
+    });
+
+    // ── 本子查询：离线库（nh.db）状态 + 导入 ──
+    const djDbLine = $('#doujin-db-line');
+    const djDbSay = (t, color) => { if (djDbLine) { djDbLine.textContent = t; djDbLine.style.color = color || ''; } };
+    const djiHint = $('#doujin-import-hint');
+    const djiSay = (t, color) => { if (djiHint) { djiHint.textContent = t; djiHint.style.color = color || ''; } };
+    const djNote = $('#doujin-db-note');
+    const djNoteSay = (t, color) => { if (djNote) { djNote.textContent = t; djNote.style.color = color || ''; } };
+
+    /** MB 显示：小文件别显示成 0.00 MB。 */
+    const fmtMB = (n) => {
+      const b = Number(n) || 0;
+      if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
+      return `${(b / 1024 / 1024).toFixed(1)} MB`;
+    };
+    /** 行数：几十万也带千分位，一眼能看出量级。 */
+    const fmtNum = (n) => {
+      const v = Number(n);
+      return Number.isFinite(v) ? v.toLocaleString('en-US') : String(n ?? '');
+    };
+
+    // 刷新「离线库：<路径> — <状态>」那一行（数据来自 /api/doujin/db-info，只读、不拉子进程）
+    const refreshDoujinDbInfo = async () => {
+      if (!djDbLine) return;
+      try {
+        const r = await api('/api/doujin/db-info');
+        const d = r.db || {};
+        if (!d.exists) {
+          djDbSay(`离线库：${d.path || '(未配置路径)'} — 未导入（用下面的按钮导入 .db 或 .csv）`, 'var(--orange)');
+          return;
+        }
+        // rows 只有小库才给（大库数一遍太贵，后端会省略）—— 有就带上，没有就不编
+        const extra = [
+          d.rows !== undefined ? `${fmtNum(d.rows)} 行` : '',
+          d.hasIndex === true ? '带标题索引' : (d.hasIndex === false ? '⚠️ 缺 idx_nh_title 索引' : ''),
+          d.valid === false ? '⚠️ 不是 SQLite 文件' : ''
+        ].filter(Boolean).join(' · ');
+        djDbSay(`离线库：${d.path} — 已导入 ${fmtMB(d.bytes)}${extra ? `（${extra}）` : ''}`,
+          d.valid === false ? 'var(--orange)' : 'var(--muted)');
+      } catch (e) {
+        djDbSay(`离线库信息读取失败：${e.message}`, 'var(--orange)');
+      }
+    };
+    void refreshDoujinDbInfo();
+
+    /**
+     * 取 File 对象的真实路径。
+     * Electron < 32 上 `File.path` 直接可用；较新版本改成 `webUtils.getPathForFile()`
+     * （只能在有 preload 的渲染进程里拿到）。这个应用**没有 preload**、渲染进程也没有 Node，
+     * 所以两条都试一遍，拿不到就返回空串 —— 由调用方走"手填路径"那条路，绝不猜。
+     */
+    const pathOfFile = (f) => {
+      if (!f) return '';
+      try {
+        if (typeof f.path === 'string' && f.path) return f.path;
+      } catch { /* 某些版本上访问它会抛 */ }
+      try {
+        const wu = globalThis.webUtils || globalThis.require?.('electron')?.webUtils;
+        if (wu?.getPathForFile) return String(wu.getPathForFile(f) || '');
+      } catch { /* 拿不到就走手填 */ }
+      return '';
+    };
+
+    const djImportFile = $('#doujin-import-file');
+    const djImportBtn = $('#doujin-import-btn');
+    const djImportManual = $('#doujin-import-manual');
+
+    /** 真正发请求那一步：两条路（选文件 / 手填路径）最后都汇到这里。 */
+    const runDoujinImport = async (p) => {
+      const btn = djImportBtn;
+      const isCsv = /\.csv$/i.test(p);
+      if (btn) { btn.disabled = true; btn.textContent = '导入中…'; }
+      djNoteSay('');
+      djiSay(isCsv
+        ? `正在转库（本地跑，52 万行实测约 2~3 秒）…期间 JM 查询会排队等它`
+        : `正在安装数据库…`, 'var(--muted)');
+      try {
+        const r = await api('/api/doujin/import-db', { method: 'POST', body: JSON.stringify({ path: p }) });
+        // 后端 ok:false 也走不到这里（api() 会把非 2xx 抛出来），但 .csv 转库失败是 200 + error，
+        // 所以两种都要判 —— 而且 **error 原文照显示**，那是给用户看的一句话，不能吃掉换成泛化文案
+        if (!r.ok) {
+          djiSay(`导入失败：${r.error || '未知原因'}`, 'var(--orange)');
+          return;
+        }
+        const size = r.bytes != null ? `，${fmtMB(r.bytes)}` : '';
+        if (r.kind === 'csv') {
+          djiSay(`导入成功：${fmtNum(r.rows)} 行${size}（用了 ${r.ms != null ? Math.round(r.ms / 1000) + ' 秒' : '—'}）`, 'var(--green)');
+        } else {
+          djiSay(`导入成功：已换上 ${fmtMB(r.bytes)} 的库`
+            + (r.backup ? `，旧库备份在 ${r.backup}` : '（原本没有旧库，未产生备份）'), 'var(--green)');
+        }
+        // 后端如实说明了"只校验文件头、表结构要靠下一次真实查询暴露" —— 单独一行显示，不跟成功文案揉一起
+        if (r.note) djNoteSay(r.note, 'var(--muted)');
+      } catch (e) {
+        // 502/500 也带着后端那句人话（api() 已经把它塞进 e.message 了）
+        djiSay(`导入失败：${e.message}`, 'var(--orange)');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '导入离线库（.db / .csv）'; }
+        // 导入完刷新那一行（成败都刷：失败的 .csv 也可能已经留下半成品别的东西）
+        void refreshDoujinDbInfo();
+      }
+    };
+
+    djImportBtn?.addEventListener('click', () => {
+      if (!djImportFile) {
+        // 连 file input 都没有（老页面/被裁过）→ 直接给手填那条路
+        if (djImportManual) djImportManual.style.display = '';
+        djiSay('把文件路径填到下面的输入框里再点「用这个路径导入」', 'var(--orange)');
+        return;
+      }
+      djImportFile.value = '';   // 清空：选同一个文件第二次也要能触发 change
+      djImportFile.click();
+    });
+
+    djImportFile?.addEventListener('change', (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const p = pathOfFile(f);
+      if (p) {
+        if (djImportManual) djImportManual.style.display = 'none';
+        djiSay(`已选中：${f.name}`, 'var(--muted)');
+        void runDoujinImport(p);
+        return;
+      }
+      // 拿不到真实路径：明确告诉用户该怎么办，并把输入框亮出来
+      if (djImportManual) djImportManual.style.display = '';
+      djiSay('这个 Electron 版本拿不到文件真实路径 —— 请把完整路径填到下面的输入框，再点「用这个路径导入」', 'var(--orange)');
+      const box = $('#doujin-import-path');
+      if (box) { box.focus(); if (!box.value) box.placeholder = `例如：D:\\data\\${f.name}`; }
+    });
+
+    $('#doujin-import-go')?.addEventListener('click', () => {
+      const p = String($('#doujin-import-path')?.value || '').trim().replace(/^"(.*)"$/, '$1');
+      if (!p) { djiSay('先填一个路径再点它', 'var(--orange)'); return; }
+      void runDoujinImport(p);
+    });
+
+}
+
 function renderSearchSection(c) {
   // 每个提供方区块的初始显隐都要跟当前 provider 一致
   const prov = String(c.webSearch?.provider || 'bing');
   // 自定义搜索提供商列表（可多个），用于动态生成下拉框选项
   const customProvs = Array.isArray(c.webSearch?.providers) ? c.webSearch.providers : [];
   return `
-    <div class="field">
-      <div class="checkbox-row"><input type="checkbox" id="cfg-doujin" ${c.doujinLookup?.enabled ? 'checked' : ''} />
-        <label for="cfg-doujin">本子查询：启用 <code>doujin-lookup__lookup</code> 工具（由 <code>skills/doujin-lookup/</code> 提供；JM 禁漫<b>直连</b>查「本子码 + 名字」，JM 搜不到时用本地 NH 英文库兜底）</label></div>
-      <div class="field-row">
-        <div class="field"><label>一次最多返回几本</label>
-          <input type="number" id="cfg-doujin-max" min="1" max="50" value="${esc(c.doujinLookup?.maxResults ?? 10)}" /></div>
-        <div class="field"><label>单次查询超时（毫秒）</label>
-          <input type="number" id="cfg-doujin-timeout" min="3000" max="120000" value="${esc(c.doujinLookup?.timeoutMs ?? 30000)}" /></div>
-        <div class="field"><label>群聊里也允许</label>
-          <span><input type="checkbox" id="cfg-doujin-group" ${c.doujinLookup?.allowInGroup !== false ? 'checked' : ''} /> 允许</span>
-          <div class="hint">关掉则只在<b>私聊</b>里可用 —— 群聊里发本子名容易被盯上。</div></div>
-      </div>
-      <div class="field-row">
-        <div class="field"><label>工具目录（留空＝默认）</label>
-          <input type="text" id="cfg-doujin-dir" value="${esc(c.doujinLookup?.toolDir || '')}" placeholder="&lt;dsh qq&gt;/JM工具" /></div>
-        <div class="field"><label>Python 解释器（留空＝自动找 venv）</label>
-          <input type="text" id="cfg-doujin-python" value="${esc(c.doujinLookup?.pythonPath || '')}" placeholder="自动" /></div>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
-        <button class="btn btn-small" id="doujin-check-btn">检测连通</button>
-        <button class="btn btn-small" id="doujin-search-btn">试查"校园"</button>
-        <span id="doujin-check-hint" class="muted" style="font-size:12px"></span>
-      </div>
-
-      <div style="margin-top:10px">
-        <div id="doujin-db-line" class="muted" style="font-size:12px">离线库：读取中…</div>
-        <div id="doujin-db-note" class="muted" style="font-size:12px"></div>
-        <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
-          <!-- 原生 <input type=file> 的按钮是系统样式，与 UI 割裂：隐藏本体，用统一的 .btn 触发（同意见反馈那张图） -->
-          <input type="file" id="doujin-import-file" accept=".db,.sqlite,.csv" style="display:none" />
-          <button class="btn btn-small" id="doujin-import-btn">导入离线库（.db / .csv）</button>
-          <span id="doujin-import-hint" class="muted" style="font-size:12px"></span>
-        </div>
-        <!-- file.path 拿不到时的退路（较新的 Electron 只给 File 对象、不给真实路径）：
-             让用户直接把路径粘进来。默认隐藏，只有真拿不到才显示。 -->
-        <div id="doujin-import-manual" style="display:none;margin-top:6px">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <input type="text" id="doujin-import-path" placeholder="把离线库/CSV 的完整路径粘到这里，例如 D:\data\nh.db"
-              style="flex:1;min-width:320px" />
-            <button class="btn btn-small" id="doujin-import-go">用这个路径导入</button>
-          </div>
-        </div>
-        <div class="hint">
-          导入 <code>.csv</code> 会本地转成 <code>nh.db</code>（约几秒，期间别关窗口）；
-          导入 <code>.db</code>/<code>.sqlite</code> 是直接换库，旧库自动改名备份。
-          ⚠️ 只校验文件头/表头，表结构不对要到<b>下一次真实查询</b>才会暴露。
-        </div>
-        <details class="hint-more">
-          <summary>说明：表头要求、备份与回滚、耗时</summary>
-          <div class="hint-more-body">
-            表头要能对上 <code>id,title,upload_date,tags</code>；Excel 的 <code>.xlsx</code> 不行，
-            先在 Excel 里「另存为 → CSV UTF-8」。<br>
-            实测 52 万行 / 89.4MB 的表约 <b>2~3 秒</b>（本机 2.3 秒）；转换期间 JM 查询会排队等它跑完。<br>
-            旧库会改名成 <code>nh.db.bak-日期-时间</code> 留在原地；想回滚就把备份改回 <code>nh.db</code>。<br>
-            库文件在<b>你选的路径上就地生效</b>（即配置里的这个路径；改路径要保存才生效）。
-          </div>
-        </details>
-      </div>
-      <div class="hint">
-        JM 搜索是<b>真直连</b>（本机 Python 子进程，不需要代理）。<b>首次查询约 3 秒</b>，之后同一进程内就快了。
-        ⚠️ 兜底的 NH 离线库标题<b>几乎全是英文</b>，中文/日文关键词基本查不到 —— 模型会自己先翻成英文再查。
+    <!-- ⛔ 本子查询的设置**已整段搬到技能页**（2026-09-23 第十二对话，用户点名：
+         "skill 和插件是为了方便安装卸载新增才开发的，加到设置页有点不合理"）。
+         字段本身由 skills/doujin-lookup/skill.json 的 configSchema 声明（通用表单渲染），
+         「检测连通 / 试查一次 / 导入离线库」那几个动作也在技能页的「配置」里
+         （见 ui/app.js 的 SKILL_ACTION_PANELS）。
+         ⇒ 这里只留一行指路，**不要再把表单加回来**：两处都能改必然漂移。 -->
+    <div class="hint">
+      <b>本子查询</b>（JM 禁漫直连 + 本地 NH 英文库兜底）的设置已移到
+      <b>技能</b>页 → <code>本子查询</code> → <code>配置</code>；
+      那里同时有「检测连通 / 试查一次 / 导入离线库」。
+    </div>
       </div>
     </div>
 
@@ -7240,7 +7524,7 @@ function renderDesktopSection(c) {
     <h3>界面</h3>
     <div class="field"><label>主题</label>
       <div class="theme-picker" id="theme-picker">
-        ${['light', 'dark', 'system', '?'].map((t) => `
+        ${THEME_VALUES.map((t) => `
           <div class="theme-option${getThemePref() === t ? ' on' : ''}" data-theme-opt="${t}" role="button" tabindex="0">
             <span class="t-ico">${THEME_ICON[t]}</span>
             <span>${THEME_LABEL[t]}</span>
@@ -7578,192 +7862,6 @@ function bindSettingsEvents(c) {
 
   // ── 屏蔽名单 ──
   $('#blocklist-btn')?.addEventListener('click', () => openBlocklistModal());
-
-  // ── 本子查询：检测连通 / 试查一次 ──
-  const djHint = $('#doujin-check-hint');
-  const djSay = (t, color) => { if (djHint) { djHint.textContent = t; djHint.style.color = color || ''; } };
-
-  // 进设置页就顺手看一眼"工具目录 / 脚本 / 解释器 / NH 库"在不在。
-  // ⚠️ 不带 ping：那条会拉起 Python 子进程，进个设置页不该有这种副作用。
-  // 为什么要**主动**查：本子查询最容易的坏法是静默失效（开关开着、接口 200、就是查不到东西），
-  // 与其等模型查空了再回来猜，不如在这里直接说清"缺什么、本该在哪"。
-  (async () => {
-    if (!djHint) return;
-    try {
-      const r = await api('/api/doujin/status');
-      const p = r.paths || {};
-      if (p.hint) djSay(`⚠️ ${p.hint}`, 'var(--orange)');
-      else if (p.toolDir) djSay(`工具目录：${p.toolDir}　${p.toolDirFromConfig ? '（设置里指定的）' : '（自动找到的）'}`, 'var(--muted)');
-    } catch { /* 后端没起来就不显示 —— 设置页不该因为这一条显示不出来而报错 */ }
-  })();
-
-  $('#doujin-check-btn')?.addEventListener('click', async () => {
-    const btn = $('#doujin-check-btn');
-    btn.disabled = true; djSay('检测中…首次要 3 秒左右（拉子进程 + 探域名）');
-    try {
-      const r = await api('/api/doujin/status?ping=1');
-      const p = r.paths || {};
-      const okAll = p.serverExists && r.ping?.ok;
-      const detail = `脚本 ${p.serverExists ? '✓' : '✗'} · NH库 ${p.nhDbExists ? '✓' : '✗'} · ping ${r.ping?.ok ? '✓' : '✗ ' + (r.ping?.error || '')}`
-        + ` — 解释器：${p.pythonPath}`;
-      // 有 hint 就优先显示它 —— 那是一句人话（"工具目录不存在：… 找过这些位置都没有：…"），
-      // 比一串 ✓/✗ 更能直接告诉人该去干什么
-      djSay(p.hint ? `⚠️ ${p.hint}　〔${detail}〕` : detail, okAll ? 'var(--green)' : 'var(--orange)');
-    } catch (e) { djSay(`检测失败：${e.message}`, 'var(--orange)'); }
-    btn.disabled = false;
-  });
-  $('#doujin-search-btn')?.addEventListener('click', async () => {
-    const btn = $('#doujin-search-btn');
-    btn.disabled = true; djSay('查「校园」中…');
-    try {
-      const r = await api('/api/doujin/test', { method: 'POST', body: JSON.stringify({ keyword: '校园' }) });
-      const res = r.result || {};
-      if (!res.ok) djSay(`查询失败：${res.error}`, 'var(--orange)');
-      else {
-        const items = res.items || [];
-        const one = items[0];
-        djSay(`查到 ${res.total} 条（取前 ${items.length}）：${one ? `码 ${one.code}、标题 ${String(one.title).length} 字` : '（空）'}`
-          + `  用时 ${res.ms}ms`, 'var(--green)');
-      }
-    } catch (e) { djSay(`查询失败：${e.message}`, 'var(--orange)'); }
-    btn.disabled = false;
-  });
-
-  // ── 本子查询：离线库（nh.db）状态 + 导入 ──
-  const djDbLine = $('#doujin-db-line');
-  const djDbSay = (t, color) => { if (djDbLine) { djDbLine.textContent = t; djDbLine.style.color = color || ''; } };
-  const djiHint = $('#doujin-import-hint');
-  const djiSay = (t, color) => { if (djiHint) { djiHint.textContent = t; djiHint.style.color = color || ''; } };
-  const djNote = $('#doujin-db-note');
-  const djNoteSay = (t, color) => { if (djNote) { djNote.textContent = t; djNote.style.color = color || ''; } };
-
-  /** MB 显示：小文件别显示成 0.00 MB。 */
-  const fmtMB = (n) => {
-    const b = Number(n) || 0;
-    if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
-    return `${(b / 1024 / 1024).toFixed(1)} MB`;
-  };
-  /** 行数：几十万也带千分位，一眼能看出量级。 */
-  const fmtNum = (n) => {
-    const v = Number(n);
-    return Number.isFinite(v) ? v.toLocaleString('en-US') : String(n ?? '');
-  };
-
-  // 刷新「离线库：<路径> — <状态>」那一行（数据来自 /api/doujin/db-info，只读、不拉子进程）
-  const refreshDoujinDbInfo = async () => {
-    if (!djDbLine) return;
-    try {
-      const r = await api('/api/doujin/db-info');
-      const d = r.db || {};
-      if (!d.exists) {
-        djDbSay(`离线库：${d.path || '(未配置路径)'} — 未导入（用下面的按钮导入 .db 或 .csv）`, 'var(--orange)');
-        return;
-      }
-      // rows 只有小库才给（大库数一遍太贵，后端会省略）—— 有就带上，没有就不编
-      const extra = [
-        d.rows !== undefined ? `${fmtNum(d.rows)} 行` : '',
-        d.hasIndex === true ? '带标题索引' : (d.hasIndex === false ? '⚠️ 缺 idx_nh_title 索引' : ''),
-        d.valid === false ? '⚠️ 不是 SQLite 文件' : ''
-      ].filter(Boolean).join(' · ');
-      djDbSay(`离线库：${d.path} — 已导入 ${fmtMB(d.bytes)}${extra ? `（${extra}）` : ''}`,
-        d.valid === false ? 'var(--orange)' : 'var(--muted)');
-    } catch (e) {
-      djDbSay(`离线库信息读取失败：${e.message}`, 'var(--orange)');
-    }
-  };
-  void refreshDoujinDbInfo();
-
-  /**
-   * 取 File 对象的真实路径。
-   * Electron < 32 上 `File.path` 直接可用；较新版本改成 `webUtils.getPathForFile()`
-   * （只能在有 preload 的渲染进程里拿到）。这个应用**没有 preload**、渲染进程也没有 Node，
-   * 所以两条都试一遍，拿不到就返回空串 —— 由调用方走"手填路径"那条路，绝不猜。
-   */
-  const pathOfFile = (f) => {
-    if (!f) return '';
-    try {
-      if (typeof f.path === 'string' && f.path) return f.path;
-    } catch { /* 某些版本上访问它会抛 */ }
-    try {
-      const wu = globalThis.webUtils || globalThis.require?.('electron')?.webUtils;
-      if (wu?.getPathForFile) return String(wu.getPathForFile(f) || '');
-    } catch { /* 拿不到就走手填 */ }
-    return '';
-  };
-
-  const djImportFile = $('#doujin-import-file');
-  const djImportBtn = $('#doujin-import-btn');
-  const djImportManual = $('#doujin-import-manual');
-
-  /** 真正发请求那一步：两条路（选文件 / 手填路径）最后都汇到这里。 */
-  const runDoujinImport = async (p) => {
-    const btn = djImportBtn;
-    const isCsv = /\.csv$/i.test(p);
-    if (btn) { btn.disabled = true; btn.textContent = '导入中…'; }
-    djNoteSay('');
-    djiSay(isCsv
-      ? `正在转库（本地跑，52 万行实测约 2~3 秒）…期间 JM 查询会排队等它`
-      : `正在安装数据库…`, 'var(--muted)');
-    try {
-      const r = await api('/api/doujin/import-db', { method: 'POST', body: JSON.stringify({ path: p }) });
-      // 后端 ok:false 也走不到这里（api() 会把非 2xx 抛出来），但 .csv 转库失败是 200 + error，
-      // 所以两种都要判 —— 而且 **error 原文照显示**，那是给用户看的一句话，不能吃掉换成泛化文案
-      if (!r.ok) {
-        djiSay(`导入失败：${r.error || '未知原因'}`, 'var(--orange)');
-        return;
-      }
-      const size = r.bytes != null ? `，${fmtMB(r.bytes)}` : '';
-      if (r.kind === 'csv') {
-        djiSay(`导入成功：${fmtNum(r.rows)} 行${size}（用了 ${r.ms != null ? Math.round(r.ms / 1000) + ' 秒' : '—'}）`, 'var(--green)');
-      } else {
-        djiSay(`导入成功：已换上 ${fmtMB(r.bytes)} 的库`
-          + (r.backup ? `，旧库备份在 ${r.backup}` : '（原本没有旧库，未产生备份）'), 'var(--green)');
-      }
-      // 后端如实说明了"只校验文件头、表结构要靠下一次真实查询暴露" —— 单独一行显示，不跟成功文案揉一起
-      if (r.note) djNoteSay(r.note, 'var(--muted)');
-    } catch (e) {
-      // 502/500 也带着后端那句人话（api() 已经把它塞进 e.message 了）
-      djiSay(`导入失败：${e.message}`, 'var(--orange)');
-    } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '导入离线库（.db / .csv）'; }
-      // 导入完刷新那一行（成败都刷：失败的 .csv 也可能已经留下半成品别的东西）
-      void refreshDoujinDbInfo();
-    }
-  };
-
-  djImportBtn?.addEventListener('click', () => {
-    if (!djImportFile) {
-      // 连 file input 都没有（老页面/被裁过）→ 直接给手填那条路
-      if (djImportManual) djImportManual.style.display = '';
-      djiSay('把文件路径填到下面的输入框里再点「用这个路径导入」', 'var(--orange)');
-      return;
-    }
-    djImportFile.value = '';   // 清空：选同一个文件第二次也要能触发 change
-    djImportFile.click();
-  });
-
-  djImportFile?.addEventListener('change', (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const p = pathOfFile(f);
-    if (p) {
-      if (djImportManual) djImportManual.style.display = 'none';
-      djiSay(`已选中：${f.name}`, 'var(--muted)');
-      void runDoujinImport(p);
-      return;
-    }
-    // 拿不到真实路径：明确告诉用户该怎么办，并把输入框亮出来
-    if (djImportManual) djImportManual.style.display = '';
-    djiSay('这个 Electron 版本拿不到文件真实路径 —— 请把完整路径填到下面的输入框，再点「用这个路径导入」', 'var(--orange)');
-    const box = $('#doujin-import-path');
-    if (box) { box.focus(); if (!box.value) box.placeholder = `例如：D:\\data\\${f.name}`; }
-  });
-
-  $('#doujin-import-go')?.addEventListener('click', () => {
-    const p = String($('#doujin-import-path')?.value || '').trim().replace(/^"(.*)"$/, '$1');
-    if (!p) { djiSay('先填一个路径再点它', 'var(--orange)'); return; }
-    void runDoujinImport(p);
-  });
 
   // ── 主题选择器（设置页「界面」区）──
   const themePicker = $('#theme-picker');
@@ -9100,16 +9198,14 @@ async function saveConfig({ quiet = false } = {}) {
       maxPerView: intIn('#cfg-img-perview', c.imageLimits?.maxPerView ?? 6, 1, 50),
       maxDownloadMB: intIn('#cfg-img-maxdl', c.imageLimits?.maxDownloadMB ?? 12, 1, 128)
     };
-    // 本子查询（JM + NH 兜底）：开关 + 参数 + 可选的路径覆盖
-    patch.doujinLookup = {
-      ...(c.doujinLookup || {}),
-      enabled: chk('#cfg-doujin', !!c.doujinLookup?.enabled),
-      maxResults: intIn('#cfg-doujin-max', c.doujinLookup?.maxResults ?? 10, 1, 50),
-      timeoutMs: intIn('#cfg-doujin-timeout', c.doujinLookup?.timeoutMs ?? 30000, 3000, 120000),
-      allowInGroup: chk('#cfg-doujin-group', c.doujinLookup?.allowInGroup !== false),
-      toolDir: val('#cfg-doujin-dir', '').trim(),
-      pythonPath: val('#cfg-doujin-python', '').trim()
-    };
+    // ⛔ 本子查询（doujinLookup）**不再随设置页保存提交**（2026-09-23 第十二对话）：
+    //    它整段搬到了技能页 → 本子查询 → 「配置」，由通用技能表单写
+    //    `POST /api/skills/doujin-lookup { settings }`，后端再落到 config.doujinLookup
+    //    （见 src/app.js 的 CONFIG_BY_PATH）。
+    //    ⚠️ 千万别在这里顺手把 `patch.doujinLookup = {...}` 加回来：设置页里已经没有
+    //       `#cfg-doujin*` 这些元素了，`chk()`/`val()` 会**静默取到默认值**，
+    //       于是"打开设置页点一下保存"就把用户的本子查询配置**重置成默认**
+    //       —— 典型的"界面看着没事、数据被改掉"。
   }
 
   if (sec === 'persona') {

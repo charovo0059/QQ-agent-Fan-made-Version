@@ -12,6 +12,14 @@
   "prompt": {
     "sections": []
   },
+  "_note_configSchema": "⚠️ 这里声明的字段，UI 会在技能卡片上用「配置(N)」就地展开一个表单（见 src/skills/manager.js 的 settingsView + ui/app.js 的 renderSkillSettingsModal）。但本扩展的值**不落在 config.skills['doujin-lookup']**，而是 config.doujinLookup —— 后端 src/app.js 的 CONFIG_BY_PATH 做了声明式覆盖，读和写都走真实的那个键。`enabled` 刻意不列在这里：卡片上那个「已启用」开关已经写的就是 config.doujinLookup.enabled（见 ENABLED_BY_PATH）。",
+  "configSchema": {
+    "maxResults": { "type": "number", "label": "一次最多返回几本", "default": 10 },
+    "timeoutMs": { "type": "number", "label": "单次查询超时（毫秒）", "default": 30000 },
+    "allowInGroup": { "type": "boolean", "label": "群聊里也允许", "default": true, "description": "关掉则只在私聊里可用 —— 群聊里发本子名容易被盯上。" },
+    "toolDir": { "type": "string", "label": "工具目录（留空＝默认）", "description": "留空时按 <dsh qq>/JM工具 依次找。" },
+    "pythonPath": { "type": "string", "label": "Python 解释器（留空＝自动找 venv）" }
+  },
   "tools": [
     {
       "id": "lookup",
