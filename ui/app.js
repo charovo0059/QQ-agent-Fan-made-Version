@@ -1560,6 +1560,300 @@ function initSessionFilter() {
   syncSessionFilterUI();
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   UI 改造第二阶段 · 五个全局共享组件（2026-09-22）
+   依据《QQ Agent UI 改造实施方案（第二阶段）》v1.0 §一「通用设计原则」。
+   方案原文：「这五条原则在多个页面反复出现，请落实为**全局共享组件与规范，
+   不要各页面各写各的**」。所以它们都放在这里，页面只调用、不自己拼 HTML。
+
+   ⚠️ 设计取舍：这五个组件都是**纯函数返回 HTML 字符串**，不是 class/自定义元素。
+      理由：① 整个 ui/app.js 就是这个风格（renderXxx 返回模板串），混两套写法更难维护；
+      ② 自定义元素要处理生命周期与属性同步，对这几个静态结构是过度设计；
+      ③ 字符串模板能被现有测试的"读源码文本"方式覆盖到。
+      需要交互的部分（开关、折叠、过滤）由**事件委托**在各自页面的接线处统一处理，
+      组件本身只管长相。
+
+   ⚠️ 组件之间的取值口径（三态色）只在这里定义一份 —— 各页别再自己写
+      `ok ? 'green' : 'red'` 这类判断，否则三态语义必然漂移。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 组件 1：StatusBadge —— 状态一律徽章化。
+ *
+ * 🔴 方案原则 2：**禁止用按钮样式表达状态**（点名反例：SnowLuma 页那个「已运行」蓝色按钮
+ *    —— 它其实是可点击的启停开关，但长得像状态，用户不知道该不该点）。
+ *    三态固定：红=异常/断开、琥珀=警告/中间态、绿=正常/连通。
+ *
+ * ⚠️ 徽章**不是按钮**：用 span 渲染、不带 tabindex、不带点击。
+ *    要点击的开关请用 `.toggle`（见 toggleHtml），别往徽章上挂事件 ——
+ *    那正是方案要消除的"状态与操作混在一起"。
+ *
+ * @param {'ok'|'warn'|'err'|'off'|'busy'} tone
+ * @param {string} text 徽章文字（如「运行中」「未连接」）
+ */
+function statusBadge(tone, text) {
+  const t = ['ok', 'warn', 'err', 'off', 'busy'].includes(tone) ? tone : 'off';
+  // busy 用琥珀底 + 呼吸点，表达"正在连接/进行中"这个中间态
+  const cls = t === 'busy' ? 'warn busy' : t;
+  return `<span class="sbadge ${cls}"><span class="sdot"></span>${esc(text)}</span>`;
+}
+
+/**
+ * 组件 2：InfoHint —— 说明文档与操作界面分层。
+ *
+ * 🔴 方案原则 1：主界面任何区块**最多保留一行说明文字**，细节一律进 ⓘ 气泡或折叠区。
+ *    判断标准：说明是在解释"怎么用"⇒ 下沉；**安全警告保留可见**（如热重载执行 .js，
+ *    那个用 `safetyBar`，不要塞进 ⓘ）。
+ *
+ * 用法：`${hintLine('只记录想法，不会自动执行', '采纳流程：…；SnowLuma 链接：…')}`
+ *   →  一行灰字 + 一个可悬浮/可聚焦的 ⓘ。
+ *
+ * ⚠️ 用原生 `title` 属性做气泡：零 JS、读屏软件可识别、不引入新的层级/定位问题。
+ *    代价是不能富文本 —— 但方案要的就是"一句话 + 细节"，纯文本够用；
+ *    真要富文本的场合本来就该用折叠区（`devnotes`）。
+ * ⚠️ `title` 里的换行在气泡里会原样显示，所以 detail 用 '；' 分隔而不是拼 \n。
+ */
+function hintLine(line, detail) {
+  const dot = detail
+    ? `<span class="ihint" role="note" tabindex="0" title="${esc(detail)}" aria-label="${esc(detail)}">i</span>`
+    : '';
+  return `<div class="ihint-line">${esc(line)}${dot}</div>`;
+}
+
+/**
+ * 组件 3：Stepper —— 交互式分步器。
+ *
+ * 方案对 SnowLuma / 微信页的要求：序号 + 标题 + 一句说明 + 动作按钮；
+ * 实时进度；**未到步骤置灰**。
+ *
+ * @param {Array<{title:string, desc?:string, state:'done'|'active'|'todo', actionHtml?:string, note?:string}>} steps
+ * @returns {string} HTML
+ * ⚠️ `actionHtml` 由调用方给（按钮的 id/事件各不相同），组件不猜。
+ *    但 `todo` 态的按钮会被 CSS 置灰并 `pointer-events:none` —— 这样即使调用方
+ *    忘了禁用，用户也点不动（双保险）。
+ */
+function stepperHtml(steps) {
+  const rows = (steps || []).map((s, i) => {
+    const st = ['done', 'active', 'todo'].includes(s.state) ? s.state : 'todo';
+    // 已完成显示 ✓ 而不是序号 —— 一眼能看出"走到哪了"
+    const num = st === 'done' ? '✓' : String(i + 1);
+    return `<div class="step ${st}">
+      <span class="step-num">${num}</span>
+      <div class="step-body">
+        <div class="step-title">${esc(s.title)}${s.note ? ` <span class="step-note">${esc(s.note)}</span>` : ''}</div>
+        ${s.desc ? `<div class="step-desc">${esc(s.desc)}</div>` : ''}
+      </div>
+      ${s.actionHtml ? `<div class="step-action">${s.actionHtml}</div>` : ''}
+    </div>`;
+  }).join('');
+  return `<div class="stepper">${rows}</div>`;
+}
+
+/**
+ * 组件 4：LogPanel —— 所有日志区统一。
+ *
+ * 方案原则 5：分级过滤（全部/关键/警告/错误）+ 搜索 + 复制 + 清空 +
+ * 自动滚动 + ★关键行高亮 + 噪音折叠。
+ *
+ * 用法（两步）：
+ *   ① 页面的静态骨架里放 `logPanelShell('日志标题', 'lp1')`
+ *   ② 拿到日志文本后用 `logPanelRows(text, 'lp1')` 渲染行
+ *   ③ 用 `initLogPanel('lp1')` 接线（过滤/搜索/复制/清空/自动滚动）——只需调一次
+ *
+ * ⚠️ 分级判据（**唯一一份，别在页面里重写**）：
+ *    · 含 ★ 或「初始密码」「密码」⇒ key（橙色高亮 + 默认在"关键"档显示）
+ *    · 含 error/fail/exception/refused/timeout/失败/错误 ⇒ error 档
+ *    · 含 warn/警告 ⇒ warn 档
+ *    · 其余为 info；连续重复行（≥3 次同样内容）标 noise，可一键折叠
+ *   方案点名"噪音刷屏淹没 ★ 初始密码等关键行"，所以 key 的判据必须**优先于** error。
+ */
+function logLevelOf(line) {
+  const t = String(line);
+  if (t.includes('★') || /初始密码|访问密码|password/i.test(t)) return 'key';
+  if (/error|fail|exception|refused|timeout|失败|错误|异常/i.test(t)) return 'error';
+  if (/warn|警告|注意/i.test(t)) return 'warn';
+  return 'info';
+}
+
+/** LogPanel 的静态骨架（页头工具 + 空的日志体）。 */
+function logPanelShell(title, idPrefix, opts = {}) {
+  const tabs = [['all', '全部'], ['key', '关键'], ['warn', '警告'], ['error', '错误']]
+    .map(([v, label]) => `<span class="chip${v === 'all' ? ' on' : ''}" data-logtab="${v}">${label}</span>`).join('');
+  return `<div class="logpanel" id="${idPrefix}">
+    <div class="logpanel-head">
+      <span class="logpanel-title">${esc(title)}</span>
+      <span class="logpanel-tabs">${tabs}</span>
+      <span class="logpanel-spacer"></span>
+      <input class="logpanel-search" type="search" placeholder="搜索日志" aria-label="搜索日志" data-logsearch>
+      <button class="btn btn-small" data-logact="noise" title="折叠连续重复的噪音行">噪音</button>
+      <button class="btn btn-small" data-logact="scroll" title="有新日志时自动滚到底部">自动滚动</button>
+      <button class="btn btn-small" data-logact="copy">复制</button>
+      <button class="btn btn-small btn-quiet" data-logact="clear">清空</button>
+    </div>
+    <div class="logpanel-body" data-logbody>${opts.emptyText ? `<div class="logpanel-empty">${esc(opts.emptyText)}</div>` : ''}</div>
+  </div>`;
+}
+
+/** 把一段日志文本渲染成行（含分级与噪音标记）。 */
+function logPanelRows(text, idPrefix) {
+  const raw = String(text || '').split('\n').filter((l) => l.trim() !== '');
+  // 连续重复行 ≥3 次 ⇒ 除第一行外都标 noise（"噪音刷屏"的判据）
+  const noiseFlags = raw.map(() => false);
+  let i = 0;
+  while (i < raw.length) {
+    let j = i + 1;
+    while (j < raw.length && raw[j] === raw[i]) j++;
+    if (j - i >= 3) for (let k = i + 1; k < j; k++) noiseFlags[k] = true;
+    i = j;
+  }
+  return raw.map((line, idx) => {
+    const lvl = logLevelOf(line);
+    const cls = ['logrow', lvl === 'key' ? 'key' : '', lvl === 'error' ? 'err' : '', noiseFlags[idx] ? 'noise' : '']
+      .filter(Boolean).join(' ');
+    return `<div class="${cls}" data-lvl="${lvl}">${esc(line)}</div>`;
+  }).join('');
+}
+
+/**
+ * 给一个 LogPanel 接线。**每个 idPrefix 只需调一次**（内部用 `__bound` 防重复）。
+ * 过滤/搜索/噪音/自动滚动全部靠 CSS 类 + 行上已有的 data 属性，不重建 DOM ——
+ * 日志每 5 秒刷一次，重建会让"正在搜索"的状态丢掉、也会闪。
+ */
+function initLogPanel(idPrefix) {
+  const box = document.getElementById(idPrefix);
+  if (!box || box.__bound) return;
+  box.__bound = true;
+  box.__filter = 'all';
+  box.__search = '';
+  box.__noise = false;
+  box.__autoscroll = true;
+
+  const apply = () => {
+    const body = box.querySelector('[data-logbody]');
+    if (!body) return;
+    const q = box.__search;
+    for (const row of body.querySelectorAll('.logrow')) {
+      const lvl = row.dataset.lvl || 'info';
+      let show = true;
+      // 档位：key 档连 error 一起显示（关键行常伴随报错，分开看反而漏）；
+      // warn 档显示 warn+error+key；error 档只显示 error+key。这样"越往上越全"。
+      if (box.__filter === 'key') show = lvl === 'key' || lvl === 'error';
+      else if (box.__filter === 'warn') show = lvl !== 'info';
+      else if (box.__filter === 'error') show = lvl === 'error' || lvl === 'key';
+      if (show && q) show = row.textContent.toLowerCase().includes(q);
+      row.style.display = show ? '' : 'none';
+    }
+    box.classList.toggle('hide-noise', box.__noise);
+    if (box.__autoscroll) body.scrollTop = body.scrollHeight;
+  };
+  box.__apply = apply;
+
+  box.addEventListener('click', async (e) => {
+    const tab = e.target.closest('[data-logtab]');
+    if (tab) {
+      box.__filter = tab.dataset.logtab;
+      box.querySelectorAll('[data-logtab]').forEach((c) => c.classList.toggle('on', c === tab));
+      apply();
+      return;
+    }
+    const act = e.target.closest('[data-logact]');
+    if (!act) return;
+    const kind = act.dataset.logact;
+    if (kind === 'noise') {
+      box.__noise = !box.__noise;
+      act.classList.toggle('on', box.__noise);
+      apply();
+    } else if (kind === 'scroll') {
+      box.__autoscroll = !box.__autoscroll;
+      act.classList.toggle('on', box.__autoscroll);
+      apply();
+    } else if (kind === 'copy') {
+      const body = box.querySelector('[data-logbody]');
+      const text = body ? Array.from(body.querySelectorAll('.logrow'))
+        .filter((r) => r.style.display !== 'none').map((r) => r.textContent).join('\n') : '';
+      try { await navigator.clipboard.writeText(text); act.textContent = '已复制'; }
+      catch { act.textContent = '复制失败'; }
+      setTimeout(() => { act.textContent = '复制'; }, 1200);
+    } else if (kind === 'clear') {
+      // ⚠️ 清空只清**界面显示**，不清后端日志文件 —— 按钮旁已标明，别让它看起来像删了数据
+      const body = box.querySelector('[data-logbody]');
+      if (body) body.innerHTML = '<div class="logpanel-empty">（已清空显示，后端日志文件未动）</div>';
+    }
+  });
+  box.addEventListener('input', (e) => {
+    if (!e.target.matches('[data-logsearch]')) return;
+    box.__search = e.target.value.trim().toLowerCase();
+    apply();
+  });
+}
+
+/**
+ * 组件 5：Gate —— 连接门控。
+ *
+ * 方案原则 4：依赖通道连通的操作（群发、联系人放行等），未连通时**整区禁用** +
+ *    「去完成连接引导」链接，连通后自动解锁。
+ *
+ * 用法：`gateWrap(html, { locked, guideTab, guideText })`
+ * ⚠️ 锁定用**类**（`.gate.locked > .gate-inner { pointer-events:none }`）而不是
+ *    `disabled` 属性 —— 因为整区里有 input/select/button 多种控件，
+ *    逐个加 disabled 容易漏（漏了就出现"未连接却可点、点了必失败"，正是方案说的现状问题）。
+ * ⚠️ 引导链接**永远可点**：它在 .gate-bar 里，不在被禁用的 .gate-inner 里。
+ */
+function gateWrap(innerHtml, { locked, guideTab, guideText } = {}) {
+  const bar = `<div class="gate-bar"><span>${esc(guideText || '需要先完成连接')}</span>`
+    + `<span class="gate-go" data-goto-tab="${esc(guideTab || 'snowluma')}" role="button" tabindex="0">去完成连接引导 →</span></div>`;
+  return `<div class="gate${locked ? ' locked' : ''}"><div class="gate-inner">${innerHtml}</div>${bar}</div>`;
+}
+
+/**
+ * 破坏性操作：次级按钮（方案原则 3"关闭服务、清空数据等操作降为次级按钮"）。
+ * ⚠️ 只负责**长相**；二次确认仍必须走既有的 `confirmDanger()` ——
+ *    别因为"按钮变低调了"就省掉确认。
+ */
+function quietBtnHtml(id, text, title) {
+  return `<button class="btn btn-small btn-quiet" id="${esc(id)}"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</button>`;
+}
+
+/** 标准 Toggle（条目 4：对勾改开关 + 已启用/已停用文字）。 */
+function toggleHtml(id, checked, onText = '已启用', offText = '已停用', attrs = '') {
+  return `<label class="toggle"><input type="checkbox" id="${esc(id)}"${checked ? ' checked' : ''}${attrs ? ' ' + attrs : ''}>`
+    + `<span class="tg-track"><span class="tg-knob"></span></span>`
+    + `<span class="tg-text">${esc(checked ? onText : offText)}</span></label>`;
+}
+
+/** 安全警告条（**保留可见**，不进 ⓘ —— 方案条目 4.2"安全信息不折叠"）。 */
+function safetyBar(text) {
+  return `<div class="safetybar"><span>⚠️</span><span>${esc(text)}</span></div>`;
+}
+
+/**
+ * 「去完成连接引导 →」链接的**全局事件委托**（只绑一次）。
+ *
+ * 为什么用委托而不是逐个绑：Gate 会出现在多个页面（SnowLuma / 微信 / 设置页），
+ * 而其中几个区块是每 15 秒重建的（SnowLuma 的 #sl-dyn）。逐个绑就要跟着重建重绑，
+ * 漏一处那个链接就变死链 —— 而它恰恰是"用户走投无路时唯一的出口"。
+ * ⇒ 绑在 document 上一次，用 data 属性找目标页面，重建多少次都有效。
+ * ⚠️ 同时支持键盘（Enter/Space）：它带 role="button" 与 tabindex="0"，
+ *    必须真的能用键盘激活，否则那个 role 是在骗读屏软件。
+ */
+function initGateLinks() {
+  if (document.__gateLinksBound) return;
+  document.__gateLinksBound = true;
+  const go = (el) => {
+    const tab = el && el.dataset ? el.dataset.gotoTab : '';
+    if (tab && typeof switchTab === 'function') switchTab(tab);
+  };
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest && e.target.closest('[data-goto-tab]');
+    if (el) { e.preventDefault(); go(el); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const el = e.target.closest && e.target.closest('[data-goto-tab]');
+    if (el) { e.preventDefault(); go(el); }
+  });
+}
+
 /**
  * 无边框窗口：自绘标题栏的接线（2026-09-22）。
  *
@@ -2105,24 +2399,26 @@ function renderSessionDetail(s) {
  * 只刷新 SnowLuma 的日志区（不重建整个页面）。
  * SSE 每来一条新日志就调一次 —— 如果这里重建整页，
  * 用户正在看的日志会被反复重绘，滚动位置也保不住。
+ *
+ * ⚠️ 2026-09-22（UI 改造第二阶段条目 2）改成走 **LogPanel**：
+ *    原来这里直接改 `<pre class="snowluma-logs-view">` 的 textContent。
+ *    现在日志面板是分级行（.logrow + data-lvl），所以只重画 `[data-logbody]` 的内容，
+ *    再让面板自己 re-apply 过滤/搜索 —— 这样"用户选的过滤档与搜索词"不会被新日志冲掉。
  */
 async function refreshSnowlumaLogs() {
   const box = $('#snowluma-page');
   if (!box) return;
-  const pre = box.querySelector('.snowluma-logs-view');
-  if (!pre) return;                       // 页面还没渲染过，等下次整页刷新
+  const panel = box.querySelector('#sl-logpanel');
+  const body = panel && panel.querySelector('[data-logbody]');
+  if (!body) return;                      // 页面还没渲染过，等下次整页刷新
   try {
     const logs = await api('/api/snowluma/logs');
     const logText = (logs.logs || []).map((l) => {
       const t = new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false });
       return `[${t}]${l.stream === 'stderr' ? ' ⚠' : ''} ${l.text}`;
-    }).join('\n') || '暂无日志';
-    // ⚠️ 先记贴底状态再换内容：新日志追加在底部，scrollTop 不变 = 阅读位置不变；
-    //    只有用户本来就贴底才跟随到底，往上翻历史时绝不把他拽回去。
-    //    滚动容器是 <pre> 自己（overflow-y:auto），不是 parentElement —— 之前滚错了对象。
-    const wasAtBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;
-    pre.textContent = logText;
-    if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
+    }).join('\n');
+    body.innerHTML = logPanelRows(logText, 'sl-logpanel');
+    if (typeof panel.__apply === 'function') panel.__apply();
   } catch { /* 刷新失败静默，不影响主流程 */ }
 }
 
@@ -2146,12 +2442,10 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
       return `[${t}]${l.stream === 'stderr' ? ' ⚠' : ''} ${l.text}`;
     }).join('\n') || '暂无日志';
 
-    // 整页重建前记住日志滚动位置：SSE/轮询触发的 quiet 重建会重置 DOM，
-    // 不补偿的话用户往下翻日志会被弹回顶部（Kondius 实测：划两下就蹦上去）
-    const oldPre = box.querySelector('.snowluma-logs-view');
-    const prevScroll = oldPre
-      ? { top: oldPre.scrollTop, atBottom: oldPre.scrollTop + oldPre.clientHeight >= oldPre.scrollHeight - 40 }
-      : null;
+    // ⚠️ 2026-09-22：原来这里要"记住日志滚动位置再补偿"，因为日志区每轮重建。
+    //    现在日志面板是**常驻**的（#sl-logpanel 不在 #sl-dyn 里）⇒ 滚动位置天然保留，
+    //    补偿代码反而会打架（新节点还没有高度，scrollTop 设了也没用）。
+    //    ⇒ 删掉。真要恢复"贴底跟随"由 LogPanel 的「自动滚动」开关负责（默认开）。
 
     // ⚠️ 同一个坑的另一面：listPoller 每 15 秒 quiet 重建一次整页，
     //    会把「群发」那块的**正在输入的内容、选好的范围、以及刚显示出来的结果**一起冲掉。
@@ -2185,6 +2479,8 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     //      页面重建时只重建 `#sl-dyn`（状态 + 按钮 + 日志），**输入元素根本不是新造的** ——
     //      焦点、光标、输入法组词、拖出来的尺寸、选中的范围**全部天然保留**，不需要任何还原代码。
     const notifyBlockHtml = `
+      <div class="pt-sec">群发通知 <span class="muted" style="font-weight:400">发给白名单里的会话</span></div>
+      <div class="gate-inner">
         <div class="snowluma-actions">
           <span class="muted" style="font-size:12.5px">通知白名单：</span>
           <select id="sl-notify-scope" class="btn btn-small" style="padding:2px 6px" title="发给谁：只群聊 / 只私聊 / 两者都发">
@@ -2206,84 +2502,178 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
               <span id="sl-notify-hint" class="muted" style="font-size:12px"></span>
             </div>
           </div>
-        </div>`;
+        </div>
+      </div>
+      <div class="gate-bar"><span>未连接，不可用 —— 先把上面的三步走完。</span><span class="gate-go" data-goto-tab="snowluma" role="button" tabindex="0">去完成连接引导 →</span></div>`;
 
-    // 动态区（状态 + 三步指引 + 按钮 + 日志）—— **每轮重建**，里面全是只读展示，没有任何输入元素。
+    // ── 状态区（**每轮重建**，里面全是只读展示，没有任何输入元素）──────────────
+    // UI 改造第二阶段条目 2。改动点对照方案原文：
+    //   1 状态徽章化 + 元信息行（端口/pid/路径，带复制）+ 5 秒自动轮询
+    //   2 指引改交互式分步器（序号+标题+一句说明+动作按钮，未到步骤置灰）
+    //   3 报错人性化：顶部一句人话结论，原始报错进「查看原始报错」折叠区
+    //   5 「关闭 SnowLuma」次级化 + 二次确认
+    //   7 顶栏重复警示条下线（信息并入状态徽章）—— 顶栏那条是全局 banner，见 renderBanner
+    //
+    // ⚠️ `s.snowluma.injected` 等字段是这一轮后端新加的（src/app.js 的 /api/status）。
+    //    方案原意是"从日志里抓 login detected/session started"，但**日志会被群消息刷掉**
+    //    （实测只留 200 行，那两类行命中 0）⇒ 改用内存里的可靠信号，
+    //    详见 src/app.js 那段注释。**别再改回按日志文本判断。**
+    const slRunning = running;
+    const slGateway = !!s.snowluma?.gatewayUp || slRunning;
+    const slWebui = !!s.snowluma?.webuiUp;
+    const slInjected = !!s.snowluma?.injected;
+    const slEverInjected = !!s.snowluma?.everInjected;
+    // 三步的状态：已注入 ⇒ 三步全绿；否则逐级判断"卡在哪一步"
+    const stepState = (n) => {
+      if (slInjected) return 'done';
+      if (n === 1) return slGateway ? 'done' : 'active';
+      if (n === 2) return slGateway ? 'active' : 'todo';
+      return 'todo';   // 第三步（注入）只有"注入成功"才算完成，前面无法代判
+    };
+    // 人话结论：把 ECONNREFUSED / 401 这类术语翻成"下一步该做什么"
+    const slErrorText = String(s.onebot?.error || '');
+    let slConclusion = '';
+    if (!slGateway) slConclusion = 'SnowLuma 网关还没起来 —— 点第 1 步的「启动」。';
+    else if (/401/.test(slErrorText)) slConclusion = '网关在跑，但还没有注入的 QQ 账号 —— 完成第 2、3 步即可。';
+    else if (/ECONNREFUSED/i.test(slErrorText)) slConclusion = '连不上网关端口（连接被拒绝）—— 网关可能刚退出，点第 1 步重启一次。';
+    else if (slInjected) slConclusion = '';
+    else slConclusion = '网关在跑，但 OneBot 还没连上 —— 按第 2、3 步做。';
+
     const dynHtml = () => `
         <div class="snowluma-state-row">
-          <span class="dot ${running ? 'dot-on' : 'dot-off'}"></span>
-          <span>SnowLuma：<strong>${running ? '运行中' : '未运行'}</strong></span>
-          ${pid ? `<span class="muted">pid ${pid}</span>` : ''}
-          <span class="muted">${embedded ? '内置模式（随 QQ Agent 退出）' : (running ? '独立模式' : '')}</span>
+          <span class="sbadge ${slRunning ? 'ok' : 'err'}"><span class="sdot"></span>SnowLuma ${slRunning ? '运行中' : '未运行'}</span>
+          <span class="sbadge ${slInjected ? 'ok' : (slGateway ? 'busy' : 'off')}"><span class="sdot"></span>OneBot ${slInjected ? `已连接${s.onebot.self ? `（${esc(s.onebot.self.nickname)}）` : ''}` : (slGateway ? '连接中/未连上' : '未连接')}</span>
+          ${running ? `<span class="sbadge off"><span class="sdot"></span>${embedded ? '内置模式（随应用退出）' : '独立模式'}</span>` : ''}
+          <span class="ph-spacer"></span>
+          <button class="btn btn-primary" id="sl-start-btn" ${slRunning ? 'disabled' : ''}>${slRunning ? '已运行' : '启动 SnowLuma'}</button>
+          <button class="btn btn-small" id="sl-open-webui-btn" ${webuiUrl ? '' : 'disabled'} title="在浏览器中打开 SnowLuma 控制台">打开 WebUI</button>
         </div>
-        <div class="snowluma-state-row">
-          <span class="dot ${onebotConnected ? 'dot-on' : 'dot-off'}"></span>
-          <span>OneBot：<strong>${onebotConnected ? `已连接${s.onebot.self ? `（${s.onebot.self.nickname}）` : ''}` : '未连接'}</strong></span>
-          <span class="muted">WS ${s.onebot?.error ? `：${s.onebot.error}` : ''}</span>
+        <div class="snowluma-state-row muted" style="font-size:12px;gap:10px;flex-wrap:wrap">
+          <span>目录 ${esc(dir || '（未找到项目内 snowluma/ 文件夹）')}</span>
+          <span class="ihint" role="note" tabindex="0" title="SnowLuma 的安装目录。点右侧「打开文件夹」可在资源管理器里打开。" aria-label="目录说明">i</span>
+          <span>WebUI ${esc(webuiUrl || '（启动后自动识别）')}</span>
+          <span>pid ${slRunning ? esc(String(pid ?? '-')) : '-'}</span>
+          <span class="snowluma-actions" style="margin:0;gap:6px">
+            <button class="btn btn-small" id="sl-copy-meta" title="复制端口 / pid / 目录 / WebUI 地址，便于排查时贴给别人">复制</button>
+            <button class="btn btn-small" id="sl-refresh-btn">刷新</button>
+            <span class="muted">5 秒自动刷新</span>
+          </span>
         </div>
-        <div class="snowluma-state-row muted">
-          <span>目录：${esc(dir || '（未找到项目内 snowluma/ 文件夹）')}</span>
-        </div>
-        <div class="snowluma-state-row">
-          <span>WebUI：</span>
-          ${webuiUrl
-            ? `<button class="btn btn-small" id="sl-open-webui-btn" title="在浏览器中打开 SnowLuma 控制台">${esc(webuiUrl)}</button>`
-            : '<span class="muted">等待 SnowLuma 启动后自动识别…</span>'}
-        </div>
-        ${onebotConnected ? '' : `
-        <div class="snowluma-state-row" style="display:block;border-left:3px solid var(--orange);padding-left:10px;margin-top:6px">
-          <div style="margin-bottom:4px"><strong>OneBot 没连上，按顺序做这三步：</strong></div>
-          ${running ? `
-          <div>① 先确认电脑上的 <strong>QQ 已经登录好</strong>（SnowLuma 是注入到已登录的 QQ 进程里，它自己不会登录 QQ）。</div>
-          <div>② 点上面的 <strong>WebUI</strong> 按钮（${esc(webuiUrl || 'http://127.0.0.1:5099/')}），
-               用<strong>访问密码</strong>登录 —— 首次安装的随机初始密码在下面「运行日志」里，
-               标着 <code>★ WebUI 初始登录凭据</code>（<strong>只出现这一次，请先把日志往上翻到最早</strong>）。</div>
-          <div>③ 登进去后在 <strong>「进程」</strong>页选那个已登录的 QQ 进程，点<strong>注入</strong>。
-               注入成功后这里会自动变绿（<strong>不用重启</strong>；应用每 5 秒自己重试一次）。</div>
-          ` : `
-          <div>① 先点下面的「<strong>启动 SnowLuma</strong>」把网关起来。</div>
-          <div>② 起来之后，电脑上的 QQ 要<strong>先登录好</strong>；然后点 <strong>WebUI</strong> 按钮用访问密码登录
-               （首次安装的随机初始密码在下面「运行日志」里，标着 <code>★ WebUI 初始登录凭据</code>）。</div>
-          <div>③ 在「<strong>进程</strong>」页选已登录的 QQ 进程并<strong>注入</strong>，注入成功后这里会自动变绿。</div>
-          `}
-          ${s.onebot?.error ? `<div class="muted" style="margin-top:4px">当前报错：${esc(s.onebot.error)}${
-            String(s.onebot.error).includes('401')
-              ? ' —— 401 通常表示<b>网关在跑但还没有已注入的 QQ 账号</b>，照上面三步走即可。'
-              : ''}</div>` : ''}
-          <div class="muted" style="margin-top:4px">日志只保留最近 500 行，会被群消息刷掉 ——
-            <strong>首次安装请第一时间把日志翻到最早</strong>，把那个初始密码记下来（关闭后无法找回）。</div>
-        </div>`}
+
+        <div class="pt-sec">连接引导 <span class="muted" style="font-weight:400">按顺序完成三步即可连通</span></div>
+        ${hintLine('三步走完就能连通；第 3 步在 WebUI 的「进程」页里做。',
+          '第 1 步：启动本地 SnowLuma 网关进程，首次启动会生成初始访问密码（只出现一次，应用抓到后会显示在下面）。'
+          + '第 2 步：用访问密码登录 WebUI —— 登录发生在浏览器里，应用看不到，所以这一步是否完成要靠你自己确认。'
+          + '第 3 步：在 WebUI 的「进程」页选中那个已经登录好的 QQ 进程并点注入；注入成功后本节自动变绿，不用重启。'
+          + '注意：SnowLuma 是注入到已登录的 QQ 里的，它自己不会登录 QQ，所以先确认电脑上的 QQ 已经登录好。')}
+        ${stepperHtml([
+          {
+            title: '启动网关', note: '（本地 SnowLuma 进程）',
+            desc: slGateway ? '网关已在运行。' : '还没起来。首次启动会生成初始访问密码。',
+            state: stepState(1),
+            actionHtml: `<button class="btn btn-small${slGateway ? '' : ' btn-primary'}" id="sl-step-start" ${slGateway ? 'disabled' : ''}>${slGateway ? '已启动' : '启动'}</button>`,
+          },
+          {
+            title: '登录 WebUI', note: '（需要访问密码）',
+            desc: slInjected ? '已连通，无需再操作。'
+              : (slWebui ? 'WebUI 端口已打开。用访问密码登录后到「进程」页继续。' : '网关起来后 WebUI 端口才会打开。'),
+            state: stepState(2),
+            note: '',
+            actionHtml: `<button class="btn btn-small" id="sl-step-webui" ${slWebui ? '' : 'disabled'}>打开 WebUI</button>`,
+          },
+          {
+            title: '注入 QQ 进程', note: '（在进程页选已登录的 QQ）',
+            desc: slInjected ? '已注入并连通。'
+              : (slEverInjected ? '曾经注入成功过，现在断了 —— 到进程页重新注入。'
+                : '进去后在「进程」页选那个已登录的 QQ 进程，点注入。成功后本节自动变绿，不用重启。'),
+            state: stepState(3),
+            actionHtml: `<button class="btn btn-small" id="sl-step-open-folder">打开文件夹</button>`,
+          },
+        ])}
+        ${initialPwdHtml}
+        ${slConclusion ? `<div class="safetybar"><span>⚠️</span><span>连接失败：${esc(slConclusion)}
+          <details style="display:inline-block"><summary style="cursor:pointer;display:inline">查看原始报错</summary>
+          <div class="muted" style="font-family:var(--mono);font-size:11px;margin-top:4px">${esc(slErrorText || '（无）')}</div></details></span></div>` : ''}
+
         <div class="snowluma-actions">
-          <button class="btn btn-primary" id="sl-start-btn" ${running ? 'disabled' : ''}>${running ? '已运行' : '启动 SnowLuma'}</button>
-          <button class="btn btn-danger" id="sl-stop-btn" ${running ? '' : 'disabled'}>关闭 SnowLuma</button>
-          <button class="btn btn-small" id="sl-refresh-btn">刷新状态</button>
+          ${quietBtnHtml('sl-stop-btn', '关闭 SnowLuma', '会先发一条「关机」提示再到托盘；执行前会二次确认')}
           <button class="btn btn-small" id="sl-open-folder-btn">打开文件夹</button>
           <span id="sl-hint" class="muted" style="font-size:12px"></span>
-        </div>
-        <div>
-          <div class="hint" style="margin-bottom:6px">运行日志（仅保留最近 500 行）</div>
-          <pre class="snowluma-logs-view">${esc(logText)}</pre>
         </div>`;
 
-    // ① 常驻容器已经在 ⇒ **只重建动态区**，输入元素一个都不动（这就是根治点）
+    // ── 日志区：**常驻容器**（不放 #sl-dyn 里）─────────────────────────────
+    // ⚠️ 为什么必须常驻：LogPanel 有过滤档/搜索词/噪音折叠/自动滚动这些**界面状态**，
+    //    而 #sl-dyn 每 15 秒整体重建一次。放进去的话每 15 秒你的搜索词和筛选档就被清掉
+    //    —— 这就是本项目反复踩的「打字打一半被打断」同一个病（群发那块当初也是这么修的）。
+    //    ⇒ 骨架只搭一次，之后只**换日志行**（logPanelRows 重写 [data-logbody] 的内容）。
+    const logPanelHtml = logPanelShell('运行日志', 'sl-logpanel', {
+      emptyText: '暂无日志 —— 启动 SnowLuma 后这里会输出运行日志',
+    });
+
+    // ── 群发通知：独立成卡 + **连接门控**（条目 2 改动点 6）─────────────────
+    // 🔴 方案现状问题原文：「未连接时全部可点（必失败）」。
+    //    ⇒ 未连通时整卡禁用（`.gate.locked` 让 .gate-inner 不可点）+ 引导链接。
+    //    判据用 `slInjected`（= OneBot 真连上了）而不是"SnowLuma 在跑" ——
+    //    网关在跑但没注入 QQ 时，发消息同样必失败。
+    //    ⚠️ 锁定状态由**常驻块自己**（#sl-notify-block）带类控制，因为这块不随
+    //      #sl-dyn 重建；重建时只需 syncNotifyGate() 同步一次类，不必重搭 DOM。
+    const syncNotifyGate = () => {
+      const blk = $('#sl-notify-block');
+      if (!blk) return;
+      blk.classList.toggle('locked', !slInjected);
+    };
+
+    // 初始密码：**只在后端真的抓到过、且用户还没改密时才有值**（`snowluma.initialPassword`）。
+    // ⚠️ 方案原本担心"★ 初始密码被群消息日志刷掉"，这个担心是**对的**（实测那行确实被刷没了），
+    //    但后端早就把它单独存成字段了 ⇒ 这里直接用它，**不要**去日志里翻 ★ 行。
+    //    只出现一次的东西，必须放在日志之外的地方。
+    const initialPwdHtml = s.snowluma?.initialPassword
+      ? `<div class="safetybar"><span>🔑</span><span>WebUI 初始访问密码：
+          <code style="font-size:13px;font-weight:600;padding:1px 8px;border-radius:6px;background:rgba(var(--orange-rgb),.18)">${esc(s.snowluma.initialPassword)}</code>
+          <button class="btn btn-small" id="sl-copy-pwd" style="margin-left:6px">复制</button>
+          <span class="muted"> — 登录 WebUI 用。改密后这里就不再显示。</span></span></div>`
+      : '';
+
+    // 日志行：**每次重建都换**，但 LogPanel 的骨架（含过滤档/搜索词那些界面状态）不动 ——
+    // 所以只重写 [data-logbody] 的内容，不重建整个面板。
+    const paintLogs = (scope) => {
+      const body = scope.querySelector('#sl-logpanel [data-logbody]');
+      if (!body) return;
+      // ⚠️ 用户在面板里点过「清空」之后，body 里留的是那句提示而不是行；
+      //    这里每轮都会重画，所以"清空"只在本轮有效 —— 这是有意的：
+      //    日志是活数据，5 秒后就有新行了，永久清空会让人以为日志不更新了。
+      body.innerHTML = logPanelRows(logText, 'sl-logpanel');
+      const panel = scope.querySelector('#sl-logpanel');
+      if (panel && typeof panel.__apply === 'function') panel.__apply();
+    };
+
+    // ① 常驻容器已经在 ⇒ **只重建动态区**，输入元素与日志面板一个都不动（这就是根治点）
     if (box.querySelector('#sl-notify-block')) {
       const dyn = box.querySelector('#sl-dyn');
       const html = dynHtml();
       if (dyn) dyn.innerHTML = html;
-      else box.innerHTML = `<div class="snowluma-page-card"><div id="sl-dyn">${html}</div><div id="sl-notify-block">${notifyBlockHtml}</div></div>`;
+      paintLogs(box);
+      syncNotifyGate();
       bindSnowlumaDynamic();
       applySnowlumaInputs(keepNotify);
       return;
     }
 
     // ② 首次渲染：常驻容器只搭这一次
-    box.innerHTML = `<div class="snowluma-page-card"><div id="sl-dyn">${dynHtml()}</div><div id="sl-notify-block">${notifyBlockHtml}</div></div>`;
+    //    ⚠️ 结构上分成三块，各有明确理由：
+    //      #sl-dyn          每轮重建（纯只读展示：徽章/分步器/按钮）
+    //      #sl-logpanel     常驻（有过滤档/搜索词/噪音折叠/自动滚动等界面状态）
+    //      #sl-notify-block 常驻（有 textarea 等输入元素 —— 2026-09-19 那次修复的成果）
+    box.innerHTML = `<div class="snowluma-page-card">
+      <div id="sl-dyn">${dynHtml()}</div>
+      <div id="sl-log-wrap">${logPanelHtml}</div>
+      <div id="sl-notify-block">${notifyBlockHtml}</div>
+    </div>`;
+    initLogPanel('sl-logpanel');
+    paintLogs(box);
+    syncNotifyGate();
     bindSnowlumaDynamic();
     applySnowlumaInputs(keepNotify);
-
-    // 恢复日志滚动：贴底跟随新日志；否则回到原阅读位置；首次渲染贴底
-    const newPre = box.querySelector('.snowluma-logs-view');
-    if (newPre) newPre.scrollTop = prevScroll ? (prevScroll.atBottom ? newPre.scrollHeight : prevScroll.top) : newPre.scrollHeight;
 
     // 恢复「群发」那块的输入与结果（见上面 keepNotify 的注释：15 秒一次的重建会冲掉它们）
     {
@@ -2325,7 +2715,10 @@ function bindSnowlumaDynamic() {
     }
     setTimeout(() => loadSnowlumaPage({ quiet: true }), 2500);
   });
-  $('#sl-stop-btn')?.addEventListener('click', async () => {
+  // 「关闭 SnowLuma」：**破坏性操作 ⇒ 二次确认**（UI 改造第二阶段 原则 3 / 条目 2 改动点 5）。
+  // ⚠️ 确认文案必须说清后果：断的是"机器人收不到也发不出消息"这件事，
+  //    而不只是"关掉一个后台进程"。用户点之前要能预见这个后果。
+  const doStopSnowluma = async () => {
     const btn = $('#sl-stop-btn');
     if (btn) { btn.disabled = true; btn.textContent = '关闭中…'; }
     if ($('#sl-hint')) $('#sl-hint').textContent = '';
@@ -2336,8 +2729,49 @@ function bindSnowlumaDynamic() {
       if ($('#sl-hint')) $('#sl-hint').textContent = `关闭失败：${e.message}`;
     }
     setTimeout(() => loadSnowlumaPage({ quiet: true }), 1500);
+  };
+  $('#sl-stop-btn')?.addEventListener('click', () => {
+    const connected = !!state.status?.onebot?.connected;
+    confirmDanger({
+      head: '关闭 SnowLuma？',
+      okText: '关闭',
+      text: `关掉之后<b>机器人收不到也发不出任何消息</b>${connected ? '（包括现在正在群里说话的那些）' : ''}。<br><br>
+        要恢复得重新走一遍「启动网关 → 登录 WebUI → 注入 QQ」。<br>
+        ${connected ? '<br>💡 如果只是想让机器人别再说话，用顶栏的<b>「暂停」</b>就够了 —— 通道留着，恢复更快。' : ''}
+        <br>此操作可撤销：随时能再启动。`,
+      onOk: doStopSnowluma,
+    });
   });
   $('#sl-refresh-btn')?.addEventListener('click', () => loadSnowlumaPage());
+  // ── 分步器的动作按钮（条目 2 改动点 2）─────────────────────────────────
+  // 第 1 步「启动」= 与页头主按钮同一个接口，复用同一段逻辑（避免两处实现漂移）
+  $('#sl-step-start')?.addEventListener('click', () => $('#sl-start-btn')?.click());
+  $('#sl-step-webui')?.addEventListener('click', () => $('#sl-open-webui-btn')?.click());
+  $('#sl-step-open-folder')?.addEventListener('click', () => $('#sl-open-folder-btn')?.click());
+  // 复制元信息（端口/pid/目录/WebUI）—— 方案改动点 1 要求"带复制"
+  $('#sl-copy-meta')?.addEventListener('click', async (e) => {
+    const s2 = (state.status || {});
+    const sl = s2.snowluma || {};
+    const txt = [
+      `SnowLuma 目录：${sl.dir || '-'}`,
+      `运行中：${sl.running ? '是' : '否'}${sl.pid ? `（pid ${sl.pid}）` : ''}`,
+      `WebUI：${sl.webuiUrl || '-'}`,
+      `OneBot：${s2.onebot?.connected ? `已连接 ${s2.onebot?.self?.nickname || ''}` : '未连接'}`,
+    ].join('\n');
+    const btn = e.currentTarget;
+    try { await navigator.clipboard.writeText(txt); btn.textContent = '已复制'; }
+    catch { btn.textContent = '复制失败'; }
+    setTimeout(() => { btn.textContent = '复制'; }, 1200);
+  });
+  // 复制初始密码（它只出现一次，必须让人一键拿走）
+  $('#sl-copy-pwd')?.addEventListener('click', async (e) => {
+    const pwd = (state.status?.snowluma?.initialPassword) || '';
+    if (!pwd) return;
+    const btn = e.currentTarget;
+    try { await navigator.clipboard.writeText(pwd); btn.textContent = '已复制'; }
+    catch { btn.textContent = '复制失败'; }
+    setTimeout(() => { btn.textContent = '复制'; }, 1200);
+  });
   $('#sl-open-folder-btn')?.addEventListener('click', async () => {
     try { await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); }
     catch (e) { if ($('#sl-hint')) $('#sl-hint').textContent = `失败：${e.message}`; }
@@ -9093,6 +9527,7 @@ $$('.tab').forEach((tab) => {
   loadMemoryView();
   initSessionScrollLoader();
   initSessionFilter();
+  initGateLinks();   // 连接门控的「去完成连接引导」链接（全局委托，只绑一次）
   // 无边框窗口：自绘标题栏的按钮与拖拽（普通浏览器里会自动跳过，见函数注释）
   initWindowControls();
 })();
