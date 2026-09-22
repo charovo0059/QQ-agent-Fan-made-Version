@@ -136,7 +136,14 @@ export class WechatChannel {
         if (m) pids.push(Number(m[2]))
       }
       return pids
-    } catch { return [] }
+    } catch (e) {
+      // ⚠️ 2026-09-22（第十一对话 · 隐患排查）：原来这里是 `catch { return [] }` ——
+      //    `[]` 的语义是"**WeFlow 没在跑**"，而 tasklist 本身失败（超时/被拦）也走这条路
+      //    ⇒ 界面会显示"未启动"，还可能触发一次**多余的拉起**。
+      //    ⇒ 语义不变（仍返回 `[]`、不让状态接口崩），但**出声**，好让人能区分这两种情况。
+      console.error(`[wechat] tasklist 查 WeFlow 进程失败（本次按"没在跑"处理）：${e?.message ?? e}`)
+      return []
+    }
   }
 
   /** 三段的实时状态。②段的细节从**中继自己**的状态口取（不猜）。 */
