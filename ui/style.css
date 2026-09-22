@@ -3056,4 +3056,120 @@ body::before {
   color: var(--muted);
 }
 
+/* ══ 无边框窗口：自绘窗口控制 + 拖拽区 ═══════════════════════════════════
+ * 依据《无边框窗口改造实施方案》v1.0（2026-09-22）。窗口去掉了系统标题栏
+ * （electron/main.js 的 `frame: false`），拖拽与三个控制按钮全部改由这里接管。
+ *
+ * 🔴 这一块最容易踩的坑（方案 §5 把它列为**高风险**）：
+ *    `-webkit-app-region: drag` 是**继承性**的 —— 一个区域一旦设为 drag，
+ *    里面所有子元素都变成"拖窗口把手"，**点击事件不再触达它们**。
+ *    ⇒ 规则是「**只给空白区开 drag，所有可点击元素显式 no-drag**」。
+ *      漏一个，那个按钮就"点不动"，而且**不报错、没日志**，只能靠人肉点出来。
+ *    本文件的做法：drag 只开在 `#topbar` 与 `#tabs` 这两个容器上，
+ *    然后把**所有**可点击后代（按钮 / 输入框 / 下拉 / details / 带 role 的）统一 no-drag。
+ *    ⚠️ 加新按钮时**不用**单独写 no-drag —— 下面的通配选择器已经覆盖；
+ *      但如果新按钮是 `<div>` 之类非交互标签、又不在通配清单里，就必须补。
+ */
+#topbar,
+#tabs {
+  -webkit-app-region: drag;
+}
+/* 统一：所有真正可点的东西退出拖拽区。
+   ⚠️ 用 `#topbar button` 这类后代选择器而不是 `:not()` 链，是为了让它**可读、可审计** ——
+      无边框出问题时第一件事就是来数这份清单。 */
+#topbar button,
+#topbar input,
+#topbar select,
+#topbar textarea,
+#topbar a,
+#topbar label,
+#topbar summary,
+#topbar [role='tab'],
+#topbar [role='button'],
+#tabs button,
+#tabs input,
+#tabs select,
+#tabs a,
+#tabs summary,
+#tabs [role='tab'],
+#tabs [role='button'] {
+  -webkit-app-region: no-drag;
+}
+/* 顶栏里的纯文字（品牌名/状态/统计）不该能被选中 —— 拖窗口时选中文字很难看，
+   而且系统标题栏本来也没有这个行为。 */
+#topbar .brand,
+#topbar .top-status > span,
+#topbar .top-status > .pt-status {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 三个窗口控制按钮：尺寸/悬停照 Windows 规范 */
+.win-ctrl {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;      /* 撑满顶栏高度，悬停底色才会是整块 */
+  /* 贴到顶栏右上角：抵消 #topbar 自身的 `padding: 10px 18px`（L617）。
+     ⚠️ 这三个负值必须跟着那行 padding 走 —— 改了顶栏 padding 就要回来改这里，
+        否则按钮会悬空或被裁掉一半。 */
+  margin: -10px -18px -10px 4px;
+  flex: none;
+}
+.win-btn {
+  width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: default;          /* Windows 的窗口按钮是箭头光标，不是手型 */
+  padding: 0;
+  transition: background-color var(--dur-fast) var(--ease-in-out), color var(--dur-fast) var(--ease-in-out);
+}
+.win-btn:hover { background: var(--hover); color: var(--text); }
+.win-btn:active { background: var(--active); }
+/* 关闭键悬停红底（Windows 规范，方案 4.2 明确要求） */
+.win-close:hover { background: #E81123; color: #fff; }
+.win-close:active { background: #C50F1F; color: #fff; }
+/* 最大化 ⇄ 还原：两个图标按 html.maximized 切换，避免 JS 改 innerHTML */
+.win-btn .ic-restore { display: none; }
+html.maximized .win-btn .ic-max { display: none; }
+html.maximized .win-btn .ic-restore { display: block; }
+
+/* ── 最大化态：去掉浮窗外壳的圆角与外边距 ────────────────────────────────
+   非最大化时 #shell 是"18px 圆角浮窗 + 外边距"，那是苹果风的窗口形态；
+   最大化后窗口贴着屏幕边缘，再留边距就会露出一圈背景色（看起来像没铺满）。 */
+html.maximized #shell {
+  margin: 0;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  box-shadow: none;
+}
+/* 无边框窗口没有原生阴影 ⇒ 非最大化时的阴影全靠 --pt-sh-window（#shell 上已有）。
+   这里只补一件事：暗色主题下窗口最外层底色要跟窗口 backgroundColor 一致，
+   否则圆角外圈会透出亮色（main.js 里 backgroundColor 是 '#FFFFFF'）。 */
+html[data-theme='dark'] body { background: #0f1115; }
+
+/* 窄窗口：顶栏东西多（品牌 + 状态 + 平台切换 + 统计 + 主题/暂停 + 3 个窗口键），
+   先把不关键的统计项收起来，别让它们换行把顶栏顶高。 */
+@media (max-width: 860px) {
+  #topbar #search-count-label,
+  #topbar #search-count-label + .sep,
+  #topbar #usage-label,
+  #topbar #usage-label + .sep {
+    display: none;
+  }
+}
+@media (max-width: 700px) {
+  #topbar #model-label,
+  #topbar #model-label + .sep,
+  #topbar .brand-sub {
+    display: none;
+  }
+}
+
+
 
