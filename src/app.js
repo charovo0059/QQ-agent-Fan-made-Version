@@ -61,13 +61,107 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIR = path.resolve(__dirname, '..', 'ui');
 
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
+//
+// 🔴 2026-09-22（UI 改造第二阶段 条目 6）：新增**显式模式** `allow.mode`。
+//
+// 为什么加：原来只有「两个可空列表 + 一个 allowAllWhenEmpty 复选框」，它们组合出
+// **四种输入、三种行为**，用户得在脑子里推导才能知道"现在到底放行谁"：
+//
+//   groups/private 都空 + 勾选     ⇒ 全部允许
+//   都空           + 未勾选        ⇒ 谁都不许
+//   有列表         + 勾选          ⇒ 只按名单（复选框**不起作用**）
+//   有列表         + 未勾选        ⇒ 只按名单（同上）
+//
+// ⇒ 界面改成三选一单选（允许所有 / 禁止所有 / 只运行在白名单），语义自明，
+//   复选框与那两段"打补丁式"说明全部删掉。
+//
+// ⚠️ **判定顺序（改动时必须整条重读）**：
+//   ① `deny` 名单**永远优先** —— 它在三种模式下都生效（黑名单是独立的否决权）
+//   ② 有显式 `mode` ⇒ 按它判（新逻辑）
+//   ③ 没有 `mode` ⇒ **落回旧的推导语义**（向后兼容）
+//      ⇒ 这样"老配置没迁移"也不会改变行为。迁移只是把推导结果**写死**成显式值。
+//
+// ⚠️ `mode='allowAll'` **不**跳过 deny 检查：旧语义里 `allowAllWhenEmpty` 也是在
+//    deny 之后才兜底的（`deny` 那行在最前面）。若在这里图省事直接 return true，
+//    会把用户的黑名单悄悄失效掉 —— 那是安全事故级的静默错。
+const ALLOW_MODES = ['allowAll', 'denyAll', 'whitelist'];
+
 function allowed(kind, id, cfg) {
   const s = String(id);
   const denyList = cfg.deny?.[kind] ?? cfg.deny?.[`${kind}s`] ?? [];
   if (denyList.map(String).includes(s)) return false;
+
   const allowList = cfg.allow?.[kind] ?? cfg.allow?.[`${kind}s`] ?? [];
+  const mode = cfg.allow?.mode;
+
+  if (ALLOW_MODES.includes(mode)) {
+    if (mode === 'allowAll') return true;
+    if (mode === 'denyAll') return false;
+    // whitelist：只按名单 —— 名单为空就是"谁都不许"（这正是"禁止所有"之外的自然含义）
+    return allowList.map(String).includes(s);
+  }
+
+  // ③ 旧语义（没有 mode 字段时）：一个字都不改，保证向后兼容
   if (allowList.length > 0) return allowList.map(String).includes(s);
   return cfg.allowAllWhenEmpty === true;
+}
+
+/**
+ * 一次性把旧的「列表 + 复选框」推导成显式 `allow.mode`。
+ *
+ * 🔴 **结论：什么都不写。** 这个函数保留下来是为了把"为什么不迁移"这个决定**固化成代码 + 测试**，
+ *    而不是散在注释里。返回值恒为 `'skip-ambiguous'`。
+ *
+ * ── 为什么不能迁移（两次踩坑换来的，别再试第三次）────────────────────────
+ *
+ * 直觉上"两列表都空 + allowAllWhenEmpty=false ⇒ 禁止所有 ⇒ 写死 denyAll 最安全"。
+ * **错。** 旧语义里"两个列表都空"根本不是一个模式，而是一个**瞬时状态**：
+ *   列表一非空，行为立刻从"按 allowAllWhenEmpty 兜底"变成"只按名单"。
+ * ⇒ 把空列表时推导出的 `denyAll` 写进配置，会让"以后把某人加进白名单"这件事**永久失效**
+ *   ——`denyAll` 是绝对的，加名单也不放行。
+ *   实测：`test-微信联系人可见.mjs` 的「放行后微信消息进了 store」就是这么红的
+ *   （它的初始配置正是 `{private:[], group:[]}`，然后点「放行」）。
+ *
+ * 而"有列表 ⇒ 写 whitelist"同样不安全：旧判定是**按 kind 各自**便宜的，
+ * `groups=[1]` + `private=[]` 时群按名单、**私聊全部放行**；`whitelist` 却是两类都按名单
+ * ⇒ 会把"私聊全部放行"变成"私聊谁都不许"。
+ *   （这条是 `test-白名单三选一模式与旧配置迁移.mjs` 的"迁移前后行为对拍"抓出来的。）
+ *
+ * ⇒ **零迁移是唯一能保证行为不变的做法。**
+ *   · 老配置没有 `mode` ⇒ `allowed()` 落回旧推导语义，永远与升级前一致
+ *   · `mode` 只在用户在界面上**显式选了三选一并保存**时才写入（那时它代表用户的真实意图）
+ *   · 界面显示的当前模式由 `deriveAllowMode()` 推导 —— 显示对了，但**不写盘**
+ *
+ * ⚠️ 代价：老配置永远不会自动获得"显式 mode"。要写死就让人在界面上点一次 ——
+ *    比"启动时悄悄替用户决定"安全得多。
+ */
+function canMigrateAllowMode() {
+  return false;
+}
+
+/**
+ * 迁移员：按设计**永不写盘**。保留它有三个用处：
+ *   ① 把"零迁移"这个决定变成**可测试**的东西（测试逐组合断言"一个字都没写"）；
+ *   ② 启动时打一行日志说明"老配置有意不迁移、行为不变"，免得下一个人看到配置里没有 mode
+ *      以为迁移没跑；
+ *   ③ 万一将来真要迁，改这里的判据 + 那条对拍测试即可。
+ */
+function migrateAllowMode() {
+  return 'skip-ambiguous';
+}
+
+/**
+ * 推导"现在实际生效的是哪种模式" —— 仅用于**界面显示与日志**，**不写盘**。
+ *
+ * ⚠️ 与 `allowed()` 的旧语义分支必须保持一致（两边漂移的话界面会说谎）。
+ * ⚠️ 注意它对"有列表"一律返回 `whitelist`，而旧语义其实是**按 kind 各自**的
+ *   （见 canMigrateAllowMode 的注释）。作为**显示**这是可接受的近似（用户看的是"整体更像哪种"），
+ *   但它**绝不能被当作迁移依据** —— 那正是上面那个坑。
+ */
+function deriveAllowMode(cfg) {
+  const nonEmpty = (arr) => Array.isArray(arr) && arr.some((x) => String(x).trim() !== '');
+  if (nonEmpty(cfg?.allow?.groups) || nonEmpty(cfg?.allow?.private)) return 'whitelist';
+  return cfg?.allowAllWhenEmpty === true ? 'allowAll' : 'denyAll';
 }
 
 // ── 版本更新检查 ─────────────────────────────────────────────────────
@@ -3532,6 +3626,25 @@ export function createApp({ log = console.log } = {}) {
   }
 
   async function start() {
+    // ── 白名单：**有意不做**启动迁移（UI 改造第二阶段 条目 6）──────────────
+    // 🔴 这里刻意只打日志、**一个字都不写配置**。理由见 migrateAllowMode 的长注释：
+    //    旧语义里"两个列表都空"是**瞬时状态**（列表一非空，行为立刻变成"只按名单"），
+    //    任何在启动时把推导结果写死的迁移都会破坏"以后把人加进白名单"这件事
+    //    （实测：test-微信联系人可见.mjs 的「放行后微信消息进了 store」就是这么红的）。
+    //    ⇒ mode 只在用户在界面上**显式选了三选一并保存**时才写 —— 那时它代表用户的真实意图。
+    // ⚠️ 留着这行日志，是为了让下一个人知道"配置里没有 mode 不是迁移没跑，是有意不迁"。
+    try {
+      const before = getConfig();
+      if (!ALLOW_MODES.includes(before.allow?.mode)) {
+        log(`[allow] 当前配置没有显式 allow.mode —— 判定走旧语义（列表 + allowAllWhenEmpty），`
+          + `行为与升级前完全一致；界面显示的模式「${deriveAllowMode(before)}」只是推导。`
+          + `要让模式显式化：去「设置 → 聊天白名单」选一次并保存。`
+          + `（有意不做自动迁移，原因见 src/app.js 里 migrateAllowMode 的注释）`);
+      }
+    } catch (e) {
+      log(`[allow] 读白名单配置失败（不影响运行）：${e?.message || e}`);
+    }
+
     // 先把 HTTP 服务拉起来，让窗口/浏览器立刻能加载页面（loading 壳）
     const basePort = Number(getConfig().server?.port) || 3210;
     let port = null;
