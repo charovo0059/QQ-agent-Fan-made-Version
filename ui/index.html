@@ -17,15 +17,20 @@
        而 app 仓库 history 里没有它们（未被跟踪）。这是**有意保留**，不是漏删。 -->
   <script>
     /* 主题预置：在样式生效前就定好 data-theme，避免首屏闪白/闪黑。
-       优先级：localStorage 里的显式选择 > 亮色（默认）；仅当选了「跟随系统」才读系统偏好。
-       这里只做"应用"，真正的切换逻辑与持久化在 app.js。 */
+       优先级：localStorage 里的显式选择 > 跟随系统；没存过就跟随系统。
+       这里只做"应用"，真正的切换逻辑与持久化在 app.js。
+       ⛔ 2026-09-23（第十二对话）：第四种主题 '?'（整活/VHS）已下线 —— 与 app.js 的
+          THEME_RETIRED 保持一致，老 localStorage 里存过 '?' 的按"跟随系统"处理，
+          别让首屏停在一个已经不存在的主题上。 */
     (function () {
       try {
         var saved = localStorage.getItem('qqa-theme') || '';
         var sys = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-        // 合法值：dark / light / system / ?（整活主题）。未知值回退暗色。
-        var theme = (saved === 'light' || saved === 'dark' || saved === '?') ? saved : (saved === 'system' ? sys : (saved || sys));
-        if (theme !== 'light' && theme !== 'dark' && theme !== '?') theme = 'dark';
+        var theme;
+        if (saved === 'light' || saved === 'dark') theme = saved;          // 合法且是具体主题
+        else if (saved === 'system' || saved === '?') theme = sys;         // 跟随系统（'?' 已下线，就近迁移）
+        else theme = saved ? 'dark' : sys;                                 // 其它未知值 → 暗色；没存过 → 跟随系统
+        if (theme !== 'light' && theme !== 'dark') theme = 'dark';
         document.documentElement.setAttribute('data-theme', theme);
       } catch (e) {
         document.documentElement.setAttribute('data-theme', 'light');
@@ -192,13 +197,21 @@
                 #memory-detail 的 innerHTML，放那边会"点一下会话就消失"（第一版就是这么写错的）。
              ⚠️ 这里只展示 + 打标记，**不执行任何提案内容**，见 src/proposals.js 顶部。 -->
         <div id="proposal-review" class="proposal-review"></div>
-        <!-- ⚠️ UI 改造第二阶段条目 5：「显示空记忆」开关**已从这里移走**，
-             挪到记忆详情里「记忆」分区标题的右侧（方案要求"归位其右侧"）。
-             理由：它管的是"详情里列哪些人"，挂在**列表头**语义错位 ——
-             用户在列表上找它，而它影响的是详情区的内容。
-             ⇒ 别在这里再加回来：两个同名 id 会让 $('#mem-show-empty') **静默只拿到第一个**，
-               第二个变成永远点不动的死件。 -->
-        <div class="list-head muted" data-page-node-id="LVSsdebq14ic87yIdKe0k1">记忆</div>
+        <!-- 「显示空记忆」开关（2026-09-23 第十二对话：用户点名**移回左栏列表头**）。
+             ⚠️ 它只在**这一处**存在，全页只有一个 `#mem-show-empty` —— 这条必须守住：
+                两个同名 id 会让 `$('#mem-show-empty')` **静默只拿到第一个**，
+                第二个变成永远点不动的死件（第十对话把它挪进详情区时就是踩了这个才写这段注释的）。
+             ⚠️ 它管的是"左栏列表里列哪些会话"，挂在**列表头**语义是对的；
+                右栏详情里那份已同时撤掉，**别两边都放**。 -->
+        <div class="list-head list-head--row" data-page-node-id="LVSsdebq14ic87yIdKe0k1">
+          <span class="muted">记忆</span>
+          <span class="ph-spacer"></span>
+          <label class="toggle" id="mem-empty-toggle-wrap" title="勾上之后，白名单里那些还没有记忆文件的会话也会出现在这个列表里 —— 便于点进去手动添加印象">
+            <input type="checkbox" id="mem-show-empty">
+            <span class="tg-track"><span class="tg-knob"></span></span>
+            <span class="tg-text">显示空记忆</span>
+          </label>
+        </div>
         <div id="memory-items" data-page-node-id="Nd0JwkZfmnInPLDO9AjVAD"></div>
       </aside>
       <div id="memory-detail" class="detail-pane" data-page-node-id="fXph3DU6yHzmzVZOtXuAii">

@@ -2166,6 +2166,29 @@ export function createApp({ log = console.log } = {}) {
       const ENABLED_BY_PATH = {
         'doujin-lookup': { path: ['doujinLookup', 'enabled'], label: 'config.doujinLookup.enabled' }
       };
+      // 整份配置的**真实归属键**（与上面同一取向，只是粒度大一点）。
+      // 🆕 2026-09-23（第十二对话）：本子查询的参数（返回几本 / 超时 / 群里允许 / 工具目录 /
+      //    Python 解释器）历史上落在 `config.doujinLookup`，而通用技能表单写的是
+      //    `config.skills['doujin-lookup']` ⇒ 不覆盖的话，用户在技能页改了**看起来成功、
+      //    实际写到一个谁都不读的影子键里**（最难查的那种静默失效）。
+      //    字段本身由 skills/doujin-lookup/skill.json 的 configSchema 声明，
+      //    这里只声明"值放在哪"，读（settingsOf 的替代）和写都按它走。
+      const CONFIG_BY_PATH = {
+        'doujin-lookup': { path: ['doujinLookup'], label: 'config.doujinLookup' }
+      };
+      /** 按 CONFIG_BY_PATH 覆盖后的设置视图（密文脱敏规则与 manager.settingsView 保持一致）。 */
+      const settingsOverrideOf = (id, st) => {
+        const cp = CONFIG_BY_PATH[id];
+        if (!cp) return null;
+        const raw = readByPath(getConfig(), cp.path) || {};
+        const schema = st.configSchema || {};
+        const out = {};
+        for (const k of Object.keys(schema)) {
+          const v = raw[k];
+          out[k] = schema[k]?.secret ? (String(v ?? '').trim() ? '******' : '') : (v ?? schema[k]?.default);
+        }
+        return { settings: out, configPath: cp.label };
+      };
       // `config.skills` 下的**保留键**：它们是扩展系统的全局设置，不是某个扩展的 id。
       // ⚠️ 2026-09-19 第七对话踩到并修：加了 `hotReload` 之后，它被"已配置但未安装"的逻辑
       //    当成一个"装过又删掉的扩展"，页面上真的显示成「已配置但未安装（1）· hotReload」；
@@ -2183,7 +2206,10 @@ export function createApp({ log = console.log } = {}) {
         const list = skillManager.list();
         const skills = list.map((st) => {
           const sw = enabledSwitchOf(st.id, st);
-          return { ...st, enabled: sw.enabled, enabledOverride: sw.override };
+          const ov = settingsOverrideOf(st.id, st);
+          // 覆盖存在时，`settings` 与 `configPath` 都按真实归属键给 —— UI 靠它们渲染表单
+          // 与"保存在哪里"那句话（别说成 config.skills[...]，否则用户去那儿找不到）。
+          return { ...st, enabled: sw.enabled, enabledOverride: sw.override, ...(ov || {}) };
         });
         const installedIds = new Set(skills.map((s) => s.id));
         const uninstalled = listConfiguredSkillIds()
@@ -2315,7 +2341,17 @@ export function createApp({ log = console.log } = {}) {
             if (schema[k]?.secret && (v === '******' || String(v ?? '').trim() === '')) continue;
             patch[k] = v;
           }
-          if (Object.keys(patch).length) setSkillConfig(id, patch);
+          if (Object.keys(patch).length) {
+            const cp = CONFIG_BY_PATH[id];
+            if (cp) {
+              // 写回**真实的归属键**，而且是**合并**不是整体替换 ——
+              // 那个对象里还有别的键（enabled 等），整体写会静默把它们抹掉。
+              const cur = readByPath(getConfig(), cp.path) || {};
+              updateConfig({ [cp.path[0]]: { ...cur, ...patch } });
+            } else {
+              setSkillConfig(id, patch);
+            }
+          }
         }
 
         // 开关可能让工具集变化（模型看到的 function 列表），必须重算一次
@@ -2325,7 +2361,9 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, {
           ok: true,
           skill: st,
-          settings: skillManager.settingsOf(id),
+          // 与列表接口同一口径：被 CONFIG_BY_PATH 覆盖的扩展要从真实归属键读
+          // （否则这里回的是 config.skills[...] 里的空对象，前端拿它回填会显示成"没配过"）
+          settings: st?.settings ?? skillManager.settingsOf(id),
           toolCount: orchestrator.toolDefs.length
         });
       }
