@@ -50,13 +50,65 @@ function memberFile(chatKey, userId, name = '') {
   return path.join(chatDir(chatKey), memberFileName(userId, name));
 }
 
+// ── 读不出来时：ENOENT 静默；其它错误"留档保命 + 限流出声" ────────────────────
+// 🆕 2026-09-22（第十二对话）：与 `config.js` / `stickers.js` / `wechat-contacts.js` /
+//    `dream.js` 同一取向（它们是本族的先例）。这一处当时被记成"低危、记录不改，
+//    要做得配套限流，属独立课题"（见 `待办与决策记录.md` §47.4 第 5 行 / §48.6）——
+//    现在按**同样的判据**补上，并把它当时缺的那一半（限流）一起做掉。
+//
+// 判据（用户 2026-09-22 给的原话）：
+//   **"核心不是有没有返回值，而是后续是否存在隐式写回原路径的风险。"**
+// 本文件的链路确实成立：`loadMember()` 读失败 ⇒ `{ impressions: [] }`
+//   ⇒ `#appendRaw` / `editMemberImpression` / 整理 都会 `writeJson(memberFile(...))`
+//   ⇒ **那个人的印象被无声清空**。
+// 返回值契约**一字不变**（仍返回 fallback），所以调用方一行都不用改。
+//
+// 为什么这一处要限流而那四处不用：它们在**冷路径**（启动读一次、收到消息防抖读一次），
+// 而 `readJson` 是**热路径** —— 每次记忆读取都要走它，一个坏文件会按"每条消息 × 每人"刷屏。
+// 两条口径都**按文件**（一个坏文件不该把别的坏文件的报警压掉）：
+//   1. 出声 —— 同一文件最多每 60 秒一次；
+//   2. 留档 —— 同一文件**只做一次**。`copyFileSync` 是整份复制，热路径上重复复制会白占磁盘；
+//      而且一次读失败在本文件里会触发**两次** `readJson`（`#ensureChat` 的扫描 + `loadMember`），
+//      不去重就会立刻多出一份。
+const READ_FAIL_LOG_COOLDOWN_MS = 60 * 1000;
+/** file -> { lastLogAt, backedUp }。一人一个文件，群多了可能上千个键 ⇒ 到顶整体清空。 */
+const readFailState = new Map();
+
+function reportReadFailure(file, err, { backup = false } = {}) {
+  const now = Date.now();
+  const st = readFailState.get(file) || { lastLogAt: 0, backedUp: false };
+  if (readFailState.size >= 512) readFailState.clear();   // 清空只会让某个文件多报一次，不会漏报
+  let bak = null;
+  if (backup && !st.backedUp) {
+    // 与那四处同款：原文件另存为 `.corrupt-<时间戳>`，**原文件不动** ⇒ 数据还在盘上、可人工恢复
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    bak = `${file}.corrupt-${stamp}`;
+    try { fs.copyFileSync(file, bak) } catch { bak = null }   // 连备份都失败也得继续报
+    st.backedUp = true;
+  }
+  if (now - st.lastLogAt >= READ_FAIL_LOG_COOLDOWN_MS) {
+    st.lastLogAt = now;
+    console.error(`[memory] ${file} 存在但读不出来（${err?.message || err}）`
+      + (bak ? `—— 已另存为 ${path.basename(bak)}` : '—— 本次按空值处理')
+      + `；⚠️ 原文件没有被覆盖，可人工恢复。`
+      + `（同一文件的这条提示 ${READ_FAIL_LOG_COOLDOWN_MS / 1000} 秒内只报一次）`);
+  }
+  readFailState.set(file, st);
+}
+
 function readJson(file, fallback) {
   try {
     let text = fs.readFileSync(file, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? parsed : fallback;
-  } catch {
+    if (parsed && typeof parsed === 'object') return parsed;
+    // 读到了合法 JSON、但不是我们写出来的形状（不是对象）⇒ 同样算"读不出来"：
+    // 回退值一样会被调用方写回原路径。这里**不**留档（`dream.js` 对"结构不对"也只出声不留档）。
+    reportReadFailure(file, new Error(`内容不是对象（${parsed === null ? 'null' : typeof parsed}）`));
+    return fallback;
+  } catch (err) {
+    // 文件不存在 = 首次运行 / 该人还没印象 ⇒ 这是**正常路径**，静默（与那四处一致）
+    if (err?.code !== 'ENOENT') reportReadFailure(file, err, { backup: true });
     return fallback;
   }
 }
