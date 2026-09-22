@@ -175,6 +175,24 @@ export function createApp({ log = console.log } = {}) {
     }
   }
 
+  /**
+   * WebUI 端口：**从 snowlumaWebuiUrl() 反解**，不另开一个"端口来源"。
+   *
+   * ⚠️ 为什么不直接读 `config/runtime.json`：那正是 snowlumaWebuiUrl() 在做的事
+   *    （而且它还带"从日志里找 listening http://…"的兜底）。
+   *    两处各读一遍 = 两个来源必然漂移 —— 某天 runtime.json 读不到、URL 靠日志兜底出来了，
+   *    而端口另读一份读到旧值，就会出现"UI 说 WebUI 没起来、但按钮上的地址是通的"。
+   *    ⇒ 单一来源。
+   */
+  function snowlumaWebuiPort() {
+    try {
+      const u = new URL(snowlumaWebuiUrl());
+      if (u.port) return Number(u.port);
+      return u.protocol === 'https:' ? 443 : 80;
+    } catch { /* ignore */ }
+    return 5099;   // 与 snowlumaWebuiUrl 的默认值保持一致
+  }
+
   function isPortOpen(host, port, timeoutMs = 800) {
     return new Promise((resolve) => {
       const socket = new net.Socket();
@@ -1459,7 +1477,27 @@ export function createApp({ log = console.log } = {}) {
             webuiUrl: snowlumaWebuiUrl(),
             // 首次安装的初始访问密码：只在本进程真的抓到过、且用户还没改密时才有值
             initialPassword: liveInitialPassword(),
-            ...snowlumaStatus()
+            // ── 「QQ 已注入」——UI 改造第二阶段条目 2 的三步分步器要用（第三步）──
+            //
+            // 🔴 为什么不能像方案设想的那样"从日志里抓 login detected / session started"：
+            //    那两行**会被群消息事件刷掉**。实测：日志只保留最近 200 行，而群里
+            //    `[Event] 群 […]` 这类行进得非常快 —— 查的时候 `login detected` 命中 **0**、
+            //    连 `★ WebUI 初始登录凭据` 都已被刷没。**按日志文本判断状态 = 状态会自己消失。**
+            //
+            // ✅ 改用**可靠信号**（都不用新加采集，全在进程内存里）：
+            //    · `injected`：OneBot 连上 ⇒ 说明注进去的 QQ 正在供事件与发消息。
+            //      这是"注入成功"的**充分证据**（SnowLuma 的令牌只有在已注入账号时才生成）。
+            //    · `gatewayUp`：SnowLuma 的 WS 端口开着（网关起来了）。
+            //    · `webuiUp`：WebUI 端口开着（能去登录）。
+            //    · `lastError`：最近一次连接错误（401 = 网关在跑但还没有注入的账号）。
+            //    ⚠️ 「登录过 WebUI」这件事**后端确实观察不到**（登录发生在浏览器里，
+            //       SnowLuma 不回调我们）⇒ 前端第三步的文案要按"未确认"写，
+            //       不能假装知道。宁可少说，不要编一个看起来精确的状态。
+            gatewayUp: await isPortOpen('127.0.0.1', snowlumaWsPort()),
+            webuiUp: await isPortOpen('127.0.0.1', snowlumaWebuiPort()),
+            injected: !!onebot.connected,
+            everInjected: !!onebot.everConnected,
+            lastError: onebot.lastConnectError || '',            ...snowlumaStatus()
           },
           orchestrator: orchestrator.statusSummary(),
           // 本子查询的"资源到位了没"—— 给体检卡用，**只做 existsSync，不拉子进程**
