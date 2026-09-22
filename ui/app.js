@@ -6034,6 +6034,10 @@ function renderSettings() {
   box.innerHTML = `
     ${renderSettingsSection(c)}`;
   bindSettingsEvents(c);
+  // 白名单芯片的增删接线（事件委托，只绑一次）—— 条目 6。
+  // ⚠️ 必须在 innerHTML **之后**调：事件委托要挂到 **#settings-form**（真实容器）上，
+  //    元素得先在 DOM 里。别写 #settings-page —— 那个 id 不存在（踩过，见 bindAllowChips）。
+  bindAllowChips();
   // ⚠️ 必须在 innerHTML **之后**再读状态 —— loadProactiveStatus 是去查 DOM 元素再填内容的，
   //    放在 renderSettingsSection 里面（模板字符串求值阶段）时元素还没进 DOM，
   //    于是它查不到 #proactive-status、静默什么都不做（界面上就永远停在"正在读当前状态…"）。
@@ -7061,23 +7065,82 @@ function renderPersonaSection(c) {
     ${renderPersonaSaveBar()}`;
 }
 
+/**
+ * 聊天白名单（UI 改造第二阶段 条目 6 重写）。
+ *
+ * 🔴 方案原文：「核心问题是「复选框 × 两个可空列表」交互产生四种语义，两段说明文字是打补丁。
+ *   **改三选一模式单选**：允许所有会话 / 禁止所有会话 / 只运行在白名单（默认）——
+ *   复选框与说明文字全删，空列表行为由模式自明。逗号文本框改**芯片输入**。
+ *   仅存一行「与『微信联系人』勾选共用同一份配置 ⓘ」」
+ *
+ * ⚠️ 模式值的来源：`allow.mode`。老配置没有这个键时**按旧语义推导**（`deriveAllowModeUi`），
+ *    保证"还没迁移/迁移失败"时界面显示的是**真实生效的那个模式**，而不是默认值。
+ *    （后端的 allowed() 也是同样的兜底逻辑 —— 两边必须一致，否则界面会说谎。）
+ */
+/**
+ * 允许模式的三个取值（与后端 `allowed()` 里的 ALLOW_MODES 必须一致）。
+ * ⚠️ 前端这份只用于"校验读到的值合不合法"，判定权威永远在后端。
+ */
+const ALLOW_MODES_UI = ['allowAll', 'denyAll', 'whitelist'];
+
+function deriveAllowModeUi(c) {
+  const g = (c.allow?.groups || []).filter((x) => String(x).trim() !== '');
+  const p = (c.allow?.private || []).filter((x) => String(x).trim() !== '');
+  if (g.length || p.length) return 'whitelist';
+  return c.allowAllWhenEmpty === true ? 'allowAll' : 'denyAll';
+}
+
 function renderAllowSection(c) {
+  const mode = ['allowAll', 'denyAll', 'whitelist'].includes(c.allow?.mode)
+    ? c.allow.mode
+    : deriveAllowModeUi(c);   // 老配置没有 mode ⇒ 按旧语义推导（与后端 allowed() 一致）
+  const groups = (c.allow?.groups || []).map(String);
+  const privates = (c.allow?.private || []).map(String);
+
+  const MO = [
+    ['allowAll', '允许所有会话', '任何群聊和私聊都会响应 —— 黑名单里的人除外'],
+    ['denyAll', '禁止所有会话', '谁都不响应（临时停机用；比「暂停」更彻底）'],
+    ['whitelist', '只运行在白名单', '只有下面名单里的群和好友会响应（默认）'],
+  ];
+
+  const modeOpt = ([v, title, desc]) => `<label class="modeopt${mode === v ? ' on' : ''}">
+      <input type="radio" name="allow-mode" value="${v}" ${mode === v ? 'checked' : ''}>
+      <span><span class="mo-title">${title}</span><span class="mo-desc">${desc}</span></span>
+    </label>`;
+
+  // 芯片输入：一个群一个芯片，点 × 删；回车或点「添加」加。
+  // ⚠️ 前缀区分群与好友（方案要求）：`群 123456` / `好友 123456` —— 两类 id 都在同一个
+  //    数字空间里，不标前缀的话用户分不清这个数字是群还是人。
+  const chip = (kind, id) => `<span class="wchip ${kind === 'groups' ? 'grp' : 'frd'}"
+      >${kind === 'groups' ? '群' : '好友'} ${esc(id)}<span class="wchip-x" data-rm="${kind}" data-id="${esc(id)}" role="button" tabindex="0" title="移除">×</span></span>`;
+
+  const box = (kind, label, placeholder) => `
+    <div class="field">
+      <label>${label}</label>
+      <div class="chipbox" data-chipbox="${kind}">
+        ${(kind === 'groups' ? groups : privates).map((id) => chip(kind, id)).join('')}
+        <input type="text" inputmode="numeric" data-chipinput="${kind}"
+               placeholder="${placeholder}" aria-label="${label}">
+      </div>
+    </div>`;
+
   return `
     <h3 id="settings-allow">聊天白名单</h3>
-    <div class="hint" style="margin-bottom:10px">白名单为空时机器人不会在任何群聊/私聊内运行。</div>
-    <div class="field"><label>从 QQ 账号直接勾选</label>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-small" id="pick-groups-btn">选择群</button>
-        <button class="btn btn-small" id="pick-friends-btn">选择好友</button>
-        <span id="pick-result" class="muted" style="align-self:center"></span>
-      </div></div>
-    <div class="field-row">
-      <div class="field"><label>允许的群号（逗号分隔）</label><input type="text" id="cfg-allowgroups" value="${esc((c.allow.groups || []).join(','))}" /></div>
-      <div class="field"><label>允许的 QQ（逗号分隔）</label><input type="text" id="cfg-allowprivate" value="${esc((c.allow.private || []).join(','))}" /></div>
+    <div class="modepick" id="allow-mode-pick">${MO.map(modeOpt).join('')}</div>
+    <div class="field-row" style="margin-top:12px">
+      ${box('groups', '允许的群', '输入群号后回车')}
+      ${box('private', '允许的好友', '输入 QQ 号后回车')}
     </div>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-allowallwhenempty" ${c.allowAllWhenEmpty === true ? 'checked' : ''} />
-      <label for="cfg-allowallwhenempty">白名单留空时允许所有会话</label></div>
-    <div class="hint">说明：勾选后，若上方两个列表都为空，机器人会在<b>所有</b>群聊和私聊中运行；只要填了任意一项，就只按名单过滤。</div>`;
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+      <button class="btn btn-small" id="pick-groups-btn">从 QQ 账号选群</button>
+      <button class="btn btn-small" id="pick-friends-btn">从 QQ 账号选好友</button>
+      <span id="pick-result" class="muted"></span>
+      <span id="allow-hint" class="muted" style="font-size:12px"></span>
+    </div>
+    ${hintLine('与「微信联系人」勾选共用同一份配置。',
+      '微信联系人在「设置 → 微信联系人」里勾选，勾上就是把人加进这里的好友名单 —— 两边是同一份 allow.private，'
+      + '在哪边改都生效。名单里的数字：群号来自 QQ 群；微信好友的 id 是从收到的微信消息里学到的派生数字，'
+      + '所以别手填，去「微信联系人」页点选。')}`;
 }
 
 /**
@@ -9010,8 +9073,10 @@ async function openWhitelistPicker(kind) {
     $('#pick-result').textContent = isGroups ? '没拉到群列表（检查 SnowLuma）' : '没拉到好友列表';
     return;
   }
-  const inputEl = $(isGroups ? '#cfg-allowgroups' : '#cfg-allowprivate');
-  const selected = new Set(parseList(inputEl.value));
+  // ⚠️ 条目 6：名单不再是"逗号文本框"，而是芯片盒子 ⇒
+  //    候选项的"已选"状态从**芯片**读、确定时把选中的**写回芯片**。
+  const kindKey = isGroups ? 'groups' : 'private';
+  const selected = new Set(readAllowChips(kindKey));
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
@@ -9034,15 +9099,97 @@ async function openWhitelistPicker(kind) {
   $('#pick-cancel', overlay).addEventListener('click', () => overlay.remove());
   $('#pick-apply', overlay).addEventListener('click', () => {
     const picked = $$('input[type=checkbox]:checked', overlay).map((el) => el.value);
-    inputEl.value = picked.join(',');
+    // 写回芯片（先清空再重建 —— 用户可能在弹窗里取消了原来勾着的）
+    setAllowChips(kindKey, picked);
     $('#pick-result').textContent = `已选 ${picked.length} 个${isGroups ? '群' : '好友'}，记得点"保存设置"`;
     overlay.remove();
   });
 }
 
-function parseList(s) {
-  return String(s || '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+/** 读一个芯片盒子里的名单（**唯一来源是 DOM**，因为用户可能刚点 × 删过）。 */
+function readAllowChips(kind) {
+  return Array.from(document.querySelectorAll(`.chipbox[data-chipbox="${kind}"] .wchip`))
+    .map((el) => String(el.textContent).replace(/^[^ ]+\s*/, '').replace(/×$/, '').trim())
+    .filter(Boolean);
 }
+
+/** 把名单写回芯片盒子（先清空再重建）。 */
+function setAllowChips(kind, ids) {
+  const box = document.querySelector(`.chipbox[data-chipbox="${kind}"]`);
+  if (!box) return;
+  for (const el of Array.from(box.querySelectorAll('.wchip'))) el.remove();
+  const input = box.querySelector(`[data-chipinput="${kind}"]`);
+  const label = kind === 'groups' ? '群' : '好友';
+  const seen = new Set();
+  for (const raw of ids) {
+    const id = String(raw).trim();
+    if (!id || seen.has(id)) continue;   // 去重：同一个号加两次会变成两个芯片，删一个还剩一个
+    seen.add(id);
+    const el = document.createElement('span');
+    el.className = `wchip ${kind === 'groups' ? 'grp' : 'frd'}`;
+    el.innerHTML = `${label} ${esc(id)}<span class="wchip-x" data-rm="${kind}" data-id="${esc(id)}" role="button" tabindex="0" title="移除">×</span>`;
+    box.insertBefore(el, input);
+  }
+  bindAllowChips();
+}
+
+/** 芯片的删除/添加接线。⚠️ 用事件委托挂在**设置表单容器**上，只绑一次 ——
+ *  芯片是动态增删的，逐个绑会在每次增删后丢监听（芯片变死件）。
+ *
+ *  🔴 踩坑记录：第一版挂到了 `#settings-page` —— **那个 id 在这个应用里根本不存在**
+ *     （真实容器是 `#settings-form`）。`getElementById` 返回 null ⇒ 整个函数早退 ⇒
+ *     芯片的添加/删除**从来没被接线**，而界面上看不出任何异常（点了没反应、也不报错）。
+ *     这正是本项目最忌讳的静默失效。
+ *  ⇒ 现在的做法：容器找不到就**大声报错**，而不是悄悄 return。
+ */
+function bindAllowChips() {
+  const root = document.getElementById('settings-form')
+  if (!root) {
+    // 宁可吵一点：这条路径出错的表现是"芯片点不动"，比一条控制台报错难查得多
+    console.error('[allow] 找不到 #settings-form，白名单芯片的增删不会工作（芯片会变成死件）')
+    return
+  }
+  if (root.__allowChipsBound) return
+  root.__allowChipsBound = true
+  const addFrom = (input) => {
+    const kind = input.dataset.chipinput;
+    const v = String(input.value || '').trim().replace(/[,，\s]+/g, '');
+    if (!v) return;
+    const ids = readAllowChips(kind);
+    if (!ids.includes(v)) setAllowChips(kind, [...ids, v]);
+    input.value = '';
+    input.focus();
+  };
+  root.addEventListener('click', (e) => {
+    const x = e.target.closest('.wchip-x');
+    if (x) {
+      const kind = x.dataset.rm;
+      const id = x.dataset.id;
+      setAllowChips(kind, readAllowChips(kind).filter((v) => v !== id));
+      return;
+    }
+    // 点盒子空白处 = 聚焦到输入框（不然点了没反应，像坏了）
+    const box = e.target.closest('.chipbox');
+    if (box) box.querySelector('input')?.focus();
+  });
+  root.addEventListener('keydown', (e) => {
+    const input = e.target.closest('[data-chipinput]');
+    if (!input) return;
+    if (e.key === 'Enter') { e.preventDefault(); addFrom(input); return; }
+    // 退格键在空输入框上 = 删掉最后一个芯片（常见的标签输入习惯，
+    // 用键盘就能删，不必去够那个 ×）
+    if (e.key === 'Backspace' && !input.value) {
+      const kind = input.dataset.chipinput;
+      const ids = readAllowChips(kind);
+      if (ids.length) { e.preventDefault(); setAllowChips(kind, ids.slice(0, -1)); }
+    }
+  });
+}
+
+/** ⚠️ 2026-09-22（条目 6）：`parseList()` 已删除。
+ *  它做的是"把逗号文本框的内容切成数组"，而白名单现在用**芯片输入**（`.chipbox`），
+ *  名单的权威来源是 DOM 里的芯片（`readAllowChips`）。
+ *  ⇒ 留着一个没人调的旧函数比删掉更危险：下次有人改名单格式时不知道要改两处。 */
 
 async function saveConfig({ quiet = false } = {}) {
   const c = state.config;
@@ -9230,15 +9377,36 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   if (sec === 'allow') {
+    // ── 条目 6：三选一模式 + 芯片输入 ────────────────────────────────────
+    // ⚠️ 名单的**权威来源是 DOM 里的芯片**（用户可能刚点 × 删过），
+    //    不是 state.config 里的旧数组 —— 用旧数组会把"刚删掉的"又存回去。
+    const picked = (kind) => Array.from(document.querySelectorAll(`.chipbox[data-chipbox="${kind}"] .wchip`))
+      .map((el) => String(el.textContent).replace(/^[^ ]+\s*/, '').replace(/×$/, '').trim())
+      .filter(Boolean);
     patch.allow = {
-      groups: parseList(val('#cfg-allowgroups', (c.allow?.groups || []).join(','))),
-      private: parseList(val('#cfg-allowprivate', (c.allow?.private || []).join(',')))
+      groups: picked('groups'),
+      private: picked('private'),
+      // 模式：从单选读；读不到就保持原值（不回退成默认值 —— 那会悄悄改用户的选择）
+      mode: (document.querySelector('input[name="allow-mode"]:checked') || {}).value
+        || (ALLOW_MODES_UI.includes(c.allow?.mode) ? c.allow.mode : deriveAllowModeUi(c)),
     };
     patch.deny = { groups: [], private: [] };
-    // 原先这里硬编码 false：只要点过保存就把该开关永久重置，
-    // 而 UI 里根本没有输入控件 —— 只能手改 JSON，改完一保存就丢。改为读取复选框。
-    const allowAllBox = $('#cfg-allowallwhenempty');
-    patch.allowAllWhenEmpty = allowAllBox ? !!allowAllBox.checked : (c.allowAllWhenEmpty === true);
+    // ⚠️ 旧字段**继续写**，而且要与 mode 保持一致：
+    //    旧版本读的是它们，回滚后行为才不会变。写成"与 mode 等价的旧形态"：
+    //      allowAll      ⇒ allowAllWhenEmpty=true（名单空时靠它兜底放行）
+    //      denyAll       ⇒ allowAllWhenEmpty=false + 名单**清空**（名单非空会盖过复选框！）
+    //      whitelist     ⇒ allowAllWhenEmpty 保持用户原来的值（不影响判定），名单照实写
+    //    🔴 denyAll 那一支必须清空名单：旧判定是"名单非空 ⇒ 只看名单"，不清空的话
+    //       回滚后会变成"只放行名单里的人"，而用户选的是"谁都不许" —— 方向正好相反。
+    if (patch.allow.mode === 'allowAll') {
+      patch.allowAllWhenEmpty = true;
+    } else if (patch.allow.mode === 'denyAll') {
+      patch.allowAllWhenEmpty = false;
+      patch.allow.groups = [];
+      patch.allow.private = [];
+    } else {
+      patch.allowAllWhenEmpty = c.allowAllWhenEmpty === true;
+    }
   }
 
   if (sec === 'chat') {

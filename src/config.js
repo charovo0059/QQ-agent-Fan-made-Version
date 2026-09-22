@@ -243,6 +243,24 @@ export const DEFAULT_CONFIG = {
   // 用户自定义人设库（保存在配置里，可在设置页添加/选择）
   customPersonas: [],
   // 接入白名单
+  // ⚠️ UI 改造第二阶段 条目 6：新增**可选**字段 `allow.mode`（三选一）。
+  //
+  // 🔴 **默认值里故意不给 mode** —— 这一点踩过坑，别"顺手补上"：
+  //    用户的 config.json 是被 `deepMerge(DEFAULT_CONFIG, 用户配置)` 合并出来的。
+  //    只要默认值里有 `mode: 'denyAll'`，**所有没有这个键的老配置都会凭空获得它**
+  //    ⇒ 老配置从"列表+allowAllWhenEmpty 推导"变成"绝对禁止所有"，
+  //    "把一个新人加进白名单"这件事直接失效（denyAll 是绝对的）。
+  //    实测：test-微信联系人可见.mjs 的「放行后微信消息进了 store」就是这么红的
+  //    （它给的正是 `allow:{private:[],group:[]}` 这种"还没配"的老形态）。
+  //
+  //    没有 mode ⇒ `allowed()` 落回旧推导语义 ⇒ 与升级前一字不差。
+  //    mode 只在用户在界面上**显式选三选一并保存**时才写进配置。
+  //    判定见 src/app.js 的 `allowed()`；为什么不自动迁移见 `migrateAllowMode()` 的注释。
+  //
+  //    mode 的三个取值：
+  //      'allowAll'  全部允许（但 deny 名单仍然优先 —— 黑名单是独立否决权）
+  //      'denyAll'   谁都不许
+  //      'whitelist' 只运行在白名单（名单为空 = 谁都不许，这是"白名单"的自然含义）
   allow: { groups: [], private: [] },
   deny: { groups: [], private: [] },
   allowAllWhenEmpty: false,
