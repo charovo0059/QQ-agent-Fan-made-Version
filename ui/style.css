@@ -3465,7 +3465,55 @@ html[data-theme='dark'] body { background: #0f1115; }
 .modeopt .mo-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .modeopt .mo-desc { font-size: 12px; color: var(--muted); line-height: 1.6; margin-top: 2px; }
 
-/* ── 技能页：标准 Toggle（条目 4：对勾改开关）──────────────────────────
+/* ── 技能页：卡片单行化 + 就地配置表单（条目 4 改动点 4/6）─────────────────
+   方案："卡片单行化：名称+版本+徽章 / 一句话描述 / 类型·工具数小标签；
+   路径与 config 键细节进卡片 ⓘ"、"「配置（N）」行内展开配置表单"。 */
+.skill-line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skill-line1 .skill-card__name { font-size: 13px; }
+/* 第 2 行：一句话描述（限一行高度感，但不截断 —— 描述短，截断反而丢信息） */
+.skill-line1 + .skill-card__desc { margin-top: 3px; }
+/* 第 3 行：类型 · 工具数小标签 */
+.skill-line3 { margin-top: 6px; }
+/* 停用态整卡降饱和（方案改动点 5）已由上面 .tool-card.disabled 的 filter 负责 */
+
+/* 就地展开的配置表单容器 */
+.skill-cfg-inline { margin-top: 10px; }
+.skill-cfg-inline[hidden] { display: none; }
+.skinline {
+  border: 1px solid var(--pt-hairline);
+  border-radius: 10px;
+  background: var(--bg-2);
+  padding: 10px 12px;
+}
+.skinline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--pt-hairline);
+}
+.skinline-head .ph-spacer { flex: 1; }
+.skinline .skill-form { margin-top: 4px; }
+.skinline-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--pt-hairline);
+}
+.skinline-foot .ph-spacer { flex: 1; }
+.skinline code { font-family: var(--mono); font-size: 11px; background: var(--bg-3); padding: 0 4px; border-radius: 4px; }
+
+/* ── 技能页：标准 Toggle（条目 4 改动点 5：对勾改开关）──────────────────
    "对勾改标准 Toggle + 「已启用/已停用」，停用态整卡降饱和"。 */
 .toggle {
   position: relative;

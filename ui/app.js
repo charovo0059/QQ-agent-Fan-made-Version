@@ -816,33 +816,48 @@ function skillCardHtml(s) {
   const allFields = Object.keys(s.configSchema || {});
   const renderable = allFields.filter((k) => s.configSchema[k]?.type !== 'internal');
   const settingsBtn = allFields.length
-    ? `<button class="btn btn-small skill-settings-btn" data-skill-id="${esc(s.id)}">设置（${renderable.length || allFields.length}）</button>` : '';
+    ? `<button class="btn btn-small skill-settings-btn" data-skill-id="${esc(s.id)}" title="就地展开配置表单">配置（${renderable.length || allFields.length}）</button>` : '';
   // 类型徽章用后端给的 kind 判，不用 source（source 只反映清单文件名，是另一件事）
   const kindTag = s.kind == null
     ? '<span class="tool-dep-warn">目录未识别</span>'
     : (s.kind === 'plugin' ? '确定性型' : 'LLM 型');
   const catLabel = { model: '模型', message: '消息', knowledge: '知识', media: '媒体', utility: '工具' };
+  // ── UI 改造第二阶段 条目 4 改动点 4：卡片单行化 ──────────────────────────
+  // 方案："名称+版本+徽章 / 一句话描述 / 类型·工具数小标签；路径与 config 键细节进卡片 ⓘ"
+  // ⇒ 原来 `.tool-header` 里有 5 个块（勾选框/名称/描述/状态徽章），现在收成：
+  //    第 1 行 = 名称 + 版本 + 状态徽章 + ⓘ + Toggle
+  //    第 2 行 = 一句话描述
+  //    第 3 行 = 类型 · 工具数（小标签）
+  // ⚠️ 状态徽章用**既有的 `.status-badge`**（会话状态那套，后端给的 badge 值直接映射），
+  //    不换成新 StatusBadge —— 后端的 badge 字段有它自己的取值（enabled/disabled/…），
+  //    硬套三态会把"未加载""依赖缺失"这些中间态压平。
+  const detailHint = [
+    s.dir ? `目录：${s.dir}` : '',
+    s.id ? `id：${s.id}` : '',
+    (s.toolIds || []).length ? `注册工具：${s.toolIds.join('、')}` : '',
+    (s.capabilities || []).length ? `提供能力：${s.capabilities.join('、')}` : '',
+    (s.hooks || []).length ? `钩子：${s.hooks.join('、')}` : '',
+    `配置键：skills.${s.id}`,
+  ].filter(Boolean).join('；');
   return `<div class="tool-card ${s.active ? 'enabled' : (s.loaded && s.enabled ? 'disabled' : 'dep-disabled')}" data-skill-id="${esc(s.id)}">
-    <div class="tool-header">
-      <label class="tool-checkbox-square" title="打开 / 关闭这个扩展">
-        <input type="checkbox" class="skill-toggle" data-skill-id="${esc(s.id)}" ${s.enabled ? 'checked' : ''} ${s.loaded ? '' : 'disabled'} />
-        <span class="tool-checkbox-box">${s.enabled ? '✓' : '✕'}</span>
-      </label>
-      <div class="tool-title">
-        <div class="skill-card__name">${esc(s.name)}<span class="skill-card__ver">v${esc(s.version || '')}</span></div>
-        <div class="skill-card__desc">${esc(s.description || '（没有写介绍）')}</div>
-      </div>
+    <div class="skill-line1">
+      <div class="skill-card__name">${esc(s.name)}<span class="skill-card__ver">v${esc(s.version || '')}</span></div>
       <span class="status-badge ${badge}">${stateText}</span>
+      ${s.deprecated ? '<span class="tool-dep-warn">已弃用</span>' : ''}
+      <span class="ihint" role="note" tabindex="0" title="${esc(detailHint)}" aria-label="扩展详情">i</span>
+      <span class="ph-spacer"></span>
+      ${settingsBtn}
+      ${toggleHtml(`skill-tg-${s.id}`, !!s.enabled, '已启用', '已停用',
+        `class="skill-toggle" data-skill-id="${esc(s.id)}"${s.loaded ? '' : ' disabled'}`)}
     </div>
-    <div class="tool-meta" style="align-items:center">
+    <div class="skill-card__desc">${esc(s.description || '（没有写介绍）')}</div>
+    <div class="tool-meta skill-line3">
       <span class="tool-dep">${catLabel[s.category] || esc(s.category || '未分类')}</span>
       <span class="tool-dep">${kindTag}</span>
-      ${s.dir ? `<span class="tool-dep" title="条目所在目录">${esc(s.dir)}</span>` : ''}
-      ${s.deprecated ? '<span class="tool-dep-warn">已弃用</span>' : ''}
       ${(s.toolIds || []).length ? `<span class="tool-dep">${s.toolIds.length} 个工具</span>` : ''}
       ${(s.hooks || []).length ? `<span class="tool-dep">${s.hooks.length} 个钩子</span>` : ''}
-      ${settingsBtn ? `<span style="margin-left:auto">${settingsBtn}</span>` : ''}
     </div>
+    <div class="skill-cfg-inline" data-cfg-for="${esc(s.id)}" hidden></div>
     ${caps}${missing}${codeHtml}${capWarn}${reason}${loadErr}${err}${ovNote}
   </div>`;
 }
@@ -856,27 +871,45 @@ function renderSkillsPage() {
   const groups = { skill: [], plugin: [] };
   for (const s of all) groups[s.kind === 'plugin' ? 'plugin' : 'skill'].push(s);
 
-  const sectionOf = (meta) => {
-    const items = groups[meta.key];
-    if (!items.length) {
-      return `<h3 class="usage-h3">${meta.title}（0）</h3>
-        <div class="empty-hint">${meta.empty}</div>
-        <div class="hint" style="margin:6px 0 16px">${meta.lead}</div>`;
+  // ── UI 改造第二阶段 条目 4：搜索 + 类型筛选 ────────────────────────────
+  // 方案："页头：标题 + 生效统计徽标（2/2）+ 搜索 + 类型筛选（全部/LLM 型/确定性型）+ 热重载开关 + 刷新"
+  // ⚠️ 过滤只作用于**已加载的条目**（技能页一次全量渲染，不分页），
+  //    所以直接在这一层过滤、不涉及"加载更多"的计数问题。
+  const q = String(state.skillsQuery || '').toLowerCase();
+  const kindFilter = state.skillsKindFilter || 'all';
+  const matchFilter = (s) => {
+    if (kindFilter !== 'all') {
+      const k = s.kind === 'plugin' ? 'plugin' : 'skill';
+      if (k !== kindFilter) return false;
     }
-    const active = items.filter((s) => s.active).length;
+    if (!q) return true;
+    return `${s.name || ''} ${s.id || ''} ${s.description || ''}`.toLowerCase().includes(q);
+  };
+  const shownCount = all.filter(matchFilter).length;
+
+  const sectionOf = (meta) => {
+    const itemsAll = groups[meta.key];
+    const items = itemsAll.filter(matchFilter);
+    if (!items.length) {
+      // 空状态要说清是"真的没有"还是"被筛掉了"—— 两种空不能让用户分不清（本项目反复踩的静默失效）
+      if (itemsAll.length) {
+        return `<h3 class="usage-h3">${meta.title}（0 / ${itemsAll.length}）</h3>
+          <div class="hint" style="margin:6px 0 16px">${itemsAll.length} 条都被搜索/筛选条件挡住了 —— 清空搜索框或把类型切回「全部」就能看到。</div>`;
+      }
+      return `<h3 class="usage-h3">${meta.title}（0）</h3>
+        <div class="empty-hint">${meta.empty}</div>`;
+    }
+    const active = itemsAll.filter((s) => s.active).length;
     const rows = items.map(skillCardHtml).join('');
     // 尾注：技能页最有用的信息是"它注册了哪些工具"（模型看到的就是这些）；
     // 插件页是"它提供哪些能力"（核心按名字找的就是这些）。
-    const tools = items.flatMap((s) => s.toolIds || []);
-    const caps = [...new Set(items.flatMap((s) => s.capabilities || []))].sort();
-    const footer = meta.key === 'skill'
-      ? `<div class="hint" style="margin:6px 0">这组技能共注册 <b>${tools.length}</b> 个工具 —— 这些工具会被放进发给模型的 function 列表，模型只能看到工具，看不到技能本身。</div>
-         <div class="tool-meta" style="gap:6px;margin-bottom:16px">${tools.map((t) => `<span class="tool-dep">${esc(t)}</span>`).join('') || '<span class="muted">（没有注册任何工具）</span>'}</div>`
-      : `<div class="hint" style="margin:6px 0">这组插件共提供 <b>${caps.length}</b> 个能力 —— 核心模块按能力名找提供者，不依赖具体插件名，所以换实现不用改核心代码。</div>
-         <div class="tool-meta" style="gap:6px;margin-bottom:16px">${caps.map((c) => `<span class="tool-dep">${esc(c)}</span>`).join('') || '<span class="muted">（没有声明任何能力）</span>'}</div>`;
-    return `<h3 class="usage-h3">${meta.title}（${items.length} · ${active} 生效）</h3>
+    // ⚠️ 条目 4：这两段说明**下沉到「开发者说明」折叠区**（方案："四段说明文字收进底部
+    //    「开发者说明」折叠区"）。这里只留一句"共 N 个工具"的短标签在卡片上。
+    const tools = itemsAll.flatMap((s) => s.toolIds || []);
+    const caps = [...new Set(itemsAll.flatMap((s) => s.capabilities || []))].sort();
+    return `<h3 class="usage-h3">${meta.title}（${items.length}${items.length !== itemsAll.length ? ` / ${itemsAll.length}` : ''} · ${active} 生效）</h3>
       <div class="tool-list">${rows}</div>
-      ${footer}`;
+      <div data-devnote="${meta.key}" data-tools="${esc(tools.join(','))}" data-caps="${esc(caps.join(','))}"></div>`;
   };
 
   // 已配置但未安装：删掉目录后 config.skills.<id> 还留着（单开关制没有"影子开关"要清，
@@ -894,25 +927,51 @@ function renderSkillsPage() {
   // 热重载状态（config.skills.hotReload，默认 on）。显示出来是因为它决定了
   // "放了新扩展要不要手动点刷新"—— 这是用户最需要知道的一件事，不该藏在配置里。
   const hot = state.skillsHotReload !== false;
+
+  // ── 开发者说明折叠区（条目 4 改动点 1 + 6 的落点）──────────────────────
+  // 方案："四段说明文字收进底部「开发者说明」折叠区（一个明显入口，默认收起，
+  //   因含开发者受众不藏图标）"
+  const toolsAll = groups.skill.flatMap((s) => s.toolIds || []);
+  const capsAll = [...new Set(groups.plugin.flatMap((s) => s.capabilities || []))].sort();
+  const devNotes = `<details class="devnotes" id="skills-devnotes">
+    <summary>开发者说明</summary>
+    <div class="devnotes-body">
+      <h4>开关只有一处</h4>
+      <div>关闭后它注册的工具、提供的能力、提示词片段会<b>同时</b>失效。状态徽章与"为什么没生效"的说明都由后端判定，界面不自己猜。</div>
+      <h4>怎么放新扩展</h4>
+      <div>在 <code>skills/&lt;id&gt;/</code> 或 <code>plugins/&lt;id&gt;/</code> 放清单与入口文件${hot ? '，约 0.5 秒后自动加载' : '，然后点「刷新」'}。</div>
+      <h4>技能的「工具」是什么</h4>
+      <div>技能注册的工具会被放进发给模型的 function 列表 —— <b>模型只能看到工具，看不到技能本身</b>。
+        当前这组共注册 <b>${toolsAll.length}</b> 个工具：</div>
+      <div class="tool-meta" style="gap:6px;margin:6px 0 2px">${toolsAll.map((t) => `<span class="tool-dep">${esc(t)}</span>`).join('') || '<span class="muted">（没有注册任何工具）</span>'}</div>
+      <h4>插件的「能力」是什么</h4>
+      <div>插件声明能力，核心模块按<b>能力名</b>找提供者，不依赖具体插件名 —— 所以换实现不用改核心代码。
+        当前这组共提供 <b>${capsAll.length}</b> 个能力：</div>
+      <div class="tool-meta" style="gap:6px;margin:6px 0 2px">${capsAll.map((c) => `<span class="tool-dep">${esc(c)}</span>`).join('') || '<span class="muted">（没有声明任何能力）</span>'}</div>
+    </div>
+  </details>`;
+
   const html = `<div class="usage-wrap">
-    <div class="usage-head">
-      <h2>技能 / 插件</h2>
-      <div class="usage-days">
-        <span class="uc-tag" title="生效中 / 全部条目">${activeAll} / ${total} 生效</span>
-        <span class="uc-tag" title="${hot ? '放进 skills/ 或 plugins/ 的扩展会被自动加载（约 0.5 秒后生效）' : '新扩展要手动点「刷新」才会加载'}">热重载：${hot ? '开' : '关'}</span>
-        <button class="btn btn-small" id="skills-hotreload-btn" title="切换热重载开关">${hot ? '关掉热重载' : '打开热重载'}</button>
-        <button class="btn btn-small" id="skills-refresh-btn" title="重新扫描 skills/ 与 plugins/ 目录">刷新</button>
-      </div>
+    <div class="pagehead">
+      <h3>技能 / 插件</h3>
+      ${statusBadge(activeAll === total && total > 0 ? 'ok' : (activeAll ? 'warn' : 'off'), `${activeAll} / ${total} 生效`)}
+      <span class="ph-spacer"></span>
+      <input class="ph-search" type="search" id="skills-search" placeholder="搜索技能或插件" aria-label="搜索" value="${esc(state.skillsQuery || '')}">
+      <span class="segchips" id="skills-kind-filter">
+        <span class="chip${kindFilter === 'all' ? ' on' : ''}" data-kind="all">全部</span>
+        <span class="chip${kindFilter === 'skill' ? ' on' : ''}" data-kind="skill">LLM 型</span>
+        <span class="chip${kindFilter === 'plugin' ? ' on' : ''}" data-kind="plugin">确定性型</span>
+      </span>
+      ${toggleHtml('skills-hotreload-toggle', hot, '热重载开', '热重载关',
+        `title="放进 skills/ 或 plugins/ 的扩展会被自动加载（约 0.5 秒后生效）；关掉则要手动点「刷新」"`)}
+      <button class="btn btn-small" id="skills-refresh-btn" title="重新扫描 skills/ 与 plugins/ 目录">刷新</button>
     </div>
-    <div class="hint" style="margin-bottom:14px">
-      <b>开关只有这一处</b> —— 关闭后它注册的工具、提供的能力、提示词片段会<b>同时</b>失效。
-      状态徽章与"为什么没生效"的说明都由后端判定，界面不自己猜。<br />
-      放新扩展：在 <code>skills/&lt;id&gt;/</code> 或 <code>plugins/&lt;id&gt;/</code> 放清单与入口文件${hot ? '，约 0.5 秒后自动加载' : '，然后点「刷新」'}。<br />
-      ⚠️ 热重载开着时，<b>放进这两个目录的任何 <code>.js</code> 都会被自动执行</b> —— 别把不信任的代码丢进去。
-    </div>
+    ${hot ? safetyBar('热重载开着时，放进 skills/ 或 plugins/ 目录的任何 .js 都会被自动执行 —— 请勿放入不信任的代码。') : ''}
+    ${q || kindFilter !== 'all' ? `<div class="hint">筛出 ${shownCount} / ${total} 条${q ? `（关键词「${esc(state.skillsQuery)}」）` : ''}</div>` : ''}
     ${sectionOf(SKILL_KINDS.skill)}
     ${sectionOf(SKILL_KINDS.plugin)}
     ${unHtml}
+    ${devNotes}
   </div>`;
   box.innerHTML = html;
   bindSkillsPageEvents();
@@ -926,25 +985,61 @@ function bindSkillsPageEvents() {
     await rescanSkills();
     renderSkillsPage();   // 重绘会重建按钮，不必再手动恢复文案
   });
-  $('#skills-hotreload-btn')?.addEventListener('click', async () => {
-    const want = state.skillsHotReload === false;   // 当前关着 → 点它就是打开
-    const btn = $('#skills-hotreload-btn');
-    if (btn) btn.disabled = true;
+  // 热重载：条目 4 起改用**标准 Toggle**（原来是一个文案会变的按钮"关掉热重载/打开热重载"）。
+  // 🔴 方案原则 2 点名"禁止用按钮样式表达状态"—— 那个按钮正是反例：
+  //    它的**文字**是状态（"热重载：开"另有一个 uc-tag），而**按钮**是动作，
+  //    两者混在一个控件里，用户看不出"现在到底开着没有"。
+  //    现在：Toggle 表达状态与动作，状态文字由 toggleHtml 的 on/off 文案承担。
+  $('#skills-hotreload-toggle')?.addEventListener('change', async (e) => {
+    const want = !!e.target.checked;
+    e.target.disabled = true;
     try {
       const r = await api('/api/skills/hotreload', { method: 'POST', body: JSON.stringify({ enabled: want }) });
       state.skills = r.skills || state.skills;
       state.skillsHotReload = r.hotReload !== false;
       renderSkillsPage();
-    } catch (e) {
-      alert(`切换热重载失败：${e.message}`);
-      if (btn) btn.disabled = false;
+    } catch (err) {
+      // 🔴 存不上必须把开关退回去，否则界面在说谎（用户以为开了，其实没开）
+      e.target.checked = !want;
+      e.target.disabled = false;
+      alert(`切换热重载失败：${err.message}`);
     }
+  });
+  // 搜索（debounce 150ms 与侧栏会话搜索同量级：每敲一个字符都重绘会让人输入发涩）
+  const sInput = $('#skills-search');
+  if (sInput) {
+    let t = null;
+    sInput.addEventListener('input', () => {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => {
+        t = null;
+        const v = sInput.value.trim();
+        if (v === (state.skillsQuery || '')) return;
+        state.skillsQuery = v;
+        renderSkillsPage();
+        // 重绘后把焦点与光标放回搜索框 —— 否则打字打一半焦点就没了
+        //（本项目反复踩的"打字被打断"，这里是同一个病）
+        const el = $('#skills-search');
+        if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch { /* ignore */ } }
+      }, 150);
+    });
+  }
+  // 类型筛选（分段芯片，参照侧栏会话筛选那套）
+  $$('#skills-kind-filter .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const v = chip.dataset.kind || 'all';
+      if (v === (state.skillsKindFilter || 'all')) return;
+      state.skillsKindFilter = v;
+      renderSkillsPage();
+    });
   });
   $$('#skills-page .skill-toggle').forEach((cb) => {
     cb.addEventListener('change', () => toggleSkill(cb.dataset.skillId, cb.checked));
   });
+  // 配置：条目 4 改动点 6 要求 **就地展开**（原来弹 modal）。
+  // ⚠️ 就地展开的 DOM 放在卡片内的 `.skill-cfg-inline`，由 openSkillSettingsInline 填。
   $$('#skills-page .skill-settings-btn').forEach((b) => {
-    b.addEventListener('click', () => openSkillSettings(b.dataset.skillId));
+    b.addEventListener('click', () => openSkillSettingsInline(b.dataset.skillId, b));
   });
   $('#skills-cleanup-btn')?.addEventListener('click', async () => {
     const ids = (state.uninstalledSkills || []).map((u) => u.id);
@@ -1046,6 +1141,116 @@ function renderSkillSettingsModal(skill) {
       <button class="btn btn-primary" id="skset-save">保存</button>
     </div>
   </div>` };
+}
+
+/**
+ * 技能/插件的配置表单：**就地展开**（UI 改造第二阶段 条目 4 改动点 6）。
+ *
+ * 方案原文："「设置（N）」改「配置（N）」，**行内展开配置表单**"。
+ * ⇒ 原来是弹 modal。改成在卡片内展开。
+ *
+ * ⚠️ 实现上**不重写表单**：复用 `renderSkillSettingsModal()` 产出的同一份 HTML，
+ *    只把它的 `.skill-modal__body` 与 `.skill-modal__foot` 抽出来放进就地容器。
+ *    理由：表单字段的渲染规则（boolean/number/enum/secret、internal 字段的兜底说明）
+ *    有一大堆细节，写第二份必然漂移 —— 而漂移的症状是"某个类型的字段在就地表单里
+ *    长得不一样/存不进去"，很难查。
+ * ⚠️ 就地版**不能复用 modal 的 aid`id**：`#skset-save` / `#skset-cancel` /
+ *    `#skset-x` 是 modal 的固定 id，同页同时只应有一个。就地表单用自己的 id
+ *    （`skinline-*`），并且**不渲染关闭按钮** —— 再点一次「配置」就是收起。
+ * ⚠️ 同一时刻只允许展开一个：展开前把别的 `.skill-cfg-inline` 清空并收起
+ *    （否则页面上会出现两份带相同 `data-key` 的表单，保存时按卡片查询会串）。
+ */
+function openSkillSettingsInline(skillId, btn) {
+  const skill = (state.skills || []).find((x) => x.id === skillId);
+  if (!skill) return;
+  const host = document.querySelector(`.skill-cfg-inline[data-cfg-for="${CSS.escape(skillId)}"]`);
+  if (!host) return;
+
+  // 已经展开 ⇒ 再点一次收起（按钮是切换语义，与折叠块一致）
+  if (!host.hidden) {
+    host.hidden = true;
+    host.innerHTML = '';
+    if (btn) btn.textContent = btn.dataset.label || btn.textContent;
+    return;
+  }
+
+  // 收起别的卡片上已展开的表单，避免同页两份带相同 data-key 的表单
+  for (const other of document.querySelectorAll('.skill-cfg-inline:not([hidden])')) {
+    other.hidden = true;
+    other.innerHTML = '';
+  }
+
+  const built = renderSkillSettingsModal(skill);
+  if (built.error) {
+    host.hidden = false;
+    host.innerHTML = `<div class="safetybar"><span>⚠️</span><span>${esc(built.error)}</span></div>`;
+    return;
+  }
+  // 从同一份 HTML 里抠出 body 与 foot（不重写表单）
+  const tmp = document.createElement('div');
+  tmp.innerHTML = built.html;
+  const bodyHtml = tmp.querySelector('.skill-modal__body')?.innerHTML || '';
+  const footHtml = tmp.querySelector('.skill-modal__foot')?.innerHTML || '';
+
+  host.hidden = false;
+  host.innerHTML = `<div class="skinline">
+    <div class="skinline-head">
+      <b>${esc(skill.name)}</b> <span class="muted">配置</span>
+      <span class="ph-spacer"></span>
+      <span class="muted" style="font-size:12px">改动即时生效，无需重启</span>
+    </div>
+    ${bodyHtml}
+    <div class="skinline-foot">
+      <span class="muted" style="font-size:12px">保存在 <code>config.skills['${esc(skillId)}']</code></span>
+      <span class="ph-spacer"></span>
+      <button class="btn btn-small" id="skinline-cancel">取消</button>
+      <button class="btn btn-primary" id="skinline-save">保存</button>
+    </div>
+  </div>`;
+  if (btn) {
+    if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+    btn.textContent = '收起';
+  }
+  // 齿轮按钮点进来时页面会跳一下，把表单滚进视野（否则用户以为没反应）
+  try { host.scrollIntoView({ block: 'nearest' }); } catch { /* ignore */ }
+
+  const close = () => {
+    host.hidden = true;
+    host.innerHTML = '';
+    if (btn) btn.textContent = btn.dataset.label || '配置';
+  };
+  host.querySelector('#skinline-cancel')?.addEventListener('click', close);
+  // 布尔字段旁边的"已开启/已关闭"要跟着变，否则看不出当前状态
+  host.querySelectorAll('input[type="checkbox"][data-type="boolean"]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const span = cb.parentElement?.querySelector('.st-text');
+      if (span) span.textContent = cb.checked ? '已开启' : '已关闭';
+    });
+  });
+  host.querySelector('#skinline-save')?.addEventListener('click', async (ev) => {
+    const saveBtn = ev.currentTarget;
+    saveBtn.disabled = true;
+    // ⚠️ 只在**本卡片**内按 data-key 取值：同页有多个卡片，全局 querySelectorAll
+    //    会把别的卡片的字段一起收进来（那就是"改 A 存 B"）。
+    const settings = {};
+    host.querySelectorAll('[data-key]').forEach((el) => {
+      const type = el.dataset.type;
+      if (type === 'boolean') settings[el.dataset.key] = el.checked;
+      else if (type === 'number') {
+        const num = Number(el.value);
+        // 空值/非数字：不提交这个键，让后端保留原值（而不是写进一个 NaN）
+        if (el.value.trim() !== '' && Number.isFinite(num)) settings[el.dataset.key] = num;
+      } else settings[el.dataset.key] = el.value;   // secret 留空 → 后端按"不修改"处理
+    });
+    try {
+      await api(`/api/skills/${encodeURIComponent(skillId)}`, { method: 'POST', body: JSON.stringify({ settings }) });
+      await loadSkillsStatus();
+      renderSkillsPage();   // 重绘后表单自然收起（新 DOM 里 .skill-cfg-inline 是 hidden）
+    } catch (err) {
+      saveBtn.disabled = false;
+      alert(`保存失败：${err.message}`);
+    }
+  });
 }
 
 function openSkillSettings(skillId) {
