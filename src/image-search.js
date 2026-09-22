@@ -37,24 +37,6 @@ function makeImageForm(buffer, mime, fieldName, filename = 'image.jpg') {
   return form;
 }
 
-// 从 HTML 里抓 "key":[ ... ] 的 JSON 数组（手工括号配对，容忍字符串内的括号）。
-function extractJsonArray(html, marker) {
-  const start = html.indexOf(marker);
-  if (start === -1) return null;
-  const arrStart = html.indexOf('[', start + marker.length);
-  if (arrStart === -1) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let i = arrStart; i < html.length; i++) {
-    const ch = html[i];
-    if (esc) { esc = false; continue; }
-    if (ch === '\\') { esc = true; continue; }
-    if (ch === '"') { inStr = !inStr; continue; }
-    if (inStr) continue;
-    if (ch === '[') depth++;
-    else if (ch === ']') { depth--; if (depth === 0) return html.slice(arrStart, i + 1); }
-  }
-  return null;
-}
 
 // ── trace.moe：动画截图识番（官方免费 JSON API，无需 key）──────────────────
 async function tracemoe(buffer, mime) {

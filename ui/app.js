@@ -356,51 +356,6 @@ async function bootLoop() {
   if (state.tab === 'memory') loadMemoryView();
 }
 
-// ── 就绪度体检（傻瓜式引导的核心） ──
-function assessReadiness(cfg, status) {
-  const checks = [];
-  if (!cfg) return { ready: false, checks: [{ ok: false, label: '配置加载失败' }] };
-  // 拆成"接口地址"与"模型"两步：合并判断时新手分不清到底缺哪个。
-  // 出厂 baseUrl 为空，第一条会直接指出该填什么。
-  const urlOk = !!String(cfg.api.baseUrl || '').trim();
-  checks.push({
-    ok: urlOk,
-    label: urlOk ? `接口地址：${cfg.api.baseUrl}` : '还没有填接口地址（Base URL，必填）：官方 API 或中转站提供的 OpenAI 兼容地址',
-    fix: urlOk ? null : 'settings-api'
-  });
-  const modelOk = !!String(cfg.api.model || '').trim();
-  checks.push({
-    ok: modelOk,
-    label: modelOk ? `模型已选择：${cfg.api.model}` : '还没有选择模型（填好地址后点「获取列表」或手动添加）',
-    fix: modelOk ? null : 'settings-api'
-  });
-  const allowOk = (cfg.allow?.groups?.length || cfg.allow?.private?.length || cfg.allowAllWhenEmpty);
-  checks.push({ ok: !!allowOk, label: allowOk ? `白名单：${(cfg.allow.groups || []).length} 个群 / ${(cfg.allow.private || []).length} 个好友` : '还没有配置白名单（必填）', fix: allowOk ? null : 'settings-allow' });
-  const obOk = status?.onebot?.connected;
-  checks.push({ ok: !!obOk, label: obOk ? `OneBot 已连接${status.onebot.self ? `（${status.onebot.self.nickname}）` : ''}` : 'OneBot（SnowLuma）未连接 —— 到 SnowLuma 页签：启动网关 → WebUI 登录 → 在「进程」页注入已登录的 QQ', fix: obOk ? null : 'snowluma-tab' });
-  // 可选功能的提示：**不影响 ready**（不是必要条件，不该拦住别人跑起来）。
-  // 为什么放在这张卡上：默认关闭的可选功能最容易"没人知道它存在"。
-  // 本子查询的程序（jm_server.exe）随包附带，但**离线库 nh.db 不随包**（151MB）——
-  // 2026-09-17 用户决定改为在设置页导入，见 项目记忆.md §16。
-  const tips = [];
-  if (!cfg.doujinLookup?.enabled) {
-    tips.push('「本子查询」是可选功能，默认关闭。需要时到「设置 → 搜索服务 → 本子查询」打开，再用「导入离线库」导入 .db 或 .csv（离线库不随安装包分发）。');
-  } else {
-    // 开关**开着**的时候才检查资源 —— 这才是真的会出事的状态：
-    // 离线库 nh.db 不随包分发，所以"开着开关但没导库"是装完新包后很常见的一步之差。
-    // 后果是**静默半失效**：JM 直连照常能用，`source=auto` 的 NH 兜底却永远查不到东西，
-    // 而界面上一点提示都没有（§7「静默失效」那条）。
-    const dj = status?.doujin;
-    // ⚠️ 顺序要紧：入口缺失是更严重、更靠前的一环（没有 jm_server 就什么都查不了，
-    // 包括 JM 直连）。先报它，再说"库没导入"这种"只坏一半"的情况。
-    if (dj && dj.serverExists === false) {
-      tips.push('「本子查询」已开启，但**找不到服务入口**（jm_server.exe / jm_server.py）—— 现在查不了任何东西。到「设置 → 搜索服务 → 本子查询」检查工具目录。');
-    } else if (dj && dj.nhDbExists === false) {
-      tips.push('「本子查询」已开启，但**离线库（nh.db）还没导入** —— 现在只有 JM 直连能用，JM 查不到时不会自动兜底。到「设置 → 搜索服务 → 本子查询 → 导入离线库」选一个 .db 或 .csv。');
-    }
-  }
-  return { ready: urlOk && modelOk && allowOk && obOk, checks, tips };
-}
 
 // 「我已保存」的记忆：**按密码值记**，不按时间戳。
 // 为什么：如果只记一个时间点，下次安装又生成一个新密码时会被旧的记录吞掉，
@@ -559,10 +514,6 @@ function matchPlatformSession(item) {
   return isWechatMode() ? src === 'wechat' : src !== 'wechat';
 }
 
-/** 会话条目最终显示什么（微信模式下顺带把平台标出来，避免两个平台串味）。 */
-function platformIconOf(item) {
-  return String((item && item.source) || 'qq') === 'wechat' ? '（微信）' : '';
-}
 
 /**
  * 把平台模式应用到界面：按钮态、页签显隐、当前页重载。
@@ -1253,54 +1204,6 @@ function openSkillSettingsInline(skillId, btn) {
   });
 }
 
-function openSkillSettings(skillId) {
-  const skill = (state.skills || []).find((x) => x.id === skillId);
-  if (!skill) return;
-  const built = renderSkillSettingsModal(skill);
-  if (built.error) { alert(built.error); return; }
-
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = built.html;
-  document.body.appendChild(overlay);
-
-  const close = () => overlay.remove();
-  overlay.querySelector('#skset-x').addEventListener('click', close);
-  overlay.querySelector('#skset-cancel').addEventListener('click', close);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-  overlay.setAttribute('tabindex', '-1');
-  overlay.focus();
-
-  // 复选框旁的"已开启/已关闭"要跟着变，否则看不出当前状态
-  overlay.querySelectorAll('input[type="checkbox"][data-type="boolean"]').forEach((cb) => {
-    cb.addEventListener('change', () => {
-      const span = cb.parentElement?.querySelector('.st-text');
-      if (span) span.textContent = cb.checked ? '已开启' : '已关闭';
-    });
-  });
-
-  overlay.querySelector('#skset-save').addEventListener('click', async () => {
-    const settings = {};
-    overlay.querySelectorAll('[data-key]').forEach((el) => {
-      const type = el.dataset.type;
-      if (type === 'boolean') settings[el.dataset.key] = el.checked;
-      else if (type === 'number') {
-        const n = Number(el.value);
-        // 空值/非数字：不提交这个键，让后端保留原值（而不是写进一个 NaN）
-        if (el.value.trim() !== '' && Number.isFinite(n)) settings[el.dataset.key] = n;
-      } else settings[el.dataset.key] = el.value;   // secret 留空 → 后端按"不修改"处理
-    });
-    try {
-      await api(`/api/skills/${encodeURIComponent(skillId)}`, { method: 'POST', body: JSON.stringify({ settings }) });
-      await loadSkillsStatus();
-      renderSkillsPage();
-      close();
-    } catch (err) {
-      alert(`保存失败：${err.message}`);
-    }
-  });
-}
 
 // ── 状态栏 ──
 async function refreshStatus() {
@@ -1993,21 +1896,36 @@ function initLogPanel(idPrefix) {
 }
 
 /**
- * 组件 5：Gate —— 连接门控。
+ * 组件 5：Gate —— 连接门控（**只出引导条**，`class="gate"` 由调用方的常驻容器自己带）。
  *
  * 方案原则 4：依赖通道连通的操作（群发、联系人放行等），未连通时**整区禁用** +
  *    「去完成连接引导」链接，连通后自动解锁。
  *
- * 用法：`gateWrap(html, { locked, guideTab, guideText })`
- * ⚠️ 锁定用**类**（`.gate.locked > .gate-inner { pointer-events:none }`）而不是
- *    `disabled` 属性 —— 因为整区里有 input/select/button 多种控件，
- *    逐个加 disabled 容易漏（漏了就出现"未连接却可点、点了必失败"，正是方案说的现状问题）。
- * ⚠️ 引导链接**永远可点**：它在 .gate-bar 里，不在被禁用的 .gate-inner 里。
+ * ⚠️ 配套的两条 CSS 都要求**直接父子**，所以调用方必须满足这个结构：
+ *      <div id="xxx" class="gate">        ← 常驻容器自己带 `gate`（+ 运行时 toggle `locked`）
+ *        <div class="gate-inner">…控件…</div>
+ *        …gateBarHtml(…) 的输出…
+ *      </div>
+ *    · `.gate.locked > .gate-inner { opacity:.5; pointer-events:none }`（未连通 ⇒ 整区不可点）
+ *    · `.gate:not(.locked) > .gate-bar { display:none }`（已连通 ⇒ **引导条隐藏**）
+ *
+ * 🔴 2026-09-22（第十一对话 · 代码洁净日）这里原来是个 `gateWrap(html, {...})`，
+ *    它自己造 `<div class="gate">` 外壳 —— 而唯一需要门控的地方（SnowLuma 的群发块）
+ *    要求外壳是**常驻元素 `#sl-notify-block`**（那块不随 15 秒轮询重建），
+ *    `gateWrap` 表达不了 ⇒ 于是那一页**手抄了一份 inner+bar**，`gateWrap` 从此没人调用。
+ *    后果是**两条 CSS 规则一起失效**（全 app 再没有任何地方发出 `gate` 类）：
+ *      · 未连通时**没禁用**（inner 一直可点 ⇒ 点了必失败，正是方案说的现状问题）；
+ *      · 已连通时**引导条没隐藏**（真机实测：已连上的状态下仍显示"未连接，不可用 —— 先把上面的三步走完"）。
+ *    真机对照实验（手动补上 `gate` 类）：bar 立刻 `display:none`、再加 `locked` 后 inner 立刻
+ *    `pointer-events:none` ⇒ **CSS 是对的，缺的只是那个类**。
+ *    ⇒ 收敛成"只出 bar"的纯函数 + 调用方容器带 `gate` 类，两边都能用，且不再有第二份手抄。
+ *    ⚠️ 锁定用**类**而不是 `disabled` 属性 —— 整区里有 input/select/button 多种控件，
+ *      逐个加 disabled 容易漏（漏了就出现"未连接却可点、点了必失败"）。
+ *    ⚠️ 引导链接**永远可点**：它在 `.gate-bar` 里，不在被禁用的 `.gate-inner` 里。
  */
-function gateWrap(innerHtml, { locked, guideTab, guideText } = {}) {
-  const bar = `<div class="gate-bar"><span>${esc(guideText || '需要先完成连接')}</span>`
+function gateBarHtml(guideText, guideTab) {
+  return `<div class="gate-bar"><span>${esc(guideText || '需要先完成连接')}</span>`
     + `<span class="gate-go" data-goto-tab="${esc(guideTab || 'snowluma')}" role="button" tabindex="0">去完成连接引导 →</span></div>`;
-  return `<div class="gate${locked ? ' locked' : ''}"><div class="gate-inner">${innerHtml}</div>${bar}</div>`;
 }
 
 /**
@@ -2709,7 +2627,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
           </div>
         </div>
       </div>
-      <div class="gate-bar"><span>未连接，不可用 —— 先把上面的三步走完。</span><span class="gate-go" data-goto-tab="snowluma" role="button" tabindex="0">去完成连接引导 →</span></div>`;
+      ${gateBarHtml('未连接，不可用 —— 先把上面的三步走完。')}`;
 
     // ── 状态区（**每轮重建**，里面全是只读展示，没有任何输入元素）──────────────
     // UI 改造第二阶段条目 2。改动点对照方案原文：
@@ -2872,7 +2790,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     box.innerHTML = `<div class="snowluma-page-card">
       <div id="sl-dyn">${dynHtml()}</div>
       <div id="sl-log-wrap">${logPanelHtml}</div>
-      <div id="sl-notify-block">${notifyBlockHtml}</div>
+      <div id="sl-notify-block" class="gate">${notifyBlockHtml}</div>
     </div>`;
     initLogPanel('sl-logpanel');
     paintLogs(box);
@@ -5510,160 +5428,15 @@ function renderPersonaSaveBar() {
     </div>`;
 }
 
-function renderHealthCard() {
-  const { ready, checks, tips } = assessReadiness(state.config, state.status);
-  const rows = checks.map((c) => {
-    let extra = '';
-    if (!c.ok && c.fix === 'snowluma-tab') {
-      extra = ' <button class="btn btn-small" id="hc-goto-snowluma">前往 SnowLuma 页签</button>';
-    }
-    return `
-    <div class="h-item ${c.ok ? 'ok' : 'bad'}">
-      <span>${c.ok ? '✓' : '✗'}</span>
-      <span class="h-label">${esc(c.label)}${extra}</span>
-    </div>`;
-  }).join('');
-  const testRow = `
-    <div class="h-item ${'mute'}">
-      <span>·</span>
-      <span class="h-label">API 连通性：
-        <button class="btn btn-small" id="test-api-btn">测试一下</button>
-        <span id="test-api-result" class="muted"></span>
-      </span>
-    </div>`;
-  // 可选功能提示（不影响 ready）：用和 API 连通性同一档的弱化样式，别喧宾夺主
-  const tipRows = (tips || []).map((t) => `
-    <div class="h-item mute">
-      <span>·</span>
-      <span class="h-label">${esc(t)}</span>
-    </div>`).join('');
-  return `
-    <div class="health-card ${ready ? 'all-ok' : ''}">
-      <div class="h-title">${ready ? '✅ 一切就绪，机器人运行中' : '🧭 完成下面缺失项就能跑起来'}</div>
-      ${rows}
-      ${testRow}
-      ${tipRows}
-    </div>`;
-}
 
 // 人设模板数据：state.personaTemplates（由 loadSettings 从后端填充）
 
-// ── 模型目录（多提供商；面板式选择 + 图片输入能力徽标） ──
-function visionBadge(providerId, model) {
-  const r = (state.visionResults || {})[`${providerId}|||${model}`];
-  const src = r?.source === 'docs' ? '官方资料' : (r?.source === 'probe' ? '在线探测' : '');
-  const show = state.config?.ui?.showVision !== false;
-  const t = (cls, text) => `<span class="vbadge ${cls}" style="${show ? '' : 'display:none'}" title="${esc((src ? `【${src}】` : '') + (r?.note || ''))}">${text}</span>`;
-  if (!r) return t('unk', '未检测');
-  if (r.verdict === 'vision') return t('ok', '支持图片输入');
-  if (r.verdict === 'no-vision') return t('no', '不支持图片输入');
-  return t('unk', '无法判定');
-}
-
-// ── 两栏悬停下拉：左供应商 / 右模型 ──
-function visionVerdictOf(providerId, model) {
-  return (state.visionResults || {})[`${providerId}|||${model}`]?.verdict;
-}
 
 // 目录的"点击外部 / Esc 收起"监听器只在全局注册一次（renderSettings 每次重渲染都会
 // 重建 DOM，若在这里注册会随渲染次数无限叠加、并引用已脱离文档的旧节点）。
 // 事件触发时按 id 现查当前元素，天然跟随最新 DOM。
 let modelDdDismissBound = false;
-function bindModelDdDismiss() {
-  if (modelDdDismissBound) return;
-  modelDdDismissBound = true;
-  document.addEventListener('click', (e) => {
-    const dd = document.getElementById('model-dd');
-    if (!dd || dd.hidden || dd.contains(e.target)) return;
-    const btn = document.getElementById('model-pick-btn');
-    if (btn && btn.contains(e.target)) return;   // 按钮自己负责开合
-    dd.hidden = true;
-  });
-  document.addEventListener('keydown', (e) => {
-    const dd = document.getElementById('model-dd');
-    if (dd && !dd.hidden && e.key === 'Escape') dd.hidden = true;
-  });
-}
 
-function renderProviderColumn(c) {
-  const provs = state.providers || [];
-  // 旧文案指向的"从 DSH 导入"功能早已移除，这里改成能实际操作的指引
-  if (!provs.length) {
-    return '<div class="muted" style="padding:10px;font-size:12px;line-height:1.7">'
-      + '目录还是空的。先在右边「手动添加提供商」填地址与 API Key，'
-      + '点「获取列表」勾选模型，或直接手填模型 id 后点「确认添加」。'
-      + '<br>Key 可以去 DeepSeek / 智谱 / Kimi / OpenAI 的开放平台申请。'
-      + '</div>';
-  }
-  let html = '<div class="mdd-prov" data-pid="__manual__"><span class="mdd-prov-name">（手动输入模型名）</span></div>';
-  for (const p of provs) {
-    const warn = [!p.hasKey ? '⚠无密钥' : '', p.needsBaseUrl ? '⚠需补地址' : ''].filter(Boolean).join(' ');
-    const visionOk = (p.models || []).filter((m) => visionVerdictOf(p.id, m) === 'vision').length;
-    const meta = warn || `${p.models.length} 模型${visionOk ? ` · ${visionOk} 可看图` : ' · 0 可看图'}`;
-    html += `<div class="mdd-prov" data-pid="${esc(p.id)}">
-      <span class="mdd-prov-name">${esc(p.displayName || p.id)}</span>
-      <span class="mdd-prov-meta">${esc(meta)}</span>
-    </div>`;
-  }
-  return html;
-}
-
-function renderModelColumn(pid, c) {
-  if (pid === '__manual__') {
-    return '<div class="muted" style="padding:12px;font-size:12px">选此项后直接在下方"模型"输入框填任意模型名，并手动填 Base URL / Key。</div>';
-  }
-  const p = (state.providers || []).find((x) => x.id === pid);
-  if (!p) return '';
-  const current = `${c.api.provider || ''}|||${c.api.model || ''}`;
-  return `<div class="mp-provider"><span>${esc(p.displayName || p.id)}${p.anthropicOrigin ? ' · Anthropic 协议' : ''}</span><span class="mp-url">${esc(p.baseURL || '无端点')}</span></div>
-    ${p.models.map((m) => {
-      const v = `${p.id}|||${m}`;
-      return `<div class="mp-row${v === current ? ' current' : ''}" data-v="${esc(v)}"><span class="mp-name">${esc(m)}</span>${visionBadge(p.id, m)}</div>`;
-    }).join('')}`;
-}
-
-function applyProviderPick(value, { silent = false } = {}) {
-  const hint = $('#provider-hint');
-  const store = $('#cfg-provider');
-  if (!value || value === '__manual__') {
-    store.value = '';
-    if (!silent) hint.textContent = '手动模式：直接在下面填 Base URL / Key / 模型名。';
-    return;
-  }
-  const [pid, model] = value.split('|||');
-  const p = (state.providers || []).find((x) => x.id === pid);
-  if (!p) { hint.textContent = '未找到该提供商，请重新从 DSH 导入。'; return; }
-  store.value = pid;
-  $('#cfg-model').value = model;
-  // 价格卡片直接读界面控件的值，这里只需要通知它刷新
-  refreshModelPriceCard();
-  const notes = [];
-  if (p.baseURL) {
-    $('#cfg-baseurl').value = p.baseURL;
-    notes.push(`端点 ${p.baseURL}`);
-  } else {
-    notes.push('⚠ 该提供商地址未知，请手动填 Base URL');
-  }
-  if (p.hasKey) {
-    $('#cfg-apikey').value = '******';
-    $('#cfg-apikey').type = 'password';
-    const toggleBtn = $('#cfg-apikey-toggle');
-    if (toggleBtn) toggleBtn.textContent = '显示';
-    notes.push('该提供商已保存密钥（显示为 ******，点「显示」查看明文，输入新 Key 可替换）');
-  } else {
-    $('#cfg-apikey').value = '';
-    $('#cfg-apikey').type = 'password';
-    const toggleBtn = $('#cfg-apikey-toggle');
-    if (toggleBtn) toggleBtn.textContent = '显示';
-    notes.push('⚠ 该提供商没有可用密钥，请手动粘贴 API Key');
-  }
-  if (p.anthropicOrigin) notes.push('DSH 中为 Anthropic 协议，已按 OpenAI 兼容模式调用，若报错请换用其他模型');
-  const vr = (state.visionResults || {})[`${pid}|||${model}`];
-  if (vr && (vr.verdict === 'vision' || vr.verdict === 'no-vision')) {
-    notes.push(vr.verdict === 'vision' ? '✅ 该模型支持图片输入' : '🚫 该模型不支持图片输入');
-  }
-  hint.textContent = `已选 ${p.displayName || p.id} · ${model}：${notes.join('；')}`;
-}
 
 /* ══════════════════════════════════════════════════════════════
    表情包页
@@ -6141,16 +5914,6 @@ function wechatPageShell() {
     <div id="wx-log-wrap"></div>`;
 }
 
-/** 一行状态：圆点 + 标题 + 说明。
- *  ⚠️ 遗留函数：条目 3 之后微信页改用 StatusBadge + Stepper（见 channelStatusPageHtml），
- *    这个只在少数尚未迁移的地方还在用。**新代码不要再用它** —— 它写死了三个色值
- *    （#35c46a / #e0574a / #8a8a8a），与设计系统的 --green / --red / --muted 是两套，
- *    暗色主题下对不齐。 */
-function wxRow(okState, title, detail) {
-  const color = okState === true ? '#35c46a' : (okState === false ? '#e0574a' : '#8a8a8a');
-  const dot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:6px"></span>`;
-  return `<div style="margin:6px 0">${dot}<b>${esc(title)}</b> <span class="muted">${esc(detail || '')}</span></div>`;
-}
 
 /* ══════════════════════════════════════════════════════════════════════════
    通道状态页模板（ChannelStatusPage）—— UI 改造第二阶段条目 3
@@ -8186,10 +7949,11 @@ function bindSettingsEvents(c) {
   const testProviderBtn = $('#test-provider-btn');
   if (testProviderBtn) testProviderBtn.addEventListener('click', () => runConnectivityTest(testProviderBtn, $('#provider-test-result'), '测试连通性'));
 
-  // 健康卡片上的「测试一下」：此前 renderHealthCard 渲染后从未绑定事件
-  // （绑的是 test-provider-btn，id 不匹配），按钮点了完全没反应。
-  const testApiBtn = $('#test-api-btn');
-  if (testApiBtn) testApiBtn.addEventListener('click', () => runConnectivityTest(testApiBtn, $('#test-api-result'), '测试一下'));
+  // ⚠️ 2026-09-22（第十一对话 · 代码洁净日）这里删掉了「健康卡片上的『测试一下』」那段绑定：
+  //    它绑的是 `#test-api-btn`，而那个按钮**只由 renderHealthCard() 产出** —— 那个函数
+  //    自 09-18 基线起就没人调用（体检卡被顶部 banner + 首启跳设置取代），所以这个
+  //    `if (testApiBtn)` 永远为 null、静默跳过：**一段永远不会执行的绑定，被 null 守卫掩盖着**。
+  //    现随 renderHealthCard / assessReadiness 一并删除（体检卡整片休眠死码）。
 
   // 当前 Base URL 右侧的“获取列表”
   const fetchCurrentBtn = $('#fetch-current-models-btn');
