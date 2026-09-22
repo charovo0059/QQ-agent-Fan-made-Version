@@ -9390,7 +9390,15 @@ async function saveConfig({ quiet = false } = {}) {
       mode: (document.querySelector('input[name="allow-mode"]:checked') || {}).value
         || (ALLOW_MODES_UI.includes(c.allow?.mode) ? c.allow.mode : deriveAllowModeUi(c)),
     };
-    patch.deny = { groups: [], private: [] };
+    // 🔴 2026-09-22（第十一对话复核）：这里**原来有一行无条件清空 deny**
+    //    （`patch.deny = { groups: [], private: [] };`，自 09-18 基线就在）。
+    //    而整个界面**没有任何地方能编辑 deny** —— 它只能手改 config.json。
+    //    ⇒ 只要用户手配过黑名单，之后随便保存一次「聊天白名单」就会把它**静默清空**
+    //      （下一次判断就放行了那个人，且界面上完全看不出来）。
+    //    这与本页自己的判据直接冲突：`allowed()` 把 deny 当"独立否决权、永远优先"，
+    //    注释里还专门写了"把用户的黑名单静默失效是安全事故级"。
+    //    ⇒ 现在**不写这个键**：`updateConfig` 是深合并，缺这个键就等于原样保留。
+    //      （没有 deny 输入框时不写它，比"写一个空对象"安全。）
     // ⚠️ 旧字段**继续写**，而且要与 mode 保持一致：
     //    旧版本读的是它们，回滚后行为才不会变。写成"与 mode 等价的旧形态"：
     //      allowAll      ⇒ allowAllWhenEmpty=true（名单空时靠它兜底放行）
