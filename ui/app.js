@@ -3799,10 +3799,11 @@ function renderProposalReview() {
   if (!items.length && !accepted.length) {
     box.innerHTML = `<div class="proposal-head">
       <span class="proposal-title">改进提案</span>
-      <span class="uc-tag">暂无</span>
+      <span class="segchips"><span class="chip">待审<span class="n">0</span></span></span>
     </div>
-    <div class="hint" style="margin-bottom:10px">她可以在聊天里用 <code>submit_proposal</code> 提议改自己（记忆/人设/功能/底层都行）。
-      提议只会出现在这里，<b>不会自动生效</b> —— 由你看过之后决定怎么做。</div>`;
+    ${hintLine('她可以在聊天里提议改自己（记忆/人设/功能/底层都行），提议不会自动生效。',
+      '她用 submit_proposal 提交，提议只会出现在这里，任何一项都不会自动执行；'
+      + '「采纳」只是打个标记、列进待办，真正动手由人来做（见 src/proposals.js 顶部）。')}`;
     return;
   }
 
@@ -3814,15 +3815,24 @@ function renderProposalReview() {
        </details>`
     : '';
 
+  // ── UI 改造第二阶段 条目 5：提案块降噪 ─────────────────────────────────
+  // 方案要求："标题+「待审 0」「已采纳 5」分段芯片+刷新收为一行；删重复标签「改进提案（5）」；
+  //   两段说明压成一行「只记录想法，不会自动执行 ⓘ」（采纳流程、SnowLuma 链接进 ⓘ）"
+  // ⇒ 标题与计数合成**一行**，说明压成**一行 + ⓘ**（hintLine）。
+  // ⚠️ 原来标题是两处（`.proposal-title` 写了两次，一份在"暂无"分支一份在这里），
+  //    且 `.uc-tag` 与 `已采纳（N）` 在折叠头里**又重复了一次**。全部收掉。
   box.innerHTML = `<div class="proposal-head">
       <span class="proposal-title">改进提案</span>
-      <span class="uc-tag">待审 ${pending}</span>
-      ${accepted.length ? `<span class="uc-tag" title="已采纳、还没做完的条数">已采纳 ${accepted.length}</span>` : ''}
+      <span class="segchips">
+        <span class="chip${pending ? ' on' : ''}" title="还没处理的条数">待审<span class="n">${pending}</span></span>
+        ${accepted.length ? `<span class="chip" title="已采纳、还没做完的条数">已采纳<span class="n">${accepted.length}</span></span>` : ''}
+      </span>
       <span class="spacer"></span>
       <button class="btn btn-small" id="proposal-refresh">刷新</button>
     </div>
-    <div class="hint" style="margin-bottom:8px">这里只记她想改什么，<b>任何一项都不会被自动执行</b> ——
-      采纳只是打个标记，真正动手由人来做（见 <code>src/proposals.js</code> 顶部）。</div>
+    ${hintLine('只记录想法，不会自动执行。',
+      '采纳只是打个标记、列进待办，真正动手由人来做（见 src/proposals.js 顶部）。'
+      + '提案里最多的就是"想改记忆方式"，所以放在记忆页而不是新开页签。')}
     ${items.map((p) => card(p, false)).join('')}
     ${acceptedHtml}`;
 
@@ -4047,10 +4057,14 @@ function renderMemoryList() {
   //    详见 src/proposals.js 顶部的边界说明。
   renderProposalReview();
 
-  // 列表头的「显示空记忆」开关（常驻元素，只绑一次；状态记在 localStorage 里）
+  // 「显示空记忆」开关（**常驻元素、只绑一次**；状态记在 localStorage 里）
+  // ⚠️ UI 改造第二阶段条目 5：这个开关原来在**列表头**，现在移到记忆详情的「记忆」分区标题右侧
+  //    （方案要求"「显示空记忆」归位其右侧"——它管的是"详情里列哪些人"，放列表头语义错位）。
+  // ⚠️ 它现在住在**每轮重建的详情区**里 ⇒ 每次重建都会换一个新元素，
+  //    所以 `__bound` 这个"只绑一次"的守卫必须**每次渲染后清掉**，否则第二次渲染后
+  //    新元素上没有监听器 —— 开关变死件（点不动、也不报错）。
   const showEmptyBox = $('#mem-show-empty');
-  if (showEmptyBox && !showEmptyBox.__bound) {
-    showEmptyBox.__bound = true;
+  if (showEmptyBox) {
     showEmptyBox.checked = state.showEmptyMemory === true;
     showEmptyBox.addEventListener('change', () => {
       state.showEmptyMemory = showEmptyBox.checked;
@@ -4266,6 +4280,14 @@ async function loadMemoryDetail(chatKey) {
         </div>
       </div>
       ${memInteropHtml(chatKey)}
+      <div class="pt-sec">记忆 <span class="muted" style="font-weight:400">这个会话记住的每个人</span>
+        <span class="ph-spacer"></span>
+        <label class="toggle" id="mem-empty-toggle-wrap" title="勾上之后，白名单里那些还没有记忆文件的会话也会出现在左侧列表里 —— 便于点进去手动添加印象">
+          <input type="checkbox" id="mem-show-empty">
+          <span class="tg-track"><span class="tg-knob"></span></span>
+          <span class="tg-text">显示空记忆</span>
+        </label>
+      </div>
       ${membersHtml}
       ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>'}
     `;
@@ -4433,13 +4455,21 @@ function memInteropHtml(chatKey) {
     </div>`;
   }).join('');
 
+  // ── UI 改造第二阶段 条目 5：互通块默认折叠 + **折叠态显示配置摘要** ──────
+  // 方案要求："默认折叠为单行（▸ 记忆互通 · 跨会话共享印象），**折叠态显示配置摘要**
+  //   （如「当前：全互通 开 · 全平台互通 · 0 个互通组」）；展开态三组设置卡片化（各一行说明）；
+  //   总说明压底部一行 ⓘ；互通组空态文案保留（本身是操作引导）"
+  //
+  // 🔴 折叠态摘要为什么重要：这块设的是**跨人共享**（开了之后 A 私聊的事可能出现在 B 私聊），
+  //    而它的默认形态是收起的。如果收起后完全看不出当前配置，用户就**无法察觉它被打开过** ——
+  //    一个影响隐私的开关，收起时必须把当前状态写在脸上。
+  const scopeLabel = { off: '各聊各的', samePlatform: '同平台内互通', all: '全平台互通' }[scope] || scope;
+  const groupCount = Object.keys(groups).length;
+  const summaryText = `当前：${unified ? '全互通 开' : '全互通 关'} · ${esc(scopeLabel)} · ${groupCount} 个互通组`;
+
   return `<details class="mem-interop">
-    <summary>🔗 记忆互通（跨会话共享印象）</summary>
+    <summary>🔗 记忆互通 <span class="mi-sum">${summaryText}</span></summary>
     <div class="mem-interop-body">
-      <p class="mem-interop-intro">
-        默认全部关闭。打开后，别的会话里记下的印象也会进这里的提示词，
-        每条都会标明<b>来自哪个会话</b>与<b>属于谁（id 为准）</b>。
-      </p>
       <label class="mem-interop-row">
         <input type="checkbox" id="mem-unified" ${unified ? 'checked' : ''}>
         <b>全互通</b>
@@ -4461,6 +4491,9 @@ function memInteropHtml(chatKey) {
         </div>
         ${groupRows || '<div class="mem-interop-empty">还没有互通组。点上面「新建组」把本会话放进去，再到另一个会话里把它也加进同一个组。</div>'}
       </div>
+      ${hintLine('这里是跨会话（含跨人）共享印象，所以默认关闭。',
+        '打开后，别的会话里记下的印象也会进这里的提示词，每条都会标明来自哪个会话与属于谁（id 为准）。'
+        + '⚠️ 这是**跨人**的互通：开了之后 A 私聊里的事可能出现在 B 私聊里 —— 所以必须由人显式打开。')}
     </div>
   </details>`;
 }
