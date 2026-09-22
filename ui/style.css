@@ -2953,3 +2953,107 @@ body::before {
   filter: blur(28px) saturate(1.8);
 }
 
+/* ══ 记忆互通设置区（记忆页详情里的折叠块）══════════════════════════════
+ *
+ * 这是**补设计层**（2026-09-22）。背景：这一块是第九对话 2026-09-20 加的新功能，
+ * 比 K3/hy4p 的设计更晚 ⇒ 从来没进过设计范围。当时为了把功能做出来，
+ * `memInteropHtml()` 里直接内联了 10 处 `style="…"`，没有一个 CSS 类。
+ *
+ * 🔴 内联写法里藏着一个真 bug（核查时实测确认）：
+ *     `border:1px solid var(--line,#333)` —— 而 **`--line` 在 style.css 里从来没定义过**。
+ *     `var()` 的第二个参数是"未定义时的兜底值"，所以它**永远**是 `#333`。
+ *     线上实测亮色主题下 `border-color = rgb(51,51,51)`：设计系统用的是
+ *     `rgba(0,0,0,.08)` 的发丝线，于是亮色下多出一条突兀的深灰描边。
+ *     （暗色下 `#333` 恰好接近发丝线的 `rgba(255,255,255,.16)`，所以只在亮色露馅。）
+ *     ⇒ 典型的"看着不对但说不出哪不对"。**别再用"变量 + 兜底值"的写法**：
+ *       要用 token 就用**存在的** token，否则写死了反而更诚实。
+ *
+ * ⚠️ 结构约束：`details.mem-interop` / 里面的 `summary` / `#mem-unified` /
+ *    `#mem-members-scope` / `#mem-group-add` / `.mem-group-toggle` 这些
+ *    **id 与类名是三个界面验证脚本的锚点**（`验-记忆互通界面` / `验-新建互通组弹窗` /
+ *    `验-记忆互通会改配置的动作`），改样式时不要动它们。
+ */
+.mem-interop {
+  margin: 8px 0 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--pt-hairline);
+  border-radius: 12px;
+  background: var(--pt-glass-2);
+  box-shadow: var(--pt-sh-1), var(--pt-inner);
+}
+/* 折叠头：与详情里其它分区头（.pt-sec）同一套字重与节奏 */
+.mem-interop > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  list-style: none;
+}
+.mem-interop > summary::-webkit-details-marker { display: none; }
+/* 自己的小三角：展开/收起各转一次，与页签那种克制动效一致 */
+.mem-interop > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 14px;
+  color: var(--muted);
+  transition: transform var(--dur-base) var(--ease-out-quart);
+}
+.mem-interop[open] > summary::before { transform: rotate(90deg); }
+.mem-interop > summary:hover { color: var(--accent-strong); }
+
+.mem-interop-body { padding: 8px 0 2px; }
+/* 说明文字：这功能是**跨人**互通、默认关，说清后果比说清操作更重要 */
+.mem-interop-intro {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+/* 一行一个开关。用 label 而不是 div ⇒ 点文字也能切换 */
+.mem-interop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.mem-interop-row input[type='checkbox'] { flex: none; accent-color: var(--accent); }
+.mem-interop-row select {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 12px;
+  max-width: 100%;
+}
+.mem-interop-row select:focus { border-color: var(--accent); outline: none; }
+.mem-interop-note { font-size: 12px; color: var(--muted); }
+
+/* 互通组：组名 + 会话数 + 加入按钮 */
+.mem-interop-groups { padding: 6px 0 2px; }
+.mem-interop-groups-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mem-interop-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.mem-interop-group b { font-weight: 600; }
+/* 空状态：与 .list-head 那种"安静的说明"同级，不做成整页空状态 */
+.mem-interop-empty {
+  padding: 6px 0 2px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+

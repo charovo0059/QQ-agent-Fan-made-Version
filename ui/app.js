@@ -3896,6 +3896,20 @@ async function loadMemoryDetail(chatKey) {
  *
  * ⚠️ 这里是**跨人**的互通，所以默认关：开了之后 A 私聊里的事可能出现在 B 私聊里。
  *    用户明确要这个能力，但"默认打开"会让没配过的人凭空泄露 ⇒ 必须由人显式打开。
+ *
+ * ⚠️ 2026-09-22 第十对话：**去掉了这里原先的 10 处内联 `style="…"`，改用 style.css 的
+ *    `.mem-interop*` 一族**。原因是核查发现这一块从来没进过设计层（它比 K3 的设计更晚），
+ *    而内联写法里藏着一个真 bug：
+ *      `border:1px solid var(--line,#333)` —— `--line` 在 style.css 里**从来没定义过**，
+ *      而 `var()` 的第二个参数是"未定义时的兜底值"，所以它**永远**是 `#333`；
+ *      亮色主题下实测 `border-color = rgb(51,51,51)`，而设计系统用的是 rgba(0,0,0,.08) 发丝线
+ *      ⇒ 亮色下多出一条突兀的深灰描边（暗色下恰好看不出来）。
+ *    ⇒ 教训：**要用 token 就用存在的 token**；写 `var(--x, #硬编码)` 等于埋一个静默的错色。
+ *
+ * ⚠️ 下面这些 **id 与类名是三个界面验证脚本的锚点**，改名会直接弄坏它们
+ *    （`工具-会话诊断\验-记忆互通界面.mjs` / `验-新建互通组弹窗.mjs` / `验-记忆互通会改配置的动作.mjs`）：
+ *    `details.mem-interop`、其中的 `summary`、`#mem-unified`、`#mem-members-scope`、
+ *    `#mem-group-add`、`.mem-group-toggle`。
  */
 function memInteropHtml(chatKey) {
   const cfg = (state.config || {});
@@ -3910,26 +3924,26 @@ function memInteropHtml(chatKey) {
     const inside = arr.includes(String(chatKey));
     const others = arr.filter((k) => k !== String(chatKey));
     const preview = others.slice(0, 4).map((k) => formatChatTitle(k, chatNameOf(k))).join('、');
-    return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0">
+    return `<div class="mem-interop-group">
       <button class="btn btn-small mem-group-toggle${inside ? '' : ' btn-ghost'}" data-group="${esc(name)}">${inside ? '✓ 已加入' : '加入'}</button>
       <b>${esc(name)}</b>
       <span class="muted">${arr.length} 个会话${others.length ? '：' + esc(preview) + (others.length > 4 ? ' …' : '') : ''}</span>
     </div>`;
   }).join('');
 
-  return `<details class="mem-interop" style="margin:6px 0;padding:6px 10px;border:1px solid var(--line,#333);border-radius:6px">
-    <summary style="cursor:pointer">🔗 记忆互通（跨会话共享印象）</summary>
-    <div style="padding:8px 0 2px">
-      <div class="muted" style="margin-bottom:6px">
+  return `<details class="mem-interop">
+    <summary>🔗 记忆互通（跨会话共享印象）</summary>
+    <div class="mem-interop-body">
+      <p class="mem-interop-intro">
         默认全部关闭。打开后，别的会话里记下的印象也会进这里的提示词，
         每条都会标明<b>来自哪个会话</b>与<b>属于谁（id 为准）</b>。
-      </div>
-      <label style="display:flex;align-items:center;gap:8px;padding:4px 0">
+      </p>
+      <label class="mem-interop-row">
         <input type="checkbox" id="mem-unified" ${unified ? 'checked' : ''}>
         <b>全互通</b>
-        <span class="muted">所有会话一个池子（含 QQ ↔ 微信）；开了它就忽略下面的分组</span>
+        <span class="mem-interop-note">所有会话一个池子（含 QQ ↔ 微信）；开了它就忽略下面的分组</span>
       </label>
-      <label style="display:flex;align-items:center;gap:8px;padding:4px 0">
+      <label class="mem-interop-row">
         <b>同一个人的记忆</b>
         <select id="mem-members-scope">
           <option value="off"${scope === 'off' ? ' selected' : ''}>各聊各的</option>
@@ -3937,11 +3951,14 @@ function memInteropHtml(chatKey) {
           <option value="all"${scope === 'all' ? ' selected' : ''}>全平台互通（QQ 认识的他，微信里也认得）</option>
         </select>
       </label>
-      <div style="padding:6px 0 2px"><b>互通组</b>
-        <span class="muted">（一个会话可同时属于多个组）</span>
-        <button class="btn btn-small" id="mem-group-add" style="margin-left:8px">＋ 新建组并加入本会话</button>
+      <div class="mem-interop-groups">
+        <div class="mem-interop-groups-head">
+          <b>互通组</b>
+          <span class="mem-interop-note">（一个会话可同时属于多个组）</span>
+          <button class="btn btn-small" id="mem-group-add">＋ 新建组并加入本会话</button>
+        </div>
+        ${groupRows || '<div class="mem-interop-empty">还没有互通组。点上面「新建组」把本会话放进去，再到另一个会话里把它也加进同一个组。</div>'}
       </div>
-      ${groupRows || '<div class="muted" style="padding:4px 0">还没有互通组。点上面「新建组」把本会话放进去，再到另一个会话里把它也加进同一个组。</div>'}
     </div>
   </details>`;
 }
