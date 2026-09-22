@@ -192,12 +192,13 @@
                 #memory-detail 的 innerHTML，放那边会"点一下会话就消失"（第一版就是这么写错的）。
              ⚠️ 这里只展示 + 打标记，**不执行任何提案内容**，见 src/proposals.js 顶部。 -->
         <div id="proposal-review" class="proposal-review"></div>
-        <div class="list-head muted" style="display:flex;align-items:center;gap:8px" data-page-node-id="LVSsdebq14ic87yIdKe0k1">
-          <span>记忆</span>
-          <label style="margin-left:auto;font-weight:400;font-size:12px;cursor:pointer;white-space:nowrap" title="白名单里的会话如果没有记忆文件，默认不显示（它们不是文件，删不掉）">
-            <input type="checkbox" id="mem-show-empty" style="vertical-align:-1px" />显示空记忆
-          </label>
-        </div>
+        <!-- ⚠️ UI 改造第二阶段条目 5：「显示空记忆」开关**已从这里移走**，
+             挪到记忆详情里「记忆」分区标题的右侧（方案要求"归位其右侧"）。
+             理由：它管的是"详情里列哪些人"，挂在**列表头**语义错位 ——
+             用户在列表上找它，而它影响的是详情区的内容。
+             ⇒ 别在这里再加回来：两个同名 id 会让 $('#mem-show-empty') **静默只拿到第一个**，
+               第二个变成永远点不动的死件。 -->
+        <div class="list-head muted" data-page-node-id="LVSsdebq14ic87yIdKe0k1">记忆</div>
         <div id="memory-items" data-page-node-id="Nd0JwkZfmnInPLDO9AjVAD"></div>
       </aside>
       <div id="memory-detail" class="detail-pane" data-page-node-id="fXph3DU6yHzmzVZOtXuAii">

@@ -406,6 +406,12 @@
 .pt-sec::-webkit-details-marker { display: none; }
 .pt-sec .chev { color: var(--muted); flex: none; transition: transform var(--dur-base) var(--ease-out-quart); }
 .pt-sec .m { font-size: 11px; font-weight: 400; color: var(--muted); }
+/* 分区标题右侧放开关（条目 5：「显示空记忆」归位其右侧）。
+   ⚠️ `.pt-sec` 原本是 `display:flex; align-items:center`，加一个 `.ph-spacer` 就能把
+      右挂件推到最右 —— 不需要改 `.pt-sec` 本身，也不要用 `margin-left:auto`
+      （那样在 `.pt-sec` 变成别的布局时会失效）。 */
+.pt-sec .ph-spacer { flex: 1; }
+.pt-sec .toggle { font-weight: 400; }
 details.pt-fold[open] > summary.pt-sec .chev { transform: rotate(90deg); }
 
 .pt-code { border-top: 1px solid var(--pt-hairline); background: var(--bg); overflow: hidden; }
@@ -3000,6 +3006,18 @@ body::before {
 }
 .mem-interop[open] > summary::before { transform: rotate(90deg); }
 .mem-interop > summary:hover { color: var(--accent-strong); }
+/* 折叠态摘要（条目 5 要求："折叠态显示配置摘要"）。
+   🔴 为什么这一条很重要：这块设的是**跨人共享**（开了之后 A 私聊的事可能出现在 B 私聊），
+      而它的默认形态是收起的。如果收起后完全看不出当前配置，用户就**无法察觉它被打开过**。
+      ⇒ 一个影响隐私的开关，收起时必须把当前状态写在脸上。
+   样式原则：与标题同一行、弱化（灰、非粗体、小一号）—— 它是补充信息，不该抢标题。 */
+.mem-interop > summary .mi-sum {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+.mem-interop[open] > summary .mi-sum { opacity: .7; }
 
 .mem-interop-body { padding: 8px 0 2px; }
 /* 说明文字：这功能是**跨人**互通、默认关，说清后果比说清操作更重要 */
