@@ -101,7 +101,19 @@ export class SessionRegistry {
     try {
       const data = JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
       return data;
-    } catch {
+    } catch (e) {
+      // 🔴 2026-09-22（第十一对话 · 隐患排查）：这个 catch 原来**吞掉了三种完全不同的失败**
+      //    —— ① 文件不存在（ENOENT，正常：这个会话还没落过盘）
+      //       ② 文件存在但**解析不了**（存档损坏 / 写了一半被杀进程）
+      //       ③ 权限 / IO 错误
+      //    它们全都返回 `null`，而 `null` 在这套代码里的语义是"**没有这个会话**"
+      //    ⇒ **存档坏了看起来跟没有一样**。对一个曾经丢过一整天存档的项目（09-17 那次事故）
+      //      来说，这是最不该静默的那一类：用户与界面都只会以为"这个会话是空的"。
+      //    ⚠️ 改动**只加日志、不动返回值**（`null` 的契约保持不变，调用方一行都不用改）——
+      //      非 ENOENT 才出声，免得正常路径被刷屏。
+      if (e?.code !== 'ENOENT') {
+        console.error(`[sessions] 会话 ${id} 读不出来（文件在但解析/IO 失败）：${e?.message || e}`)
+      }
       return null;
     }
   }
@@ -116,7 +128,11 @@ export class SessionRegistry {
     if (this.current.has(id)) return this.current.get(id);
     try {
       return JSON.parse(fs.readFileSync(sessionFile(id), 'utf8'));
-    } catch {
+    } catch (e) {
+      // 同 get()：非 ENOENT 要出声（存档坏了不能看起来像"没有"）
+      if (e?.code !== 'ENOENT') {
+        console.error(`[sessions] 会话 ${id} 读不出来（peek，文件在但解析/IO 失败）：${e?.message || e}`)
+      }
       return null;
     }
   }
