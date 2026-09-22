@@ -240,7 +240,25 @@ export class Dreamer {
       if (parsed && Array.isArray(parsed.notes)) {
         return { lastDay: String(parsed.lastDay || ''), notes: parsed.notes };
       }
-    } catch { /* 还没做过梦 */ }
+      // 读到了合法 JSON、但结构不对（例如被人手改成对象）⇒ 也算"读不出来"
+      console.error(`[dream] ${DREAMS_FILE} 结构不对（没有 notes 数组）—— 本次按空库启动；`
+        + `⚠️ 原文件没有被覆盖，可人工检查。`);
+    } catch (e) {
+      // ⚠️ 2026-09-22（第十一对话 · 隐患排查）修：原来这一行是 `catch { /* 还没做过梦 */ }`
+      //    —— "还没做过梦"（文件不存在）与"文件坏了"**必须分开**。
+      //    🔴 因为 `#save()` 写的是 `this.state`，而 `this.state = this.#load()`（构造时）
+      //      ⇒ "文件坏了 ⇒ 当空库 ⇒ **下次写梦的笔记时**（#save）把空库覆盖回去"
+      //      ⇒ 整份梦的笔记历史丢失。与已修的 `stickers.js` 同一族。
+      //    ⇒ 与 `config.js:loadConfig` / `stickers.js` 一致：ENOENT 静默当空库；
+      //      其它错误**原文件另存为 `.corrupt-<时间戳>` 保命 + 大声报**。
+      if (e?.code !== 'ENOENT') {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const bak = `${DREAMS_FILE}.corrupt-${stamp}`;
+        try { fs.copyFileSync(DREAMS_FILE, bak); } catch { /* 连备份都失败也得继续报 */ }
+        console.error(`[dream] ${DREAMS_FILE} 存在但读不出来（${e?.message || e}）—— 已另存为 `
+          + `${path.basename(bak)}；本次按空库启动。⚠️ 原笔记没有被覆盖，可人工恢复。`);
+      }
+    }
     return { lastDay: '', notes: [] };
   }
 

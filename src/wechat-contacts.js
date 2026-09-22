@@ -40,7 +40,26 @@ function load() {
       private: (j && typeof j.private === 'object' && j.private) || {},
       group: (j && typeof j.group === 'object' && j.group) || {}
     };
-  } catch { cache = emptyDoc(); }   // 文件不存在/坏了都当空表
+  } catch (e) {
+    // ⚠️ 2026-09-22（第十一对话 · 隐患排查）修：原来这一行是 `catch { cache = emptyDoc(); }`
+    //    —— 注释写着"文件不存在/坏了都当空表"，但**这两种情况必须分开**：
+    //    · 文件不存在（ENOENT）= 首次运行 ⇒ 空表是对的，静默即可
+    //    · **文件在但读不出来**（损坏 / 权限 / IO）= 异常 ⇒ 绝不能静默当空表
+    //    🔴 因为本文件的 `scheduleFlush()` 写的是
+    //        `fs.writeFileSync(FILE, JSON.stringify(load(), null, 1))` —— **把 load() 的结果写回原路径**。
+    //        于是"读失败 ⇒ 空表 ⇒ 下一条微信消息进来（2 秒防抖）⇒ 空表覆盖原文件"，
+    //        与已修的 `stickers.js`、早有设计的 `config.js:loadConfig` 是**同一族**。
+    //    ⇒ 做法与它们一致：**原文件另存为 `.corrupt-<时间戳>` 保命 + 大声报**；
+    //      仍返回空表（契约不变、调用方一行不用改），但**原数据还在盘上、可人工恢复**。
+    if (e?.code !== 'ENOENT') {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const bak = `${FILE}.corrupt-${stamp}`;
+      try { fs.copyFileSync(FILE, bak); } catch { /* 连备份都失败也得继续报 */ }
+      console.error(`[wechat-contacts] ${FILE} 存在但读不出来（${e?.message || e}）—— 已另存为 `
+        + `${path.basename(bak)}；本次按空表启动。⚠️ 原表没有被覆盖，可人工恢复。`);
+    }
+    cache = emptyDoc();
+  }
   return cache;
 }
 

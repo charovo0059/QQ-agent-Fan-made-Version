@@ -107,7 +107,14 @@ function createSkillApi(skillId, permissions = []) {
      */
     capability: (name, args = {}) => {
       for (const p of skillManager.getCapabilityProviders(name, {})) {
-        try { return p.fn(args); } catch { return undefined; }
+        try { return p.fn(args); } catch (e) {
+          // ⚠️ 2026-09-22（第十一对话 · 隐患排查）：原来这里是 `catch { return undefined }` ——
+          //    插件的钩子抛错会被**静默跳过**，而插件是用户自己放进来的、热重载也开着，
+          //    出问题时**界面上完全看不出**（表现为"这个能力就是没生效"）。
+          //    ⇒ 语义不变（仍返回 undefined、仍继续找下一个提供者），但**出声**。
+          console.error(`[skill:${skillId}] 能力 ${name} 的钩子抛错了（该能力本次按"没有"处理）：`, e?.message ?? e);
+          return undefined;
+        }
       }
       return undefined;
     },
