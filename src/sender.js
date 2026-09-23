@@ -7,6 +7,10 @@ import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { resolveFreshImageUrl } from './onebot.js';
+import { pathToFileURL } from 'node:url';
+// ⚠️ 只为拿本地表情缓存的路径（cachedStickerFilePath）。tools.js 不 import sender.js
+//    ⇒ 不构成循环依赖（本轮实测确认过）。
+import { cachedStickerFilePath } from './tools.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
@@ -179,12 +183,40 @@ export class SendQueue {
       this.#checkRate(chatKey);
       await sleep(randInt(600, 1500)); // 发表情前真人式的短暂停顿
       // ⚠️ 存下来的 url 里 rkey 只有十几个小时寿命，直接发会失败（实测 download url has expired）。
-      // 有 QQ 文件名就拿它换一条新链接；换不到再退回存下来的那条（见 onebot.resolveFreshImageUrl）。
-      const { url: sendUrl } = await resolveFreshImageUrl(this.onebot, { url: sticker.url, file: sticker.file });
-      const data = await this.onebot.sendSticker(kind, id, sendUrl, {
+      // ── 🆕 2026-09-23（第十二对话）：改成**两条路，本地缓存优先** ──────────────
+      // 为什么：`file` 字段在本机**38 张全是空串** ⇒ `resolveFreshImageUrl` 换不到新链，
+      //   只剩"把过期 URL 交给 OneBot 让它去下载"这一条 ⇒ `retcode=100 ... 404`（当天 7 次）。
+      //   而本地 `data/stickers/<id>.bin` 缓存有 16/38 张，过去**只有控制台缩略图与模型看图在用**。
+      // ① 本地缓存 → 给 OneBot 一个 `file://` 路径，它不必去 QQ 下载，**绕开 rkey 过期**；
+      // ② 换新链 → 本地没有缓存时才走（= 原来的唯一路径）。
+      // ⚠️ 两条都留：① 依赖 OneBot 接受 `file://`（不是协议强制项），② 在 file 字段还在时仍然有效。
+      const pickOpts = {
         replyToMessageId: options.replyToMessageId ?? null,
         atUserId: options.atUserId ?? null
-      });
+      };
+      const cached = cachedStickerFilePath(sticker);
+      let data = null, lastErr = null;
+      if (cached) {
+        try {
+          data = await this.onebot.sendSticker(kind, id, pathToFileURL(cached).href, pickOpts);
+        } catch (error) {
+          lastErr = error;
+          console.error(`[sender] 发表情：走本地缓存失败（${error?.message ?? error}），改用远程链接重试`);
+        }
+      }
+      if (!data) {
+        const { url: sendUrl } = await resolveFreshImageUrl(this.onebot, { url: sticker.url, file: sticker.file });
+        if (!sendUrl) throw lastErr || new Error('发表情失败：本地缓存与远程链接都没有可用的图片');
+        try {
+          data = await this.onebot.sendSticker(kind, id, sendUrl, pickOpts);
+        } catch (error) {
+          lastErr = error;
+        }
+      }
+      if (!data) {
+        // 两条都失败 ⇒ 把**两条路各自的失败原因**都说出来，别只报最后一条（否则永远查不出是哪条坏）
+        throw new Error(`发表情失败（本地缓存${cached ? '' : '不存在'}、远程链接也不可用）：${lastErr?.message ?? lastErr}`);
+      }
       const ts = Date.now();
       this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: data?.message_id ?? null });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
