@@ -757,6 +757,16 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
   flex-shrink: 0;
   overflow-x: auto;
 }
+/* 页签行在窄窗口会溢出（实测 960 下 `scrollWidth - clientWidth = 145px`，
+   多出来的是右侧那一组「关于 / 金句上传 / 意见收集」）。
+   `overflow-x: auto` 本来就能横滑，但 Chromium 的**覆盖式滚动条默认不显示** ⇒
+   用鼠标根本够不到被裁掉的那几个入口（只能靠 Shift+滚轮 或触控板横滑）。
+   ⇒ 显式给一条**细滚动条**。⚠️ 用 `::-webkit-scrollbar` 会把该元素变成"经典滚动条"，
+   但它**依然遵守 overflow** —— 不溢出时不占高度（宽窗口下这条规则等于不存在）。 */
+#tabs::-webkit-scrollbar { height: 6px; }
+#tabs::-webkit-scrollbar-track { background: transparent; }
+#tabs::-webkit-scrollbar-thumb { background: var(--pt-hairline); border-radius: 999px; }
+#tabs::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 /* ⚠️ .tab 的基础定义必须完整写在这一处。
    曾经因为在别处又写了一条 `.tab { transition: ... }`，
    清理重复时被当成"旧版"删掉，页签变成浏览器默认按钮外观。
@@ -2922,8 +2932,16 @@ html.maximized #shell {
 html[data-theme='dark'] body { background: #0f1115; }
 
 /* 窄窗口：顶栏东西多（品牌 + 状态 + 平台切换 + 统计 + 主题/暂停 + 3 个窗口键），
-   先把不关键的统计项收起来，别让它们换行把顶栏顶高。 */
-@media (max-width: 860px) {
+   先把不关键的统计项收起来，别让它们换行把顶栏顶高。
+   ⚠️ 断点为什么是 1000 而不是原来的 860（2026-09-23 第十二对话实测修正）：
+      `electron/main.js` 写着 `minWidth: 960` —— 窗口**最窄只能拉到 960**。
+      而这条规则原来写在 860 ⇒ **960 > 860 ⇒ 在真实应用里永远触发不了**（等于死规则），
+      后果是拉到最窄时顶栏**折成两行**（实测 960 下 `#topbar` 高 **84**，单行应为 **49**）。
+      实测各块宽度：状态点 196 + 平台切换 89 + 模型 116 + **用量 268** + 搜索 64
+      + 主题 28 + 暂停 49 + 窗口键 132 ≈ **1026 > 960** ⇒ 溢出一点就换行。
+      藏掉「用量 + 搜索」两块（含各自分隔线，约 −338）⇒ 约 688，**单行有余**。
+      ⚠️ 以后若改小 `minWidth`，断点要跟着往下调（**判据：断点必须 ≥ minWidth 才可能触发**）。 */
+@media (max-width: 1000px) {
   #topbar #search-count-label,
   #topbar #search-count-label + .sep,
   #topbar #usage-label,
