@@ -244,6 +244,29 @@ export function readCachedStickerImage(entry) {
 }
 
 /**
+ * 本地缓存的**文件路径**（只在确实存在时返回，否则空串）。
+ *
+ * 🆕 2026-09-23（第十二对话）：给**发送侧**用（`sender.js` 的 sendSticker）。
+ * 为什么需要：`data/stickers.json` 里的 `url` 只是 QQ 的远程链接，其 `rkey` **只有十几小时寿命**；
+ *   而实测本机 **38 张表情的 `file` 字段全是空串**（原本靠它向 OneBot 换新链）⇒
+ *   发送时只能把过期 URL 交给 OneBot 去下载 ⇒ `retcode=100 HTTP download failed: 404`
+ *   （当天实测 **7 次**，用户看到的症状是"表情发不出去、改用文字描述"）。
+ *   本地缓存其实有 **16/38** 张，但过去只服务"控制台缩略图"和"模型看图"两条路，**发送侧完全没用**。
+ * ⇒ 发送侧改成"本地有就发本地"，绕开 rkey 这条最容易坏的链路。
+ *
+ * ⚠️ 与 `readCachedStickerImage` 的分工别合并：那个返回**字节**（给 HTTP 响应 / 模型看图），
+ *    这个只返回**路径**（给 OneBot 自己读）。合并会让发送侧白读一遍 2~8MB 的 GIF。
+ */
+export function cachedStickerFilePath(entry) {
+  try {
+    const p = stickerCacheFile(entry?.id);
+    return fs.existsSync(p) ? p : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * 拿到表情图的字节：本地有就读本地；没有才换新链、下载、**顺手存本地**。
  * 失败会抛错（调用方负责给界面一个 404 + 占位提示，而不是一块神秘的黑）。
  *
@@ -857,8 +880,26 @@ export function buildToolDefs() {
             if (!url) return err(`消息 ${args.messageId} 里没有可搜的图片（[表情] 收藏的表情包也不行，让它发原图）`);
           }
           // 2. 下载字节（复用 SSRF 防护），引擎端只接受上传不接受外链的更稳
+          // 🆕 2026-09-23（第十二对话）：**这一步失败时原来只报一句裸的 `HTTP 400`**
+          //    （`safe-fetch` 抛的就是这个）—— 既分不清"QQ 的图链过期"还是"被 CDN 拒绝"，
+          //    也看不出失败发生在**引擎之前**。实测当天 6 次 400 全是这一句，只能靠人工推理
+          //    （"同一个 messageId 换引擎报一样的错"才反推出失败在下载环节）。
+          //    ⇒ 补一条带**主机名 + 查询参数名**的日志（⚠️ 不打印完整 URL：里面有 rkey 令牌），
+          //      并把"还没调用任何引擎"写进**给模型看的错误文案**里，下次不用再推。
           const safeUrl = await validateImageUrl(url);
-          const { buffer, contentType } = await safeFetchBinary(safeUrl);
+          let buffer = null, contentType = '';
+          try {
+            ({ buffer, contentType } = await safeFetchBinary(safeUrl));
+          } catch (error) {
+            let where = '';
+            try {
+              const u = new URL(safeUrl);
+              where = `｜host=${u.host} path=${u.pathname.slice(0, 90)} 查询参数=[${[...u.searchParams.keys()].join(',')}]`;
+            } catch { /* URL 解析不了就算了，别让日志本身抛错 */ }
+            console.error(`[搜图] 下载图片失败：${error?.message ?? error}${where}`);
+            throw new Error(`${error?.message ?? error}（失败在**图片下载**环节，还没有调用任何引擎：`
+              + `图片链接多半已过期或不被 CDN 接受。可以让对方重发一次原图再试）`);
+          }
           if (!buffer || !buffer.length) return err('图片下载失败：内容为空');
           const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
           // 3. 调引擎（次数只在真正打引擎前才计，参数写错不占额度）
