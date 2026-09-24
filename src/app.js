@@ -3320,15 +3320,32 @@ export function createApp({ log = console.log } = {}) {
           const body = hdrEnd;                                // 字段数据区起点
           const nameOff = body + fieldLen(types[0]);          // 跳过 type
           const nameLen = fieldLen(types[1]);
-          if (types[1] !== 13 || nameOff + nameLen > buf.length) continue;   // name 必须是 TEXT
+          // 🔴 2026-09-24（第十六对话）修：这里原来写的是 `types[1] !== 13` ——
+          //    **13 只是"空字符串"那一个 serial type**，不是"TEXT"这个类别。
+          //    SQLite 的 TEXT 是 **所有 ≥13 的奇数**（长度 = (t-13)/2）；name 的实际值是
+          //    13+2*len。于是：
+          //      · name='nh'（2 字节）   → serial type **17**
+          //      · name='sqlite_autoindex_nh_1'（21 字节）→ **55**
+          //      · name='idx_nh_title'（12 字节）  → **37**
+          //    三条记录**没有一条**能等于 13 ⇒ `continue` 全中 ⇒ `parseSqliteMaster`
+          //    **恒返回空数组** ⇒ `doujinDbInfo()` 走 `else` 分支 `delete out.hasIndex`、
+          //    `rows` 也拿不到 ⇒ 设置页永远显示"行数未知"、看不出有没有索引；
+          //    `测试-现行\test-doujin-import-routes.mjs` 的 6 条断言随之恒红。
+          //    判据：`fieldLen()` 自己早就把 ≥12 的都用 `(t-12)>>1` 算长度了，**只有这里**
+          //    把它当成"必须正好 13"——同一个函数里两套口径，错的是这一处。
+          //    ⚠️ 形状判据仍是"至少 4 列"（够 rootpage 就行）：rowid=1 的 `sqlite_schema`
+          //      自身那行五列皆 NULL（types 全 0），会被下面 `rootLen` 那关挡掉，天然跳过。
+          if (!(types[1] >= 13 && types[1] % 2 === 1) || nameOff + nameLen > buf.length) continue;   // name 必须是 TEXT（≥13 的奇数）
           const name = buf.subarray(nameOff, nameOff + nameLen).toString('utf8');
           const rootOff = nameOff + nameLen + fieldLen(types[2]);   // 再跳过 tbl_name
           const rootLen = fieldLen(types[3]);
           if (rootLen < 1 || rootLen > 4) continue;           // rootpage 必须是 1~4 字节整数
           const root = readUIntAt(buf, rootOff, rootLen);
           // type 是 TEXT（'table'/'index'）：读出来当诊断信息用，读不到就 null，不影响 name/root
+          // ⚠️ 同一个"13"错误这里也有一份（原来写 `types[0] === 13`）—— 实测 `type` 因此恒为 null
+          //    （'table' 的 serial type 是 23）。改用与上面 name 相同的"≥13 的奇数"判据。
           const typeLen = fieldLen(types[0]);
-          const type = types[0] === 13 && typeLen > 0 && typeLen <= 16
+          const type = (types[0] >= 13 && types[0] % 2 === 1) && typeLen > 0 && typeLen <= 16
             ? buf.subarray(body, body + typeLen).toString('utf8') : null;
           if (root !== null) out.push({ type, name, root });
         }
@@ -3359,15 +3376,45 @@ export function createApp({ log = console.log } = {}) {
             seen.add(pg);
             const got = fs.readSync(fd, page, 0, pageSize, (pg - 1) * pageSize);
             if (got !== pageSize) return undefined;
-            const type = page[100];
-            const n = page.readUInt16BE(103);
-            if (type === 0x05 || type === 0x0d) { total += n; continue; }   // 表叶页：格数就是行数
-            if (type !== 0x02) return undefined;                            // 索引页 / 异常页：放弃
+            // 🔴 2026-09-24（第十六对话）修：这里原来写**死** 100 / 103 / 108 ——
+            //    那是**第 1 页**的布局：页 1 开头多 100 字节**文件头**，页头与指针数组因此整体后移 100。
+            //    而**除页 1 外，每一页的页头都从该页的第 0 字节开始**。于是这张表只要
+            //    rootPage !== 1，读到的就是**页内容**而不是页头。实测（干净夹具 + Python 权威值）：
+            //      · tiny.db  页 2 → 真实 0x0d / nCells=3，改前读到 0x00 / 0
+            //      · big.db   页 2 → 真实 0x05 / nCells=10，改前读到 0x0e / 60942
+            //    ⇒ 全部落进 `type !== 0x02` ⇒ **恒 return undefined** ⇒ `rows` 永远拿不到。
+            //    （与上面 sqlite_master 那个"13"是**两个独立的 bug**，都在同一条 db-info 链上。）
+            //
+            //    页头布局（两种页大小都一样）：0=页类型 · 1~2=首空闲块 · 3~4=格数 ·
+            //    5~6=内容起点 · 7=碎片数 · 8~11=右孩子(仅内部页) · **12 起=cell 指针数组**。
+            //    ⚠️ 指针数组的起点是 **12**（不是 8 —— 8 处是"右孩子"那 4 字节）。
+            //    ⚠️ 页类型：**0x05 = 内部页**、**0x0d = 叶页**（表与索引共用这两个值；
+            //       两者都可能是表或索引，所以本函数对内部页一律下钻、不做类型区分）。
+            const P = pg === 1 ? 100 : 0;                       // 只有页 1 带 100 字节文件头
+            const type = page[P];
+            const n = page.readUInt16BE(P + 3);
+            if (type === 0x0d) { total += n; continue; }         // 叶页：格数就是行数
+            if (type !== 0x05) return undefined;                 // 既非叶也非内部：异常页，放弃
+            // ⚠️ 内部页的 cell **不在这里**：页头 +12 处是 **2 字节的 cell 指针数组**，
+            //    指针指向页内的 cell，**cell 的头 4 字节才是左孩子页号**。
+            //    原来写的是 `readUIntAt(page, 108 + i*2, 4)` —— 既错在 +100（见上），
+            //    也错在"把 cell 指针本身当成了孩子页号"（差一层解引用）。
+            // 🔴 还有**右孩子**：内部页页头 **+8 处的 4 字节**是最右那个孩子，
+            //    它**不在** cell 数组里 —— 漏掉它就会整条最右子树都不数。
+            //    实测（Python 权威走法，同一份夹具）：
+            //      · 不带右孩子：big.db 只走到 4038 个叶页、合计 **180462**
+            //      · 带右孩子  ：合计 **200000** = SQLite 的 COUNT(*) ✅
+            //    （tiny/tiny-noidx 只有一个叶页，两种走法都得 3，所以这个 bug 在小库上看不出来。）
             for (let i = 0; i < n; i++) {
-              const child = readUIntAt(page, 108 + i * 2, 4);               // 内部页 cell = 4 字节左孩子 + varint(key)
+              const cellOff = readUIntAt(page, P + 12 + i * 2, 2);   // 2 字节 cell 指针
+              if (cellOff === null) return undefined;
+              const child = readUIntAt(page, cellOff, 4);            // cell 头 4 字节 = 左孩子页号
               if (child === null) return undefined;
               stack.push(child);
             }
+            const rightMost = readUIntAt(page, P + 8, 4);            // 页头 +8 = 内部页的右孩子
+            if (rightMost === null) return undefined;
+            stack.push(rightMost);
           }
           return total;
         } catch (e) {
