@@ -273,19 +273,46 @@ function assertBrowseLockAlways(rawUrl, what = '地址') {
 }
 
 // 使用已校验的 IP 发起请求（保留 Host/SNI），从根上消除 DNS rebinding。
-function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  return new Promise((resolve, reject) => {    const mod = url.protocol === 'https:' ? https : http;
+/**
+ * 允许调用方覆盖的请求头**白名单**。
+ *
+ * 🆕 2026-09-25（第十八对话）：加它是为了修"百度图片搜索"——
+ *   实测百度对**默认头**一律回 `{"antiFlag":1,"message":"Forbid spider access"}`，
+ *   而**浏览器 UA + `accept: *\/*` + referer** 就能拿到正常 JSON（见下方 baiduImageSearch）。
+ *
+ * 🔴 为什么是白名单而不是"调用方传什么就给什么"：
+ *   `host` 被改 ⇒ 直接绕过 validateFetchUrl 解析出来的 IP（= 变回 SSRF）；
+ *   `cookie` 被改 ⇒ 把别的站的凭据带过去。这两个**永远不许覆盖**，本函数只管这四个。
+ *   其余一律忽略（不报错、也不生效）—— 免得以后有人以为传了就一定生效。
+ */
+const ALLOWED_OVERRIDE_HEADERS = ['user-agent', 'accept', 'accept-language', 'referer'];
+
+function buildHeaders(overrides) {
+  const headers = {
+    host: undefined,   // 下面按 url.host 填
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,image/avif,image/webp,image/*;q=0.8',
+    'accept-language': 'zh-CN,zh;q=0.9'
+  };
+  if (overrides && typeof overrides === 'object') {
+    for (const k of ALLOWED_OVERRIDE_HEADERS) {
+      const raw = overrides[k] ?? overrides[k.toLowerCase()];
+      if (typeof raw === 'string' && raw.trim()) headers[k] = raw.trim();
+    }
+  }
+  return headers;
+}
+
+function requestOnce(url, ip, { asBinary = false, maxBytes = 50000, headers: headerOverrides = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const mod = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
     const req = mod.request({
       hostname: ip,
       port,
       path: url.pathname + url.search,
       method: 'GET',
-      headers: {
-        host: url.host,
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,image/avif,image/webp,image/*;q=0.8',
-        'accept-language': 'zh-CN,zh;q=0.9'
-      },
+      headers: { ...buildHeaders(headerOverrides), host: url.host },
       servername: url.protocol === 'https:' ? url.hostname : undefined,
       rejectUnauthorized: url.protocol === 'https:',
       timeout: 20000
@@ -308,13 +335,34 @@ function requestOnce(url, ip, { asBinary = false, maxBytes = 50000 } = {}) {  re
 
 const MAX_REDIRECTS = 5;
 
-/** 抓取网页文本（≤50000 字符），SSRF 全防护（不做内网例外）。
- *  `browseLocked: true` 时额外受 `security.browseLock` 域名白名单约束（逐跳校验）。 */
-export async function safeFetch(urlString, { browseLocked = false } = {}) {
+/** 抓网页正文的**默认**上限（字符/近似字节）。见 safeFetch 的注释：这是有意保留的护栏。 */
+export const DEFAULT_TEXT_MAX_BYTES = 50000;
+
+/**
+ * 抓取网页文本，SSRF 全防护（不做内网例外）。
+ *  `browseLocked: true` 时额外受 `security.browseLock` 域名白名单约束（逐跳校验）。
+ *
+ * @param {number} [opts.maxBytes=50000] 正文读取上限（默认 5 万）。
+ *
+ * 🆕 2026-09-25（第十八对话）**加了这个可选上限**，起因是一个线上真 bug：
+ *   「按关键词找图」两个源都空手回来，实测真因是**页面数据在 5 万字符之后**——
+ *   Bing 图片搜索整页 **239193** 字符、`murl` 首次出现在第 **101818** 字符；
+ *   百度图片 JSON **83564** 字符。默认 5 万这一刀把它们**全切掉了**，
+ *   而症状只是"没解析到结果"（看着像页面改版，其实是**我们自己把数据截没了**）。
+ *   ⚠️ 上游 0.4 那份 `safe-fetch.js` **同样是 50000 写死** ⇒ 这是**继承下来的上游 bug**，
+ *      不是我们改出来的。我们这里是**加可选参数**（而不是把全局默认调大）——
+ *      默认值 5 万是一道**有意保留的护栏**（防止一个超大页面把内存吃掉），
+ *      只有明确知道页面很大、且只用于解析的调用方才该传更大的值。
+ *   ⚠️ 只调上限**不动任何 SSRF/锁定校验**：内网、环回、逐跳重定向照旧。
+ */
+export async function safeFetch(urlString, { browseLocked = false, maxBytes = DEFAULT_TEXT_MAX_BYTES, headers = null } = {}) {
+  const limit = Number.isFinite(Number(maxBytes)) && Number(maxBytes) > 0
+    ? Math.floor(Number(maxBytes))
+    : DEFAULT_TEXT_MAX_BYTES;
   assertBrowseLock(urlString, { browseLocked });
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, { asBinary: false, maxBytes: 50000 });
+    const result = await requestOnce(url, ip, { asBinary: false, maxBytes: limit, headers });
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
@@ -323,7 +371,7 @@ export async function safeFetch(urlString, { browseLocked = false } = {}) {
       continue;
     }
     const body = result.body || '';
-    return { url: url.toString(), statusCode: result.statusCode, truncated: body.length >= 50000, body };
+    return { url: url.toString(), statusCode: result.statusCode, truncated: body.length >= limit, body };
   }
   throw new Error('重定向次数过多，已停止');
 }
