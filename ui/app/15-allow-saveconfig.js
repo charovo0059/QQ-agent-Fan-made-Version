@@ -274,6 +274,11 @@ async function saveConfig({ quiet = false } = {}) {
       // 触发策略 + 单次运行上限（见 src/tools.js 的 search_image_source）
       policy: val('#cfg-imagesearch-policy', c.imageSearch?.policy || 'asked'),
       maxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-max', c.imageSearch?.maxPerRun ?? 2)) || 2)),
+      // 🆕 2026-09-25（第十八对话）：**关键词找图**（search_images / send_image）的策略与上限。
+      //    与上面那条**各算各的**：触发措辞完全不同（一个是"求出处"，一个是"要图"），
+      //    共用一个 policy 会互相污染。见 src/tools.js 的 imageWantWasAsked。 
+      keywordPolicy: String(val('#cfg-imagesearch-keyword-policy', c.imageSearch?.keywordPolicy || 'asked')).toLowerCase() === 'free' ? 'free' : 'asked',
+      keywordMaxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-keyword-max', c.imageSearch?.keywordMaxPerRun ?? 2)) || 2)),
       cfBypass: chk('#cfg-cfbypass', c.imageSearch?.cfBypass !== false),
       // ****** = 保持原 Key 不变；明文或新输入才更新
       ...(enteredSaucenaoKey && enteredSaucenaoKey !== '******' ? { saucenaoApiKey: enteredSaucenaoKey } : {})
@@ -384,6 +389,32 @@ async function saveConfig({ quiet = false } = {}) {
     } else {
       patch.allowAllWhenEmpty = c.allowAllWhenEmpty === true;
     }
+  }
+
+  // ── 安全与浏览（2026-09-25 第十八对话加）────────────────────────────────
+  // ⚠️ 这一节的两个键**本来就在 config.js 里**（`security.browseLock` 是 2026-09-20
+  //    吸收上游时接进 web_fetch 的），但**从来没有界面** ⇒ 用户明确说"在界面上找不到"。
+  if (sec === 'security') {
+    const hosts = String(val('#cfg-browselock-hosts', '') || '')
+      .split('\n')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+      // 容错：用户可能连协议一起粘进来（`https://example.com/x`）⇒ 只留主机名。
+      // 也顺手去掉通配前缀 `*.`（hostAllowed 本来就按子域匹配，写 `*.` 反而不匹配）。
+      .map((s) => {
+        let h = s.replace(/^[a-z]+:\/\//i, '').replace(/^[*.]+/, '');
+        h = h.split('/')[0].split('?')[0].split('#')[0].trim();
+        return h.replace(/:\d+$/, '');   // 去掉端口（锁定按主机名比，不按端口）
+      })
+      .filter(Boolean);
+    patch.security = {
+      allowPrivateImageHosts: chk('#cfg-allow-private-image-hosts', c.security?.allowPrivateImageHosts === true),
+      browseLock: {
+        enabled: chk('#cfg-browselock-enabled', c.security?.browseLock?.enabled === true),
+        hosts: [...new Set(hosts)],
+        siteSearchUrl: String(val('#cfg-browselock-sitesearch', c.security?.browseLock?.siteSearchUrl || '') || '').trim()
+      }
+    };
   }
 
   if (sec === 'chat') {

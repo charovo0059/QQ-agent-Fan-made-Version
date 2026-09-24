@@ -9,7 +9,7 @@ import { getConfig, DATA_DIR } from './config.js';
 import { normalizeMessageList, unquoteJsonString } from './util.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { webSearch, webFetch } from './web-search.js';
+import { webSearch, webFetch, searchImages } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
@@ -415,6 +415,57 @@ function imageSearchWasAsked(ctx) {
 }
 
 /**
+ * 本次唤醒是否"有人**明确要一张图**"（关键词图搜 / 发图的闸）。
+ * ⚠️ 导出**只为可测**（`测试-现行\test-图搜三件套与发图.mjs` 直接喂各种 ctx 验它）——
+ *    它是这一族里最要紧的一段：判错了 = 往群里凭空塞图。
+ *
+ * 🆕 2026-09-25（第十八对话）：与 `imageSearchWasAsked` **刻意分开** ——
+ *   那两个工具的触发措辞完全不同（那边听"求出处/什么番"，这边听"来张图/给我看看"），
+ *   共用一套判定会互相污染：别人问"这是哪部番"时不该允许她随手找图发出去。
+ *
+ * ⚠️ 措辞刻意收紧到"**要图**"这一件事上：漏判的代价是"该给图时不敢给"，
+ *   误判的代价是**往群里凭空塞一张图**（比多搜一次难看得多）。所以宁可漏。
+ * 想放开就把 `imageSearch.keywordPolicy` 设成 `free`。
+ */
+const IMAGE_WANT_RE = /来(一|几|两)?张|给(我|你)?(一|几|两)?张|发(一|几|两)?张|整(一|两)?张|找(一|几|两)?张|搜(一|几|两)?张|要(一|几|两)?张|配(个|一)?图|来点图|来(个|一|几)?图|图片?来源|给我看(看|张|图)|发(个|一)?图|上个图|来张图|想看|求图|给张|整点图|发点图|找点图|搜点图|表情包?图|发(一|两)?张照片|找(一|两)?张照片/i;
+
+export function imageWantWasAsked(ctx) {
+  const trigger = String(ctx?.session?.triggerText || '');
+  if (trigger && IMAGE_WANT_RE.test(trigger)) return true;
+  // 历史兜底：她刚问过"要我找张图吗"，之后群友回过话 ⇒ 视为同意（与出处查询那条同构）。
+  try {
+    const recent = ctx.store.recent(ctx.chatKey, { limit: 8 });
+    const lastSelf = [...recent].reverse().find((m) => m.self);
+    if (lastSelf && /要我.{0,8}(找|搜|发|来).{0,4}图|要(不要)?我.{0,8}图/.test(String(lastSelf.text || ''))) {
+      return recent.some((m) => !m.self && Number(m.ts) >= Number(lastSelf.ts));
+    }
+  } catch { /* 读不到历史就不放行，宁可保守 */ }
+  return false;
+}
+
+/**
+ * 本次运行里"她**确实见过**的图片地址"（图片搜索的结果 + 别人发来的图）。
+ *
+ * 🆕 2026-09-25（第十八对话）—— 这是 `send_image` 的**安全边界**：
+ *   发一张图 = 把一个 URL 交给 QQ 去下载。若不做限制，模型可以把**任意**地址
+ *   （包括它自己编的、或被注入诱导的）塞进去 ⇒ 等于给了一个"让协议端去访问任意 URL"的口子。
+ *   ⇒ 只允许发"本轮她真的见过、且是本程序自己列举出来的"地址。
+ *   ⚠️ 作用域是**本次运行**（挂在 ctx 上，不写进会话记录）：跨运行发老图，让她重新
+ *      调一次 `get_message_images` / `search_images` 即可（那一轮就会登记）。
+ */
+function seenImageUrls(ctx) {
+  if (!(ctx.__seenImageUrls instanceof Set)) ctx.__seenImageUrls = new Set();
+  return ctx.__seenImageUrls;
+}
+function rememberImageUrls(ctx, urls) {
+  const set = seenImageUrls(ctx);
+  for (const u of urls || []) {
+    const s = String(u || '').trim();
+    if (s) set.add(s);
+  }
+}
+
+/**
  * 按配置过滤工具集：无视觉模型 → 去掉看图工具；搜索关 → 去掉联网工具；
  * 技能工具（本子查询已搬进 skills/doujin-lookup/）→ 走 getToolAvailability() 统一口径。
  *
@@ -434,6 +485,9 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
     if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
     if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
     if (!imageSearchEnabled && d.name === 'search_image_source') return false;
+    // 🆕 2026-09-25：关键词图搜与发图**跟"搜图"总开关一起走**（同一个 imageSearch.enabled）——
+    //    它们同属"给不给图片能力"这一件事；关掉就两个工具都不给。
+    if (!imageSearchEnabled && (d.name === 'search_images' || d.name === 'send_image')) return false;
     // ② 技能注册的工具（带 skillId 的那批，如 doujin-lookup__lookup）：走**统一可用性口径** ——
     //    Skill 开关 / requires 能力 / 分类开关 / 单工具 overrides / vision / search / tool.guard
     //    全在 getToolAvailability() 里判，这里不再自己拼条件。
@@ -806,6 +860,9 @@ export function buildToolDefs() {
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
           const items = (entry.media || []).filter((m) => m.kind === 'image' && m.url);
           if (!items.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
+          // 🆕 2026-09-25：她把这条消息的图**真的看过了** ⇒ 登记进"见过的图片地址"，
+          //    之后 `send_image` 才允许把这几张发出去（安全边界，见 rememberImageUrls 的注释）。
+          rememberImageUrls(ctx, items.map((m) => m.url));
 
           const total = items.length;
           let start = Math.floor(Number(args.start));
@@ -931,6 +988,105 @@ export function buildToolDefs() {
           return ok(out);
         } catch (error) {
           return err(`搜图失败：${error?.message ?? error}`);
+        }
+      }
+    },
+    {
+      // 关键词图搜：**给一句话，拿回一批图片直链**。与上面那条"给一张图、问出处"是两个功能。
+      name: 'search_images',
+      description: '按关键词找图：输入一句描述（"橘猫""雪景 动漫""蓝色长发"），返回一批**图片链接**。'
+        + '⚠️ 与 search_image_source **不是一回事**：那个是"给你一张图、查它出自哪"；这个是"给一句话、找图"。'
+        + '⚠️ 只在**有人明确要图**时才用（"来张图""发张看看""给我找张 XX 的图"）。'
+        + '没人要图就别主动找 —— 更不要找完自己发出去。想给图就先用 send_image 发出去（链接单独贴出来没用）。'
+        + '找不到合适的图就如实说"没找到合适的"，不要拿不相干的图凑数。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '搜索关键词（一句话，别塞整段聊天记录）' },
+          limit: { type: 'integer', description: '最多要几张，默认 6，上限 12' }
+        },
+        required: ['query']
+      },
+      async execute(ctx, args) {
+        try {
+          const cfg = getConfig().imageSearch || {};
+          const q = String(args.query ?? '').trim();
+          if (!q) return err('搜索关键词为空');
+          const maxPerRun = Math.max(1, Number(cfg.keywordMaxPerRun) || 2);
+          const used = Number(ctx.__keywordImageCalls) || 0;
+          if (used >= maxPerRun) {
+            return err(`本次运行已经找过 ${used} 次图，达到上限（${maxPerRun} 次）。`
+              + '不要再换词重试了：拿手上已有的结果回答，或者如实说"没找到合适的"。');
+          }
+          if (String(cfg.keywordPolicy || 'asked').toLowerCase() !== 'free' && !imageWantWasAsked(ctx)) {
+            return err('这次没有人要图 —— 没人说"来张图""发张看看"这类话。'
+              + '不要主动找图：正常聊天就好。如果你觉得确实该给，先用 send_message 问一句"要我找张图吗"，等对方同意再找。');
+          }
+          ctx.__keywordImageCalls = used + 1;
+          const limit = Math.max(1, Math.min(12, Number(args.limit) || 6));
+          const list = await searchImages(q, { limit });
+          if (!list.length) return err(`"${q}" 没找到图片，换个说法再试一次。`);
+          // 登记进"见过的图片地址" ⇒ 之后 send_image 才允许发这几种链接
+          rememberImageUrls(ctx, list.map((x) => x.url));
+          return ok({
+            query: q,
+            count: list.length,
+            images: list.map((x, i) => ({ n: i + 1, url: x.url, title: x.title })),
+            tip: '要发给群友就用 send_image 传上面的 url（一条一张）。链接里带防盗链/时效的图可能发不出去 —— 发失败就换下一张。'
+          });
+        } catch (error) {
+          return err(`找图失败：${error?.message ?? error}`);
+        }
+      }
+    },
+    {
+      // 发一张图片（独立气泡）。**这是本轮新增的出站能力**。
+      name: 'send_image',
+      description: '发一张图片（一条消息一张图，不能附带文字；想说的话先用 send_message 单独发）。'
+        + '⚠️ url **只能**用 `search_images` 刚找回来的、或 `get_message_images` 刚看过的图片链接 —— '
+        + '本工具会核对，其它来源（自己编的、别处抄的）一律拒绝。'
+        + '表情包请用 send_sticker，不要用这个。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '图片链接（必须来自 search_images 或 get_message_images）' },
+          note: { type: 'string', description: '可选：一句话说明这是什么图（只写进你自己的记录，不发给对方；方便下次知道发过什么）' },
+          replyToMessageId: { type: ['integer', 'string'], description: '可选：要引用的消息 id（聊天记录里的 #数字）' },
+          atUserId: { type: ['integer', 'string'], description: '可选：要 @ 的 QQ 号' }
+        },
+        required: ['url']
+      },
+      async execute(ctx, args) {
+        try {
+          const raw = String(args.url ?? '').trim();
+          if (!raw) return err('图片链接为空');
+          // ① 安全边界：只允许发"本轮她真的见过"的地址（见 rememberImageUrls 的注释）
+          const seen = seenImageUrls(ctx);
+          if (!seen.has(raw)) {
+            return err('这个链接不是本轮你自己找回来/看到过的图片，已拒绝发送。'
+              + '要发图请先用 search_images 找（或 get_message_images 看那条消息里的图），再用它给出的链接。'
+              + '链接必须逐字一致，不要自己改。');
+          }
+          // ② 公网 http(s) 校验（挡内网/环回/本机 —— 否则等于让协议端去访问任意内网地址）
+          let safeUrl = raw;
+          try {
+            safeUrl = await validateImageUrl(raw);
+          } catch (error) {
+            return err(`这张图的地址不合法，已拒绝发送：${error?.message ?? error}`);
+          }
+          const result = await ctx.sender.sendImage(ctx.chatKey, safeUrl, {
+            note: String(args.note ?? '').trim(),
+            replyToMessageId: args.replyToMessageId ?? null,
+            atUserId: args.atUserId ?? null
+          });
+          if (result?.deduped) {
+            return ok({ sent: false, deduped: true, note: '这张图刚刚已经发过了，这次**没有重复发**。别当成失败，也不用重试。' });
+          }
+          ctx.session.sent.push({ type: 'image', text: '[图片]', at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
+          ctx.emit?.('session-update', ctx.session.id);
+          return ok({ sent: true, messageId: result?.message_id ?? null, note: '图发出去了。' });
+        } catch (error) {
+          return err(error?.message ?? error);
         }
       }
     },

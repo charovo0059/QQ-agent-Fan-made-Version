@@ -437,3 +437,131 @@ async function bingSearchWithUrl(query, searchUrl) {
   if (!results.length) throw new Error('自定义搜索（bing 类型）没有解析到结果，请确认该引擎返回 b_algo 结构');
   return { query, results };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 关键词图搜（"按一句话找一批图片直链"）—— 2026-09-25 第十八对话移植上游 0.4
+//
+// ⚠️ 它和 `src/image-search.js` 的"以图搜图"是**两个功能**，别混：
+//     · image-search.js：**给一张图**，问"它出自哪"（番剧/画师/本子）
+//     · 这里：**给一句话**，拿回一批**图片直链**
+//   ⇒ 上游那份里还有 `simplifyQuery` / `queryKeywords` / `extractPageDigest` 三个导出，
+//     我们**没有搬**：上游自己也没有任何调用点（搬过来就是死码）。
+//
+// ⚠️ 只**追加**导出、绝不整份替换本文件 —— 我们比上游多几处修补，最关键的是
+//    `customSearch` 在没有 endpoint 时回落 `webSearch`（设置页"测试搜索"按钮的修复）。
+//
+// 🔴 与「浏览锁定」的关系（用户 2026-09-25 拍板）：**图搜不受浏览锁定管**。
+//    理由：既有的"以图搜图"走的是 `cf-fetch`（内置浏览器过 JS 验证）那条路，本来就绕开锁定
+//    ⇒ 图搜跟它保持一致，**不是新开一个口子**。何况这两家都会撞人机验证，走 safe-fetch
+//    的普通 HTTP 通道本来就拿不到完整页面。
+//    ⚠️ 不受**浏览锁定**管 ≠ 不受安全约束：仍然全程走 `safeFetch`（禁内网/环回/链路本地、
+//      逐跳校验重定向）。将来若要改口径，就是下面那几个函数的 `browseLocked` 参数传 true。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const IMAGE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+/** 图片搜索页地址（纯函数：抽出来才能单测"关键词真的被编码了"）。 */
+export function bingImageSearchUrl(query) {
+  const q = String(query ?? '').trim();
+  if (!q) throw new Error('搜索关键词为空');
+  return `https://cn.bing.com/images/search?q=${encodeURIComponent(q)}&form=HDRSC2`;
+}
+
+/** 百度图片搜索页地址（纯函数，同上）。 */
+export function baiduImageSearchUrl(query) {
+  const q = String(query ?? '').trim();
+  if (!q) throw new Error('搜索关键词为空');
+  return `https://image.baidu.com/search/index?tn=baiduimage&word=${encodeURIComponent(q)}`;
+}
+
+/**
+ * 从 Bing 图片搜索页里抽直链（**纯函数**）。
+ *
+ * 做法：Bing 把媒体直链塞在 `m="{\"murl\":\"...\",\"turl\":\"...\"}"` 这种 JSON 属性里。
+ * 解析失败（页面改版/属性被截断）就兜一次正则 —— 两种都拿不到时返回空数组，
+ * 由调用方抛"没解析到结果"（**不在这里抛**，纯函数好测）。
+ */
+export function parseBingImages(html, limit = 8) {
+  const max = Math.max(1, Math.min(12, Number(limit) || 8));
+  const out = [];
+  const seen = new Set();
+  for (const m of String(html ?? '').matchAll(/m="([^"]+)"/g)) {
+    const raw = decodeHtml(m[1]).replace(/&quot;/g, '"');
+    let hit = '';
+    try {
+      const j = JSON.parse(raw);
+      hit = String(j.murl || j.mediaurl || '').trim();
+    } catch {
+      const mm = raw.match(/"murl"\s*:\s*"([^"]+)"/);
+      hit = mm ? mm[1] : '';
+    }
+    if (!/^https?:\/\//i.test(hit) || seen.has(hit)) continue;
+    seen.add(hit);
+    out.push(hit);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** 从百度图片搜索页里抽直链（**纯函数**）。直链在 `objURL` / `middleURL` / `thumbURL` / `hoverURL` 四个键上，都能兜。 */
+export function parseBaiduImages(html, limit = 8) {
+  const max = Math.max(1, Math.min(12, Number(limit) || 8));
+  const out = [];
+  const seen = new Set();
+  const text = String(html ?? '');
+  for (const key of ['objURL', 'middleURL', 'thumbURL', 'hoverURL']) {
+    const re = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`, 'g');
+    for (const m of text.matchAll(re)) {
+      const u = decodeHtml(m[1]).replace(/\\\//g, '/');
+      if (!/^https?:\/\//i.test(u) || seen.has(u)) continue;
+      seen.add(u);
+      out.push(u);
+      if (out.length >= max) break;
+    }
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** Bing 图片搜索。 */
+export async function bingImageSearch(query, { limit = 8, browseLocked = false } = {}) {
+  const { body } = await safeFetch(bingImageSearchUrl(query), { browseLocked });
+  const out = parseBingImages(body, limit);
+  if (!out.length) throw new Error('Bing 图片搜索没解析到结果（页面结构可能已改版）');
+  return out.map((url) => ({ title: String(query).trim(), url }));
+}
+
+/** 百度图片搜索。 */
+export async function baiduImageSearch(query, { limit = 8, browseLocked = false } = {}) {
+  const { body } = await safeFetch(baiduImageSearchUrl(query), { browseLocked });
+  const out = parseBaiduImages(body, limit);
+  if (!out.length) throw new Error('百度图片搜索没解析到结果（页面结构可能已改版）');
+  return out.map((url) => ({ title: String(query).trim(), url }));
+}
+
+/**
+ * 关键词图搜入口：按顺序试源，一个失败自动换另一个。
+ *
+ * 为什么"自动换源"很重要：这两家的 HTML 结构都随时可能改版，只押一个源的话，
+ * 改版当天功能就整个不可用。
+ *
+ * @param {Array} [opts.sources] **只为测试注入**（给假引擎，验降级链真的换了源）。
+ *   默认 `[baiduImageSearch, bingImageSearch]` —— 百度在前，中文关键词命中率更好。
+ */
+export async function searchImages(query, { limit = 8, browseLocked = false, sources = null } = {}) {
+  const q = String(query ?? '').trim();
+  if (!q) throw new Error('搜索关键词为空');
+  const n = Math.max(1, Math.min(12, Number(limit) || 8));
+  const list = Array.isArray(sources) && sources.length ? sources : [baiduImageSearch, bingImageSearch];
+  const errors = [];
+  for (const fn of list) {
+    try {
+      const hit = await fn(q, { limit: n, browseLocked });
+      if (hit && hit.length) return hit;
+      errors.push(`${fn.name || '匿名源'}: 没有结果`);
+    } catch (error) {
+      errors.push(`${fn.name || '匿名源'}: ${error?.message ?? error}`);
+    }
+  }
+  throw new Error(`图片搜索全部失败 —— ${errors.join('；')}`);
+}

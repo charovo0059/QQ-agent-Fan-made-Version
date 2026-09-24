@@ -253,6 +253,20 @@ function qqSceneRules(platform) {
         : '- 搜图不要滥用：没人对这张图表现出兴趣时不要搜；有人问出处才是它的用武之地。',
       '- 【搜图次数上限】同一次运行最多真搜 2 次：一个引擎没结果可以换一个再试，还不行就如实说"没搜到"，**不要**把 tracemoe/saucenao/iqdb/soutubot 挨个试一遍（又慢又费 SauceNAO 额度）。'
     );
+    // 🆕 2026-09-25（第十八对话 · 交接 §3 待办 1 选项 B）：**关键词找图 + 发图**。
+    //   与上面那条是**两个功能**（上面是"给图问出处"，这里是"给话找图"），
+    //   所以措辞、闸门、次数上限都是**各算各的**（tools.js 的 imageWantWasAsked / keywordPolicy）。
+    //   ⚠️ 必须与工具集同开关：`search_images` / `send_image` 被 gateToolDefs 拿掉之后，
+    //      提示词里就不能再提它们（否则模型会去调不存在的工具）。
+    const keywordAskedOnly = String(cfg.imageSearch?.keywordPolicy || 'asked').toLowerCase() !== 'free';
+    lines.push(
+      '- 有人明确要图时（"来张图""发张看看""给我找张 XX 的图"），用 search_images 按关键词找，再用 **send_image** 把选中的那张发出来。'
+        + '⚠️ 光把链接贴在正文里等于没发 —— 群里看到的是一串网址；要让她看到图，必须走 send_image。',
+      keywordAskedOnly
+        ? '- 【找图只在被要求时做】没人要图时**不要**调 search_images，更不要主动往群里塞图：正常聊天就好。想给就先问一句"要我找张图吗"，等对方同意再找。'
+        : '- 找图不要滥用：没人对图表现出兴趣时不要找，更不要主动发图刷屏。',
+      '- 【找图的边界】① 一次运行最多找 2 次（换关键词算新的那次）；② `send_image` 的 url **只能**用本轮 search_images 找回来的、或 get_message_images 刚看过的链接 —— 自己拼的、别处抄的会被直接拒绝；③ 一条图一条消息，不能配文字（想说话先 send_message）；④ 链接可能带防盗链/时效，发失败就换下一张，别对着同一张反复重试。'
+    );
   }
   // ⚠️ 这句**不需要**平台分支：本函数对微信在开头就 `return wechatSceneRules()` 了，
   //    走不到这里。上一版我在这儿写了 `wx ? … : …`，而 `wx` 只存在于 toolProtocol 的作用域里

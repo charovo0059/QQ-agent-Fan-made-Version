@@ -707,6 +707,7 @@ function renderSettingsSidebar() {
     ['allow', '聊天白名单'],
     ['wechat', '微信联系人'],
     ['chat', '聊天设置'],
+    ['security', '安全与浏览'],
     ['desktop', '桌面端'],
     ['onebot', 'OneBot（SnowLuma）']
   ];
