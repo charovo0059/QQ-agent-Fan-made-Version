@@ -178,3 +178,41 @@ export function truncate(text, max = 400) {
   const s = String(text ?? '');
   return s.length <= max ? s : `${s.slice(0, max)}…(共${s.length}字)`;
 }
+
+/**
+ * 本地路径 → OneBot 能识别的 file URI。
+ *
+ * 为什么要转换而不是直接传路径：裸 Windows 路径（反斜杠 + 盘符）在 OneBot
+ * 各实现里支持不一致，而 `file:///C:/a/b.png` 是规范里明确的形式。
+ * 空格/中文要编码（协议端会 decodeURIComponent），`#` `?` 在 URI 里是分隔符，
+ * 必须手动转义 —— `encodeURI` 不处理它们。
+ *
+ * ⚠️ 为什么单独抽成一个共用件、而不是各处自己拼一行：这个转换有四个容易写错的点
+ *    （反斜杠、幂等、UNC 前导斜杠、`#`/`?`），而**写错的表现全都是"不报错、行为却坏掉"**
+ *    （协议端读不到 → 上层静默回退 base64，一切"看起来正常"）。
+ *    ⇒ 2026-09-25 第十七对话从上游 0.4 的 `src/sender.js` 移植过来（那份自带 108 行单测，
+ *      一并移植成 `测试-现行\test-文件URI.mjs`），同时把 `onebot.js:496` 那处**手写拼接**换掉
+ *      —— 原来那处**没做任何编码**，路径含 `#`/`?`/空格就会坏。
+ *
+ * @param {string} input 本地路径（正反斜杠都行），或已经是 file:// URI
+ * @returns {string} file URI；空输入返回空串（**不产出** `file:///`）
+ */
+export function toFileUri(input) {
+  // ⚠️ 本函数刻意不使用任何正则转义（用 String.fromCharCode(92) 取反斜杠、
+  // 用 split/join 代替路径分隔符替换）。原因（上游原注，是踩出来的）：
+  // 这段代码最初是用脚本批量写入的，多层转义把 `\/` 吃成了 `/`，写出了一个非法的
+  // 正则字面量，而 `node --check` 的结果被 shell 的 `&&` 链掩盖成"通过" ——
+  // 结果整个 sender.js 加载即崩，比原本要修的 bug 严重得多。
+  // 零反斜杠写法让"写错字符"这件事根本不可能发生。
+  const BS = String.fromCharCode(92);                    // 反斜杠字符本身
+  let s = String(input || '').trim().split(BS).join('/');
+  if (!s) return '';
+  if (s.slice(0, 7).toLowerCase() === 'file://') return s;   // 已是 URI → 幂等
+  const unc = s.startsWith('//');                        // UNC：\\server\share
+  // 去掉前导斜杠（逐个 split 掉，避免再用正则转义）
+  const body = unc ? s.slice(2) : s.split('/').filter(Boolean).join('/');
+  if (!body) return '';
+  // encodeURI 会处理空格/中文，但不转义 `#` `?` —— 它们在 URI 里是分隔符，必须手动转
+  const encoded = encodeURI(body).replace(/[?#]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  return unc ? 'file://' + encoded : 'file:///' + encoded;
+}
