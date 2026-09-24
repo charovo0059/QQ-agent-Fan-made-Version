@@ -173,6 +173,9 @@ async function saveConfig({ quiet = false } = {}) {
       //    （深合并保留旧值），用户会遇到"删掉了却还在用" —— 那是本页最忌讳的一类错觉。
       visionModel: val('#cfg-vision-model', c.api.visionModel || '').trim(),
       videoModel: val('#cfg-video-model', c.api.videoModel || '').trim(),
+      // `videoMode` 是**枚举**（auto/native/frames/off），不是自由文本 ⇒ 走校验，非法值回落 auto。
+      // 同一条纪律：照实写、含空值（读不到就回落 auto），不能"为空就不写"。
+      videoMode: normalizeVideoMode(val('#cfg-video-mode', c.api.videoMode || 'auto')),
       fallbackModels: parseFallbackModels(val('#cfg-fallback-models', '')),
       // 成本核算：官方价开关（走中转站时通常要关掉开关自己填）
       useOfficialPrice: chk('#cfg-useofficialprice', c.api.useOfficialPrice !== false),

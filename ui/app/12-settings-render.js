@@ -61,9 +61,32 @@ function parseFallbackModels(text) {
     .filter((f) => f.model);
 }
 
+/**
+ * `api.videoMode` 的合法值。
+ * ⚠️ 这里是**第二份**（第一份是 `src/video-reader.js:25` 的 `export const VIDEO_MODES`）——
+ *    前端是经典 script、后端是 ESM，没法共用一个常量。两份的一致性由
+ *    `测试-现行\test-专用模型输入框.mjs` 逐字比对钉住（漂移就会红）。
+ */
+const VIDEO_MODES = ['auto', 'native', 'frames', 'off'];
+
+/**
+ * 界面上的视频发送方式 → 配置值。
+ * ⚠️ 不认识的值一律回落 `auto`，**不照抄写盘**：这个键决定"给不给模型看画面"，
+ *    写进一个 `resolveVideoRoute` 不认的值，表现会是"路由静默变成 meta（等于不看画面）"
+ *    —— 界面选的、和真跑的，绝不能是两回事。
+ */
+function normalizeVideoMode(v) {
+  const s = String(v || '').trim().toLowerCase();
+  return VIDEO_MODES.includes(s) ? s : 'auto';
+}
+
 function renderApiSection(c) {
   const currentProvider = (state.providers || []).find((p) => p.id === c.api.provider);
   const currentModelDisplay = (currentProvider?.modelNames || {})[c.api.model] || c.api.model;
+  // 视频发送方式：**先归一再渲染**。配置里若是个非法值（手改过 config.json），
+  // 页面必须显示"实际会生效的那个"（auto），而不是一个都不选中 ——
+  // 后者是"界面在说谎"：她看到的空选择与真跑的路由不是一回事。
+  const videoMode = normalizeVideoMode(c.api?.videoMode);
   return `
     <h3 id="settings-api">模型 API</h3>
     <div class="field"><label>模型目录</label>
@@ -113,8 +136,22 @@ function renderApiSection(c) {
           <button class="btn btn-small" id="pick-video-model-btn" type="button">选择</button>
         </div></div>
     </div>
+    <!-- 视频发送方式：与 api.videoModel 配合决定走哪条路线（video-reader.js 的 resolveVideoRoute）。
+         ⚠️ 这个键**不是本轮新加的** —— config.js 里一直有 videoMode 的默认值，但直到 2026-09-25
+         才发现：界面没有它 ⇒ 想改只能手改 config.json。这里补上（交接 §3 待办 4）。 -->
+    <div class="field-row">
+      <div class="field"><label>视频发送方式</label>
+        <select id="cfg-video-mode">
+          <option value="auto" ${videoMode === 'auto' ? 'selected' : ''}>auto —— 有专用模型就按原生视频发，否则抽帧（默认）</option>
+          <option value="native" ${videoMode === 'native' ? 'selected' : ''}>native —— 总是按原生视频输入发送</option>
+          <option value="frames" ${videoMode === 'frames' ? 'selected' : ''}>frames —— 总是抽帧成图片</option>
+          <option value="off" ${videoMode === 'off' ? 'selected' : ''}>off —— 只读元信息，不看画面</option>
+        </select></div>
+    </div>
     <div class="hint" style="font-size:12px;margin:-4px 0 10px">只在<b>消息里真的出现了</b>图片 / 视频部件时才切过去，纯文本对话一律用主模型（不会白花贵模型的额度）。视频优先于图片。
-      ⚠️ 视频那一路还要 <code>api.videoMode</code>（auto / native / frames / off）配合决定"原生发送还是抽帧"，该键目前<b>只能手改 config.json</b>。</div>
+      视频那一路还要 <code>api.videoMode</code> 决定"原生发送 / 抽帧 / 只看元信息"：
+      <code>auto</code> 看上面「视频输入专用模型」填没填，<code>native</code> / <code>frames</code> 强行指定，
+      <code>off</code> 完全不喂画面。</div>
     <div class="field"><label>备选模型降级链（一行一个；主模型重试后仍失败时按顺序换）</label>
       <textarea id="cfg-fallback-models" rows="3" placeholder="每行一个：模型id　或　模型id @ 提供商id" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${esc(fallbackModelsText(c.api.fallbackModels))}</textarea>
       <div class="hint" style="font-size:12px">一行一个。写 <code>模型id @ 提供商id</code> = 换到<b>那个提供商</b>的端点（跨提供商降级，用它的 baseUrl 与 Key）；不写 <code>@ 提供商</code> 则沿用主模型端点、只换模型 id。留空 = 不降级。
