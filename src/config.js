@@ -126,6 +126,18 @@ export const DEFAULT_CONFIG = {
     // 单次运行最多真搜几次。实测一次运行能把 tracemoe/saucenao/iqdb
     // 挨个试一遍（同一张图搜 5 次），既慢又白耗 SauceNAO 的免费额度（约 200 次/天）。
     maxPerRun: 2,
+    // 🆕 2026-09-25（第十八对话 · 待办 1 选项 B）：**关键词图搜**（"按一句话找一批图片"）
+    //   与上面那条**是两个功能**：
+    //     · `search_image_source`（policy/maxPerRun 那套）= 给一张图、问出处
+    //     · `search_images`（下面这个键）= 给一句话、拿回一批图片直链
+    //   ⚠️ 触发策略**单独一个键**、默认同样收紧：它与"以图搜图"的措辞完全不同
+    //     （那边听"求出处/什么番"，这边听"来张图/给我看看"），共用一个 policy 会互相污染。
+    //   'asked' = 只在**有人明确要图**时才允许（默认，代码层判定，见 tools.js）
+    //   'free'  = 交给模型自己判断
+    keywordPolicy: 'asked',
+    // 单次运行最多搜几次图（与上面 maxPerRun 同一口径，但**各算各的**：
+    // 出处查询和找图是两件事，一次运行里两件都做是合理的）
+    keywordMaxPerRun: 2,
     // 可选：SauceNAO 官方 API Key（注册 saucenao.com 账号免费获取）。
     // 填了走官方 JSON API（稳定、免费额度约 200 次/天）；留空走匿名网页抓取兜底。
     saucenaoApiKey: '',

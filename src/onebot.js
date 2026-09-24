@@ -211,7 +211,18 @@ export class OneBotClient {
     return this.sendSegments(kind, id, segments);
   }
 
-  async sendSticker(kind, id, imageUrl, { replyToMessageId = null, atUserId = null } = {}) {
+  /**
+   * 发一张**图片**（独立气泡）。
+   *
+   * 🆕 2026-09-25（第十八对话）：从 `sendSticker` **泛化**出来 —— 两者的报文体一模一样的
+   *   都是 `{ type: 'image', data: { file: <图片地址> } }`，差别只在**业务含义**
+   *   （表情包要 sticker id / 走表情限频；普通图片不用）。⇒ 只留**一份**实现，
+   *   `sendSticker` 转发到这里（原来那段是重复代码）。
+   *
+   * ⚠️ `file` 既可以是 http(s) 链接，也可以是 `file://` 本地路径（协议端自己读盘，见 `toFileUri`）。
+   *    调用方负责校验地址合法性 —— **本层不做安全判断**（它只负责"把这段话发给协议端"）。
+   */
+  async sendImage(kind, id, imageUrl, { replyToMessageId = null, atUserId = null } = {}) {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
@@ -225,6 +236,11 @@ export class OneBotClient {
     }
     segments.push({ type: 'image', data: { file: String(imageUrl) } });
     return this.sendSegments(kind, id, segments);
+  }
+
+  /** 发一个收藏表情。**就是 `sendImage`**（表情与普通图片走完全相同的报文），保留此名是为了调用方语义清晰。 */
+  async sendSticker(kind, id, imageUrl, opts = {}) {
+    return this.sendImage(kind, id, imageUrl, opts);
   }
 
   async sendPoke(kind, id, targetUserId) {

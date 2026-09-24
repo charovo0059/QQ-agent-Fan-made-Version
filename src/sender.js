@@ -240,6 +240,51 @@ export class SendQueue {
     return { sent, failed };
   }
 
+  /**
+   * 发一张**图片**（独立气泡；不能附带文字 —— 想说的话先用 `sendTextBatch` 单独发）。
+   *
+   * 🆕 2026-09-25（第十八对话 · 交接 §3 待办 1 的选项 B）：这是"按关键词搜图并发出来"
+   *   那条链路的**出口**。移植上游 0.4 `sender.js` 的 `sendImage`，但按我们的既有形状写：
+   *   · 与文字**共享同一套限频**（图比文字更容易刷屏，不能另开配额）；
+   *   · 按 **URL 指纹**去重（模型可能对同一个链接连发两次），走的是本文件已有的 `#isDuplicate/#markSent`；
+   *   · **发成功后才记账**，失败必须允许重发；
+   *   · **留档**（`[图片]`）—— 不留档的话下一轮她不知道自己发过图，会重复发。
+   *
+   * ⚠️ 去重放在限频**之前**：被去重的那条根本没发出去，不该吃掉发送配额。
+   *    （`sendTextBatch` 那边是"先限频后去重"，因为文字那条路要先把间隔算出来；这里没有间隔，
+   *      顺序按"先判要不要发"更合理。）
+   *
+   * @param {string} imageUrl 公网 http(s) 链接，或 `file://` 本地路径（调用方负责合法性校验）
+   * @param {object} options { note, replyToMessageId, atUserId }
+   */
+  sendImage(chatKey, imageUrl, options = {}) {
+    const [kind, id] = String(chatKey).split(':');
+    if (kind !== 'group' && kind !== 'private') return Promise.reject(new Error(`非法会话 key：${chatKey}`));
+    const url = String(imageUrl ?? '').trim();
+    if (!url) return Promise.reject(new Error('图片地址为空'));
+    const chain = this.#chain(chatKey);
+    const client = this.clientFor(chatKey);
+    const dedupeKey = `__img__${url}`;
+    return chain(async () => {
+      if (this.#isDuplicate(chatKey, dedupeKey)) {
+        console.warn(`[sender] 跳过重复图片（${this.#dedupeWindow()}ms 内已发过同一张）：${url.slice(0, 60)}`);
+        return { message_id: null, deduped: true };
+      }
+      this.#checkRate(chatKey);
+      await sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
+      const data = await client.sendImage(kind, id, url, {
+        replyToMessageId: options.replyToMessageId ?? null,
+        atUserId: options.atUserId ?? null
+      });
+      this.#markSent(chatKey, dedupeKey);   // 只有协议端成功返回后才记账
+      const ts = Date.now();
+      const note = options.note ? `:${String(options.note).slice(0, 40)}` : '';
+      this.store.appendSelf(chatKey, { text: `[图片${note}]`, ts, mid: data?.message_id ?? null });
+      this.onSent?.({ chatKey, text: `[图片${note}]`, messageId: data?.message_id ?? null, image: url });
+      return { message_id: data?.message_id ?? null };
+    });
+  }
+
   /** 发送一个收藏表情（独立气泡）。 */
   sendSticker(chatKey, sticker, options = {}) {
     const [kind, id] = String(chatKey).split(':');

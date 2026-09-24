@@ -11,6 +11,7 @@ function renderSettingsSection(c) {
     allow: () => renderAllowSection(c),
     wechat: () => renderWechatContactsSection(c),
     chat: () => renderChatSection(c),
+    security: () => renderSecuritySection(c),
     desktop: () => renderDesktopSection(c),
     onebot: () => renderOnebotSection(c)
   };
@@ -578,6 +579,36 @@ function renderSearchSection(c) {
       <input type="password" id="cfg-saucenao-key" value="${esc(c.imageSearch?.hasSaucenaoApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" /></div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-cfbypass" ${c.imageSearch?.cfBypass !== false ? 'checked' : ''} />
       <label for="cfg-cfbypass">Cloudflare 验证自动绕过（被拦截时用内置浏览器自动完成验证，仅限搜图引擎域名）</label></div>
+
+    <!-- ── 关键词找图 + 发图（2026-09-25 第十八对话加）────────────────────────
+         与上面那套"以图搜图"**是两个功能**：上面是"给一张图、问出处"，
+         这里是"给一句话、拿回一批图片直链"，配 send_image 直接发出去。
+         ⚠️ 触发措辞完全不同 ⇒ 策略**单独一个键**（keywordPolicy），不跟上面共用。 -->
+    <div class="field-row">
+      <div class="field"><label>找图触发策略（按关键词找图并发送）</label>
+        <select id="cfg-imagesearch-keyword-policy">
+          <option value="asked" ${(c.imageSearch?.keywordPolicy || 'asked') === 'asked' ? 'selected' : ''}>只在有人明确要图时才找（推荐）</option>
+          <option value="free" ${c.imageSearch?.keywordPolicy === 'free' ? 'selected' : ''}>交给模型自己判断</option>
+        </select>
+        <div class="hint">判据是"有人说了『来张图 / 发张看看』这类话"，也是<b>代码层拦截</b>。</div>
+        <details class="hint-more">
+          <summary>说明：为什么这条单独一个开关</summary>
+          <div class="hint-more-body">
+            「以图搜图」听的是"求出处 / 什么番"，这条听的是"要图" —— 措辞完全不同。
+            共用一个策略会互相污染：别人问"这是哪部番"时不该允许她随手找图发出去。
+          </div>
+        </details>
+      </div>
+      <div class="field"><label>单次运行最多找几次图</label>
+        <input type="number" id="cfg-imagesearch-keyword-max" min="1" max="10" value="${esc(c.imageSearch?.keywordMaxPerRun ?? 2)}" />
+        <div class="hint">与上面那条<b>各算各的</b>：一次运行里"查出处的图"和"找新图"是两件事。</div>
+      </div>
+    </div>
+    <div class="hint" style="font-size:12px;margin:-4px 0 10px">
+      ⚠️ <b>发出去的图片链接有硬边界</b>：只允许发<b>本轮她自己找回来</b>（search_images）
+      或<b>刚看过</b>（get_message_images）的图 —— 自己拼的、别处抄的一律拒绝，
+      并强制过公网校验（挡内网地址）。这条是代码层，改不了。
+    </div>
     <div class="field"><label>搜索提供方</label>
       <select id="cfg-searchprovider">
         <option value="bing" ${prov === 'bing' ? 'selected' : ''}>Bing 网页解析</option>
@@ -1202,6 +1233,42 @@ return `
     <div class="field">
       <button class="btn btn-small" id="blocklist-btn">管理屏蔽名单</button>
       <div class="hint" style="margin-top:6px">被屏蔽群员的消息不会存档、不会触发回复，也不会作为聊天背景发给模型。机器人自己的发言不受影响。</div>
+    </div>`;
+}
+
+/**
+ * 「安全与浏览」设置节（2026-09-25 第十八对话新增）。
+ *
+ * 为什么要有这一节：这两个设置**一直存在、却从来没有任何界面** ——
+ *   · `security.browseLock`（浏览锁定）：2026-09-20 吸收上游 0.4 时接进了 `web_fetch`，
+ *     但只有配置文件里有；用户 2026-09-25 明确反馈"在界面上找不到"（确实找不到）。
+ *   · `security.allowPrivateImageHosts`（允许内网图床）：同样只在 config.json 里。
+ * 与上一轮补 `api.videoMode` 输入框是同一类坑：**键是真的、界面没有 ⇒ 用户摸不到**。
+ */
+function renderSecuritySection(c) {
+  const lock = c.security?.browseLock || {};
+  const hosts = Array.isArray(lock.hosts) ? lock.hosts.join('\n') : '';
+  return `
+    <h3>浏览锁定</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-browselock-enabled" ${lock.enabled === true ? 'checked' : ''} />
+      <label for="cfg-browselock-enabled">开启浏览锁定（她上网只能访问下面清单里的域名）</label></div>
+    <div class="hint" style="font-size:12px;margin:-4px 0 10px">
+      管控的是她<b>上网看网页 / 搜索取页面</b>这条路（含跳转目标逐跳校验）。
+      ⚠️ <b>开了但清单为空 = 什么都看不了</b>（比全放行安全，但等于把上网能力关死）。
+      ⚠️ <b>按关键词找图不受它管</b> —— 与既有的「以图搜图」保持一致（那条走内置浏览器，本来就绕开锁定）。
+    </div>
+    <div class="field"><label>允许访问的域名（一行一个；填 example.com 时它的子域也放行）</label>
+      <textarea id="cfg-browselock-hosts" rows="5" placeholder="每行一个域名，例如&#10;zh.wikipedia.org&#10;example.com" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${esc(hosts)}</textarea></div>
+    <div class="field"><label>站内搜索模板（可选）</label>
+      <input type="text" id="cfg-browselock-sitesearch" value="${esc(lock.siteSearchUrl || '')}" placeholder="https://example.com/search?q={query}" />
+      <div class="hint" style="font-size:12px">配合锁定用：锁定几个站 + 站内搜索模板 = 「只能在这几个站里搜」。没有 <code>{query}</code> 占位符时按 <code>?q=</code> 兜底。</div>
+    </div>
+    <div class="settings-divider"></div>
+    <h3>图片下载</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-allow-private-image-hosts" ${c.security?.allowPrivateImageHosts === true ? 'checked' : ''} />
+      <label for="cfg-allow-private-image-hosts">允许从内网/本机地址下载图片</label></div>
+    <div class="hint" style="font-size:12px;margin:-4px 0 10px">
+      ⚠️ 默认关闭。只有在你**自建图床 / 本地测试**时才该打开 —— 打开等于允许程序去访问内网地址。
     </div>`;
 }
 
