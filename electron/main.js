@@ -168,11 +168,24 @@ process.env.QQ_AGENT_DATA_DIR = resolveDataDir();
 
 // 单实例锁：重复启动（双击 .bat）不产生第二个实例，而是唤出已有窗口。
 // 没有锁的话第二个实例会双份连 SnowLuma，群消息会被双重回复。
+//
+// 🔴 2026-09-24（第十六对话）修：原来 `app.whenReady().then(...)` 写在**锁的外面**
+//    （文件末尾，无条件注册），于是"重复启动不产生第二个实例"这件事**变成了时序赌博**：
+//    `app.quit()` 只是**排上**退出，而 `whenReady` 的回调**已经在队列里** ——
+//    只要它在真正的退出动作之前跑到，第二个实例照样 `createApp()` + `core.start()`
+//    ⇒ 端口顺延（3210→3211）+ **双份连 SnowLuma**，正是本锁要防的那件事。
+//    `app.quit()` 跑不跑得赢 `whenReady` 取决于机器负载，**不是稳定保证**。
+//    ⇒ 改成把整个启动块放进 `else`（拿到锁才注册），从"比谁快"变成"根本不会注册"。
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => showWindow());
+  startWhenReady();
+  app.on('before-quit', () => {
+    quitting = true;
+    try { core?.stop(); } catch { /* ignore */ }
+  });
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -440,32 +453,34 @@ function registerWindowIpc() {
   }));
 }
 
-app.whenReady().then(async () => {
-  try {
-    // 应用只访问本机回环地址：强制直连，防止系统代理（Clash/加速器等）劫持 127.0.0.1 导致白/黑屏
-    await session.defaultSession.setProxy({ mode: 'direct' });
-    console.log('[window] 代理模式：direct（绕过系统代理）');
-    const { createApp } = await import('../src/app.js');
-    core = createApp({ log: (...args) => console.log(...args) });
-    // 先启动服务拿到真实端口，再开窗口。
-    // 原先是 createWindow(core.lastPort ?? 3210) 在前、core.start() 在后 ——
-    // 此时 lastPort 尚未赋值，窗口恒按 3210 加载；若端口被占用顺延到 3211+，
-    // 首屏必然加载失败，只能靠 did-fail-load 2 秒重试兜底。
-    const port = await core.start();
-    core.lastPort = port;
-    await createWindow(port);
-    applyAutoStart();
-    createTray();
-    // 无边框窗口：注册渲染进程的窗口控制入口（最小化/最大化切换/关闭/查状态）。
-    // ⚠️ 必须在 createWindow **之后**：它要往 mainWindow.webContents 推状态。
-    registerWindowIpc();
-  } catch (error) {
-    console.error('[electron] 启动失败:', error);
-    app.quit();
-  }
-});
-
-app.on('before-quit', () => {
-  quitting = true;
-  try { core?.stop(); } catch { /* ignore */ }
-});
+/**
+ * 真正的启动流程。**只由拿到单实例锁的那条分支调用**（见上面的锁块）——
+ * 单独抽成函数是为了让"没拿到锁就不注册 whenReady"成为结构上的事实，
+ * 而不是靠"app.quit() 应该跑得更快"这种时序假设。
+ */
+function startWhenReady() {
+  app.whenReady().then(async () => {
+    try {
+      // 应用只访问本机回环地址：强制直连，防止系统代理（Clash/加速器等）劫持 127.0.0.1 导致白/黑屏
+      await session.defaultSession.setProxy({ mode: 'direct' });
+      console.log('[window] 代理模式：direct（绕过系统代理）');
+      const { createApp } = await import('../src/app.js');
+      core = createApp({ log: (...args) => console.log(...args) });
+      // 先启动服务拿到真实端口，再开窗口。
+      // 原先是 createWindow(core.lastPort ?? 3210) 在前、core.start() 在后 ——
+      // 此时 lastPort 尚未赋值，窗口恒按 3210 加载；若端口被占用顺延到 3211+，
+      // 首屏必然加载失败，只能靠 did-fail-load 2 秒重试兜底。
+      const port = await core.start();
+      core.lastPort = port;
+      await createWindow(port);
+      applyAutoStart();
+      createTray();
+      // 无边框窗口：注册渲染进程的窗口控制入口（最小化/最大化切换/关闭/查状态）。
+      // ⚠️ 必须在 createWindow **之后**：它要往 mainWindow.webContents 推状态。
+      registerWindowIpc();
+    } catch (error) {
+      console.error('[electron] 启动失败:', error);
+      app.quit();
+    }
+  });
+}
