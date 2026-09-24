@@ -460,6 +460,19 @@ async function bingSearchWithUrl(query, searchUrl) {
 
 const IMAGE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
+/**
+ * 图搜页面的正文读取上限。
+ *
+ * 🔴 2026-09-25（第十八对话）**这是线上真 bug 的修法**：第一版照上游写死了 `safeFetch` 的默认
+ *   5 万上限，结果**两个源都空手回来**。实测（`_临时产物-第十八对话\探针-图搜页到底多大.mjs`）：
+ *     · Bing 图片搜索整页 **239193** 字符，`murl` 首次出现在第 **101818** 字符；
+ *     · 百度图片 JSON **83564** 字符。
+ *   ⇒ 5 万那一刀把**数据整个切掉了**，而症状只是"没解析到结果"——**看着像页面改版，其实是我们自己截的**。
+ *   （⚠️ 上游 0.4 也是 50000 写死 ⇒ 这是**继承下来的上游 bug**。）
+ * 512KB 足够覆盖上面两个实测值，又仍然是**有界**的。
+ */
+export const IMAGE_SEARCH_MAX_BYTES = 512 * 1024;
+
 /** 图片搜索页地址（纯函数：抽出来才能单测"关键词真的被编码了"）。 */
 export function bingImageSearchUrl(query) {
   const q = String(query ?? '').trim();
@@ -467,11 +480,20 @@ export function bingImageSearchUrl(query) {
   return `https://cn.bing.com/images/search?q=${encodeURIComponent(q)}&form=HDRSC2`;
 }
 
-/** 百度图片搜索页地址（纯函数，同上）。 */
+/**
+ * 百度图片的**数据接口**地址（纯函数）。
+ *
+ * 🔴 2026-09-25（第十八对话）：**不再是那个 HTML 搜索页**。第一版照上游搬的是
+ *   `image.baidu.com/search/index?tn=baiduimage&...`，实测那一页**整页 144801 字符，
+ *   而 `objURL` / `middleURL` / `thumbURL` / `hoverURL` 四个键一次都没出现** ——
+ *   老解析器**已经完全失效**（百度把结果改成 JS 异步取 JSON 了）。
+ *   ⇒ 改打它的 JSON 接口 `search/acjson`，实测 HTTP 200、`application/json`、`data` 31 条，
+ *     且 `middleURL`/`thumbURL`/`hoverURL` 都是可直接下载的 `https://img1.baidu.com/...`。
+ */
 export function baiduImageSearchUrl(query) {
   const q = String(query ?? '').trim();
   if (!q) throw new Error('搜索关键词为空');
-  return `https://image.baidu.com/search/index?tn=baiduimage&word=${encodeURIComponent(q)}`;
+  return `https://image.baidu.com/search/acjson?tn=resultjson_com&ipn=rj&ie=utf-8&word=${encodeURIComponent(q)}&pn=0&rn=30`;
 }
 
 /**
@@ -503,52 +525,100 @@ export function parseBingImages(html, limit = 8) {
   return out;
 }
 
-/** 从百度图片搜索页里抽直链（**纯函数**）。直链在 `objURL` / `middleURL` / `thumbURL` / `hoverURL` 四个键上，都能兜。 */
-export function parseBaiduImages(html, limit = 8) {
+/**
+ * 从百度图片的 JSON 里抽直链（**纯函数**）。
+ *
+ * ⚠️ **绝对不要用 `objURL`** —— 实测它是百度自己加密过的串
+ *   （形如 `ipprf_z2C$qAzdH3FAzdH3F...`），**不是可下载的地址**，交给协议端只会失败。
+ *   能用的三个键是 `middleURL` / `thumbURL` / `hoverURL`（实测都是 `https://img1.baidu.com/...`）。
+ * 🔁 兜底：万一百度又改回返回 HTML，就走一遍老的四个键正则（同样**跳过 objURL**）。
+ */
+export function parseBaiduImages(body, limit = 8) {
   const max = Math.max(1, Math.min(12, Number(limit) || 8));
+  const text = String(body ?? '');
   const out = [];
   const seen = new Set();
-  const text = String(html ?? '');
-  for (const key of ['objURL', 'middleURL', 'thumbURL', 'hoverURL']) {
+  const push = (raw) => {
+    const u = decodeHtml(String(raw ?? '')).replace(/\\\//g, '/').trim();
+    if (!/^https?:\/\//i.test(u) || seen.has(u)) return;
+    if (/^ipprf_/i.test(u)) return;          // 百度加密串，不是地址
+    seen.add(u);
+    out.push(u);
+  };
+  // ① 正常路径：JSON 接口
+  try {
+    const j = JSON.parse(text.replace(/^[^(]*\(/, '').replace(/\)\s*$/, ''));
+    const data = Array.isArray(j?.data) ? j.data : [];
+    for (const it of data) {
+      if (!it || typeof it !== 'object') continue;
+      for (const key of ['middleURL', 'thumbURL', 'hoverURL']) {
+        if (it[key]) { push(it[key]); break; }
+      }
+      if (out.length >= max) break;
+    }
+    return out.slice(0, max);
+  } catch { /* 不是 JSON ⇒ 走下面的老路 */ }
+  // ② 兜底：老的 HTML 形态（同一个键名表，依旧跳过 objURL）
+  for (const key of ['middleURL', 'thumbURL', 'hoverURL']) {
     const re = new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`, 'g');
     for (const m of text.matchAll(re)) {
-      const u = decodeHtml(m[1]).replace(/\\\//g, '/');
-      if (!/^https?:\/\//i.test(u) || seen.has(u)) continue;
-      seen.add(u);
-      out.push(u);
+      push(m[1]);
       if (out.length >= max) break;
     }
     if (out.length >= max) break;
   }
-  return out;
+  return out.slice(0, max);
 }
 
-/** Bing 图片搜索。 */
-export async function bingImageSearch(query, { limit = 8, browseLocked = false } = {}) {
-  const { body } = await safeFetch(bingImageSearchUrl(query), { browseLocked });
+/**
+ * 百度要的那套请求头。
+ *
+ * 🔴 2026-09-25（第十八对话）实测（脚本：`_临时产物-第十八对话\诊断4-百度请求头(https).mjs`）：
+ *   用我们**默认的**头（`qq-agent/1.0` UA + `accept: text/html,...`）打 acjson，
+ *   百度一律回 `{"antiFlag":1,"message":"Forbid spider access"}`（82 字节）。
+ *   逐个变量试下来，**能拿到正常 JSON 的最小组合**是：
+ *   `浏览器 UA` + `accept: *​/*` + `referer: https://image.baidu.com/`（86100 字节、data 31 条）。
+ *   ⚠️ 缺 UA 不行、缺 `accept: *​/*` 也不行 —— 两个都要。
+ * ⚠️ 这四个头走的是 `safeFetch` 的**白名单覆盖**（见 safe-fetch.js 的 ALLOWED_OVERRIDE_HEADERS）：
+ *   `host` 与 `cookie` **永远不许覆盖**，所以这不构成 SSRF/凭据泄露的口子。
+ */
+const BAIDU_IMAGE_HEADERS = {
+  'user-agent': IMAGE_UA,
+  accept: '*/*',
+  'accept-language': 'zh-CN,zh;q=0.9',
+  referer: 'https://image.baidu.com/'
+};
+
+/**
+ * Bing 图片搜索。
+ * @param {Function} [opts.fetcher] **只为测试注入**（默认 `safeFetch`）；用来验"上限真的传下去了"。
+ */
+export async function bingImageSearch(query, { limit = 8, browseLocked = false, maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch } = {}) {
+  const { body } = await fetcher(bingImageSearchUrl(query), { browseLocked, maxBytes });
   const out = parseBingImages(body, limit);
   if (!out.length) throw new Error('Bing 图片搜索没解析到结果（页面结构可能已改版）');
   return out.map((url) => ({ title: String(query).trim(), url }));
 }
 
-/** 百度图片搜索。 */
-export async function baiduImageSearch(query, { limit = 8, browseLocked = false } = {}) {
-  const { body } = await safeFetch(baiduImageSearchUrl(query), { browseLocked });
+/** 百度图片搜索（走 JSON 接口 + 它要求的请求头，见上面两条注释）。 */
+export async function baiduImageSearch(query, { limit = 8, browseLocked = false, maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch } = {}) {
+  const { body } = await fetcher(baiduImageSearchUrl(query), { browseLocked, maxBytes, headers: BAIDU_IMAGE_HEADERS });
   const out = parseBaiduImages(body, limit);
-  if (!out.length) throw new Error('百度图片搜索没解析到结果（页面结构可能已改版）');
+  if (!out.length) throw new Error('百度图片搜索没解析到结果（接口结构可能已改版）');
   return out.map((url) => ({ title: String(query).trim(), url }));
 }
 
 /**
  * 关键词图搜入口：按顺序试源，一个失败自动换另一个。
  *
- * 为什么"自动换源"很重要：这两家的 HTML 结构都随时可能改版，只押一个源的话，
+ * 为什么"自动换源"很重要：这两家的结构都随时可能改版，只押一个源的话，
  * 改版当天功能就整个不可用。
  *
  * @param {Array} [opts.sources] **只为测试注入**（给假引擎，验降级链真的换了源）。
  *   默认 `[baiduImageSearch, bingImageSearch]` —— 百度在前，中文关键词命中率更好。
+ *   传 `sources` 时它同时也会被透传 `maxBytes` / `browseLocked`。
  */
-export async function searchImages(query, { limit = 8, browseLocked = false, sources = null } = {}) {
+export async function searchImages(query, { limit = 8, browseLocked = false, maxBytes = IMAGE_SEARCH_MAX_BYTES, sources = null } = {}) {
   const q = String(query ?? '').trim();
   if (!q) throw new Error('搜索关键词为空');
   const n = Math.max(1, Math.min(12, Number(limit) || 8));
@@ -556,7 +626,7 @@ export async function searchImages(query, { limit = 8, browseLocked = false, sou
   const errors = [];
   for (const fn of list) {
     try {
-      const hit = await fn(q, { limit: n, browseLocked });
+      const hit = await fn(q, { limit: n, browseLocked, maxBytes });
       if (hit && hit.length) return hit;
       errors.push(`${fn.name || '匿名源'}: 没有结果`);
     } catch (error) {
