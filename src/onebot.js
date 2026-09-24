@@ -21,6 +21,8 @@ export class OneBotClient {
     this.selfInfo = null;      // { user_id, nickname }
     this.#closedByUs = false;
     this.statusListeners = new Set();
+    this.reconnectDelayMs = RECONNECT_MIN_MS;   // 退避当前档位（连上一次就复位）
+    this.reconnectTimer = null;                 // 待重连的定时器句柄（close() 要能真的取消它）
   }
 
   #closedByUs;
@@ -40,6 +42,7 @@ export class OneBotClient {
 
   async connect() {
     this.#closedByUs = false;
+    this.reconnectDelayMs = RECONNECT_MIN_MS;
     this.#connectLoop();
   }
 
@@ -50,8 +53,40 @@ export class OneBotClient {
     const old = this.socket;
     this.socket = null;
     this.#closedByUs = false;
+    // 配置变了是"有意重连"，从最短档重新开始退避（不然一次长时间断线后，
+    // 用户改完令牌也要等半分钟才重试）
+    this.reconnectDelayMs = RECONNECT_MIN_MS;
     try { old?.close(); } catch { /* ignore */ }
     this.#connectLoop();
+  }
+
+  /**
+   * 安排下一次重连，**带指数退避**（3s → 6s → 12s → 24s → 封顶 30s；连上一次就复位）。
+   *
+   * 🔴 2026-09-24（第十三对话 · 交接 §3 待办 9 / T4）：`RECONNECT_MAX_MS` 这个常量
+   *    **定义了从来没被用过** —— 两处重连都写死 `RECONNECT_MIN_MS`，也就是"桥挂了就每 3 秒敲一次、
+   *    永远敲下去"。症状不是报错，而是**日志被刷 + 无谓的连接尝试**（本项目对"静默"敏感，
+   *    对这种"吵闹的浪费"也得治）。⚠️ 上游那一轮早就改成了指数退避，我们当时**记的是"没跟"**
+   *    （见 `工具-会话诊断\查-上游审计85项对照.mjs` 的 L-4 条目）—— 本轮跟上。
+   *
+   * ⚠️ 顺带修掉一个**真 bug**：`#connectLoop` 里"构造 WebSocket 同步抛异常"那条路原来
+   *    **无条件** `setTimeout(..., RECONNECT_MIN_MS)`、**不看 `#closedByUs`** ⇒
+   *    `close()` 之后只要还处在那 3 秒窗口里，它就会**把连接重新拉起来**
+   *    （症状："我明明关了，它自己又连上了"）。现在统一走这里，并且句柄留着、`close()` 真的能取消。
+   */
+  #scheduleReconnect() {
+    if (this.#closedByUs) return;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    const delay = this.reconnectDelayMs;
+    this.reconnectDelayMs = Math.min(RECONNECT_MAX_MS, this.reconnectDelayMs * 2);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.#closedByUs) return;
+      this.#connectLoop();
+    }, delay);
+    // 别把这个定时器变成"吊住事件循环"的活跃句柄（本项目在 fs.watch / 300 秒定时器上踩过两次）。
+    // 应用里 HTTP 服务自己撑着事件循环；测试里则让它能干净退出。
+    if (typeof this.reconnectTimer.unref === 'function') this.reconnectTimer.unref();
   }
 
   #connectLoop() {
@@ -66,7 +101,7 @@ export class OneBotClient {
     } catch (error) {
       this.lastConnectError = String(error?.message ?? error);
       this.#setStatus(false);
-      setTimeout(() => this.#connectLoop(), RECONNECT_MIN_MS);
+      this.#scheduleReconnect();     // 带退避；且尊重 #closedByUs（原来这一句没有守卫）
       return;
     }
     this.socket = socket;
@@ -78,6 +113,7 @@ export class OneBotClient {
       if (!isCurrent(socket)) return;
       this.lastConnectError = '';
       this.#setStatus(true);
+      this.reconnectDelayMs = RECONNECT_MIN_MS;   // 连上了 ⇒ 退避复位（下次断线仍从 3s 起）
       try {
         this.selfInfo = await this.call('get_login_info');
       } catch (error) {
@@ -94,7 +130,7 @@ export class OneBotClient {
     socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
       this.#setStatus(false);
-      if (!this.#closedByUs) setTimeout(() => this.#connectLoop(), RECONNECT_MIN_MS);
+      this.#scheduleReconnect();      // 内部会看 #closedByUs（`close()` 之后不再重连）
     });
     socket.on('error', (error) => {
       if (!isCurrent(socket)) return;
@@ -108,6 +144,10 @@ export class OneBotClient {
 
   close() {
     this.#closedByUs = true;
+    // 🆕 2026-09-24：把**待重连的定时器**也取消掉。不然它到点点火又去连一次，
+    // 而 `close()` 的语义是"我这次真的不要它了"（原来只有 close 事件那条路看了 #closedByUs，
+    // 同步抛异常那条路没看 ⇒ "关了又自己连上"）。
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     const old = this.socket;
     this.socket = null;
     try { old?.close(); } catch { /* ignore */ }

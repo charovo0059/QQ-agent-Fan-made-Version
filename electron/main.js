@@ -103,6 +103,19 @@ function resolveDataDir() {
   if (hasData(external)) return external;
 
   // ④ 都没有 → 用外部位置（新默认）；顺手接管两种旧遗留
+  //
+  // 🔴 2026-09-24（第十三对话 · T2「只打日志」型 catch 逐条定性）修：
+  //    原来只 `mkdirSync`，失败就 catch 打一行「**不影响启动**」，然后**照样 `return external`** ——
+  //    于是一个"没建成"的目录被当成数据目录用了下去：配置读不到（当默认值）、
+  //    记忆与聊天记录写不进去（那几处只有 `console.error`）⇒ 用户看到的是
+  //    **"像全新安装一样，什么都没有"**，而唯一的痕迹是一行没人看的日志。
+  //    这正是 2026-09-18 那次数据事故的同一类症状（数据看起来消失了），也是本项目最忌讳的静默失败。
+  //    ⚠️ 原来那句「不影响启动」本身也是错的 —— 它影响的正是"你的数据能不能落盘"。
+  //    ⚠️ 这里**故意不退回安装目录**：那样会把数据攒在"覆盖安装会被删掉"的地方，
+  //       等于亲手重造 09-18 那个坑。宁可"写不进去且大声说"，也不要"写得进去但下次升级全没"。
+  //    ⚠️ "这个目录到底能不能写"的**探针放在函数外的统一尾巴**里（见下面 `[data] 数据目录…` 那一段）——
+  //       因为 ③ 分支（外部位置已有数据 = 我们平时的正常情况）**一个字都不打就 return 了**，
+  //       只在这里验的话，最该知道结论的那个场景反而永远不验。
   try {
     fs.mkdirSync(external, { recursive: true });
     const legacy = path.join(app.getPath('userData'), 'data');   // 2026-09-06 外置期的旧位置
@@ -114,12 +127,44 @@ function resolveDataDir() {
       }
     }
   } catch (error) {
-    console.error('[data] 外部数据目录创建/迁移失败（不影响启动）:', error?.message ?? error);
+    // 迁移失败：数据仍在原处（可人工搬）—— 但**必须说清楚**，别让人以为已经搬好了
+    console.error('[data] ⚠️ 创建/迁移失败（数据仍在原处，可人工复制过去）:', error?.message ?? error);
   }
-  console.log('[data] 数据目录（安装目录之外）:', external);
   return external;
 }
 process.env.QQ_AGENT_DATA_DIR = resolveDataDir();
+
+// ── 🆕 2026-09-24（第十三对话）：**不管走了哪条分支，都验一次"这个数据目录到底能不能写"** ──
+//
+// 为什么必须放在 `resolveDataDir()` **外面**：它内部的 ③ 分支
+// （"外部位置已有数据 → 用它"，也就是我们平时的**正常情况**）**一个字都不打就 `return` 了** ⇒
+// "这个目录能不能写"在日志里从来没被说过一次。而写不进去的症状是
+// **"配置改了没反应、记忆与聊天记录一条都不落盘、看起来像全新安装"** —— 用户根本猜不到原因。
+//
+// 判据也别信 `mkdirSync`：`mkdirSync(dir, { recursive: true })` 对"**已存在但只读**"的目录
+// **不抛异常**，只看它等于没验。所以这里真写一个探针文件再删掉。
+//
+// 结论两处都用得上：
+//   · `process.env.QQ_AGENT_DATA_DIR_WRITABLE` → `/api/about` 读它，关于页据此显示一条 🔴 警告；
+//   · 这一行日志 → `_临时产物-运维\app-日志.txt` 里能看见（排障时有据可查）。
+{
+  const dir = process.env.QQ_AGENT_DATA_DIR;
+  let writable = false;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.qq-agent-write-probe-${process.pid}`);
+    fs.writeFileSync(probe, 'ok');
+    fs.unlinkSync(probe);
+    writable = true;
+  } catch (error) {
+    console.error('[data] 🔴 数据目录**不可写**（创建或写入失败）:', error?.message ?? error);
+    console.error('[data] 🔴 后果：配置 / 记忆 / 聊天记录**都写不进去** —— 界面会看起来像"全新安装"。');
+    console.error('[data]    请检查磁盘是否已满、这个路径是否可写 →', dir);
+    console.error('[data]    ⚠️ 应用**不会**退回安装目录内（那里的数据会被覆盖安装删掉）；修好后重启即可。');
+  }
+  process.env.QQ_AGENT_DATA_DIR_WRITABLE = writable ? '1' : '0';
+  console.log(`[data] 数据目录${writable ? '' : '［不可写！］'}：${dir}`);
+}
 
 // 单实例锁：重复启动（双击 .bat）不产生第二个实例，而是唤出已有窗口。
 // 没有锁的话第二个实例会双份连 SnowLuma，群消息会被双重回复。
