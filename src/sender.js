@@ -15,6 +15,8 @@ import { cachedStickerFilePath } from './tools.js';
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
 const DEFAULT_MAX_PER_HOUR = DEFAULT_CONFIG.send.maxPerHour;
+// 去重窗口的回退值也必须与 DEFAULT_CONFIG 一致（两处一致由 `测试-现行\test-发送去重.mjs` 钉住）。
+const DEFAULT_DEDUPE_WINDOW_MS = DEFAULT_CONFIG.send.dedupeWindowMs;
 
 export class SendQueue {
   /**
@@ -47,6 +49,11 @@ export class SendQueue {
     //    重启后窗口清空是可以接受的（重启本身也意味着隔了一段时间）。
     this.pokeTimes = new Map();        // chatKey -> [ts]
     this.pokeTargetTimes = new Map();  // chatKey -> Map(target -> [ts])
+    // 🆕 2026-09-25（第十八对话 · 交接 §3 待办 5）：发送去重窗口。
+    //    "chatKey::文本" -> ts。移植自上游 0.4 的 `sender.js`（同一份 8 秒窗口的语义），
+    //    只搬"文本去重"这一件 —— 上游整份 sender.js **不能整体替换**（构造函数不兼容，
+    //    会砸掉微信通道 / 认群禁言 / 拍一拍限频，见待办 5 的边界）。
+    this.recentSent = new Map();
   }
 
   /**
@@ -84,6 +91,56 @@ export class SendQueue {
     hour.push(now);
     this.minuteTimes.set(chatKey, minute);
     this.hourTimes.set(chatKey, hour);
+  }
+
+  /**
+   * 发送去重：同一会话短时间内**完全相同**的文本只发一次（2026-09-25 第十八对话，
+   * 移植上游 0.4 `sender.js` 的 #dedupeWindow / #isDuplicate / #markSent）。
+   *
+   * 背景（重复发言的根因之一）：模型在一次会话里可能重复调用 send_message 传入相同内容
+   * （内联工具调用解析 + 原生 tool_calls 并存时尤其如此），或 OneBot 超时看似失败、
+   * 上层重试再发一遍 ⇒ 用户看到一模一样的两条。
+   *
+   * ⚠️ 去重是**按发出去的纯文本**（mdToPlain 之后、切分之后的每一段）比对的，
+   *    不是按模型的原话 —— 否则"只差一个标点"就绕过去了。
+   */
+  #dedupeWindow() {
+    let raw;
+    try { raw = getConfig().send?.dedupeWindowMs; } catch { return DEFAULT_DEDUPE_WINDOW_MS; }
+    // 0 是明确的**关闭**值，不能用 `|| 默认` 把它误当缺省（这正是本项目反复记过的那类坑）。
+    if (raw === null || raw === undefined || raw === '') return DEFAULT_DEDUPE_WINDOW_MS;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return DEFAULT_DEDUPE_WINDOW_MS;
+    // ⚠️ 与上游**有意不同的一处**：上游是 `Math.max(0, n)` ⇒ 负值会被悄悄夹成 0（= 关掉去重），
+    //    于是一个手抖打出来的 `-1` 会**静默关掉这道防线**。这里改成"负值 = 没填好" ⇒ 回落默认。
+    //    `0` 仍然是明确的关闭（那条路径不受影响）。
+    return n >= 0 ? n : DEFAULT_DEDUPE_WINDOW_MS;
+  }
+
+  /**
+   * 只读判断：窗口期内是否已发出过**相同**内容。
+   * ⚠️ 绝不在发送前记账 —— 发送失败（OneBot 报错 / 限频）的消息必须允许重发，
+   *    提前记账会把合法重试误判成重复、导致消息**静默丢失**。
+   */
+  #isDuplicate(chatKey, text) {
+    const win = this.#dedupeWindow();
+    if (!win) return false;
+    const last = this.recentSent.get(`${chatKey}::${String(text)}`);
+    return Boolean(last && Date.now() - last < win);
+  }
+
+  /** 发送成功后才记账（去重指纹）。 */
+  #markSent(chatKey, text) {
+    const win = this.#dedupeWindow();
+    if (!win) return;
+    const now = Date.now();
+    this.recentSent.set(`${chatKey}::${String(text)}`, now);
+    // 顺手清理过期条目，避免 Map 无限增长（发送是热路径，不能每轮全扫）
+    if (this.recentSent.size > 500) {
+      for (const [k, t] of this.recentSent) {
+        if (now - t > win) this.recentSent.delete(k);
+      }
+    }
   }
 
   #gap(text, isLast) {
@@ -140,10 +197,18 @@ export class SendQueue {
       promises.push(chain(async () => {
         this.#checkRate(chatKey);
         if (gap > 0) await sleep(gap);
+        // 发送去重：窗口期内 identical 文本直接跳过（防模型重复调用 / 超时重试造成的重复发言）。
+        // 返回 `deduped: true` 而不是抛错 —— 这不是失败，是"这条本来就不该再发一次"。
+        if (this.#isDuplicate(chatKey, text)) {
+          console.warn(`[sender] 跳过重复消息（${this.#dedupeWindow()}ms 内已发过相同内容）：${String(text).slice(0, 30)}`);
+          return { text, messageId: null, at: formatClockTime(Date.now()), deduped: true };
+        }
         const data = await client.sendText(kind, id, text, {
           replyToMessageId: i === 0 ? options.replyToMessageId : null, // 引用挂在第一条上：回的就是那条
           atUserId: i === 0 ? options.atUserId : null
         });
+        // ⚠️ 顺序要紧：**只有** OneBot 成功返回之后才记入去重窗口。
+        this.#markSent(chatKey, text);
         const ts = Date.now();
         this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
