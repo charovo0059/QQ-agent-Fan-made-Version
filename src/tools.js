@@ -391,12 +391,43 @@ const IMAGE_ASK_RE = /出处|出自|哪来|哪儿来|什么番|哪部|哪一?部
 // 机器人自己刚问过"要我查吗"时的措辞。配合下面的历史兜底用。
 const IMAGE_CONSENT_Q_RE = /要我.{0,6}(查|搜|找|认)|需要我.{0,6}(查|搜|找|认)|要不要我.{0,8}(查|搜|找|认)|帮你.{0,6}(查|搜|找|认)|帮你认/;
 
+// ── 🆕 2026-09-25（第十八对话）：**闸门要看上下文，不能只看本次唤醒那一句** ──────
+//
+// 🔴 真实反馈（用户当天原话："根据上下文推测我的要求也应该是合理的"）：
+//   他先说了「来张小猫图片 / 给你装上搜图功能了，你搜张…发我试试」，
+//   下一条只说「再试试，试完就睡」 —— 闸门只读 `triggerText`（本次唤醒那句），
+//   "再试试"里没有任何要图措辞 ⇒ **被拦下**，而上下文里明明就是要图。
+//
+// 为什么原来只看一句：怕"看到图就算"式的过宽。但**过窄的代价同样是失灵**，
+// 而且更难解释（用户会觉得"我明明说了它就是不做"）。
+// ⇒ 加一档"**最近几条别人发的消息**里有要图措辞，且还在有效期内"。
+//   边界：只看**最近若干条别人说的**（不是整份历史），且有**时限**（默认 15 分钟）。
+const ASK_LOOKBACK_MESSAGES = 6;      // 只看最近 6 条"别人说的"
+const ASK_LOOKBACK_TTL_MS = 15 * 60 * 1000;
+
+/** 历史里"别人最近明确提过这件事"吗（供两个闸共用）。 */
+function askedInRecentContext(ctx, re) {
+  try {
+    const recent = ctx.store.recent(ctx.chatKey, { limit: 24 });
+    const now = Date.now();
+    const fresh = (m) => {
+      const ts = Number(m?.ts);
+      return !Number.isFinite(ts) || (now - ts) < ASK_LOOKBACK_TTL_MS;
+    };
+    const others = recent.filter((m) => !m.self).slice(-ASK_LOOKBACK_MESSAGES);
+    return others.some((m) => fresh(m) && re.test(String(m.text || '')));
+  } catch { /* 读不到历史就不放行，宁可保守 */ }
+  return false;
+}
+
 /**
  * 本次唤醒是否"有人明确要求查图出处"。
  *
- * 两级判定：
+ * 三级判定：
  *   1. 本次唤醒的消息里有求出处的措辞 → 放行。
- *   2. 历史兜底：机器人**最近一条发言**就是在问"要我帮你查吗"，且之后有群友回过话
+ *   2. 🆕 上下文兜底：**最近几条别人发的消息**里有求出处的措辞（限时 15 分钟）→ 放行。
+ *      治的是"上一句说了'求出处'、这一句只说'再试试'"被拦死这种失灵。
+ *   3. 历史兜底：机器人**最近一条发言**就是在问"要我帮你查吗"，且之后有群友回过话
  *      → 视为对方同意了。这一条是为了让"先问一句再查"的路走得通：
  *      否则第一次被拦、模型问了、群友答"要"，第二次还是被拦，就死循环了。
  *      因为取的是"最近一条自我发言"，机器人一旦又说了别的话，这个授权就自动失效。
@@ -404,6 +435,7 @@ const IMAGE_CONSENT_Q_RE = /要我.{0,6}(查|搜|找|认)|需要我.{0,6}(查|�
 function imageSearchWasAsked(ctx) {
   const trigger = String(ctx?.session?.triggerText || '');
   if (trigger && IMAGE_ASK_RE.test(trigger)) return true;
+  if (askedInRecentContext(ctx, IMAGE_ASK_RE)) return true;
   try {
     const recent = ctx.store.recent(ctx.chatKey, { limit: 8 });
     const lastSelf = [...recent].reverse().find((m) => m.self);
@@ -419,24 +451,29 @@ function imageSearchWasAsked(ctx) {
  * ⚠️ 导出**只为可测**（`测试-现行\test-图搜三件套与发图.mjs` 直接喂各种 ctx 验它）——
  *    它是这一族里最要紧的一段：判错了 = 往群里凭空塞图。
  *
- * 🆕 2026-09-25（第十八对话）：与 `imageSearchWasAsked` **刻意分开** ——
- *   那两个工具的触发措辞完全不同（那边听"求出处/什么番"，这边听"来张图/给我看看"），
- *   共用一套判定会互相污染：别人问"这是哪部番"时不该允许她随手找图发出去。
+ * 🆕 2026-09-25（第十八对话）：与 `imageSearchWasAsked` 用**各自的词表**
+ *   （那边听"求出处/什么番"，这边听"来张图/给我看看"），但**共用同一个开关**
+ *   （`imageSearch.policy`）与同一套"看上下文"的判定 —— 见 askedInRecentContext 的注释。
  *
  * ⚠️ 措辞刻意收紧到"**要图**"这一件事上：漏判的代价是"该给图时不敢给"，
  *   误判的代价是**往群里凭空塞一张图**（比多搜一次难看得多）。所以宁可漏。
- * 想放开就把 `imageSearch.keywordPolicy` 设成 `free`。
+ * 想放开就把 `imageSearch.policy` 设成 `free`。
  */
-const IMAGE_WANT_RE = /来(一|几|两)?张|给(我|你)?(一|几|两)?张|发(一|几|两)?张|整(一|两)?张|找(一|几|两)?张|搜(一|几|两)?张|要(一|几|两)?张|配(个|一)?图|来点图|来(个|一|几)?图|图片?来源|给我看(看|张|图)|发(个|一)?图|上个图|来张图|想看|求图|给张|整点图|发点图|找点图|搜点图|表情包?图|发(一|两)?张照片|找(一|两)?张照片/i;
+const IMAGE_WANT_RE = /来(一|几|两)?张|给(我|你)?(一|几|两)?张|发(一|几|两)?张|整(一|两)?张|找(一|几|两)?张|搜(一|几|两)?张|要(一|几|两)?张|配(个|一)?图|来点图|来(个|一|几)?图|给我看(看|张|图)|发(个|一)?图|上个图|来张图|想看|求图|给张|整点图|发点图|找点图|搜点图|发(一|两)?张照片|找(一|两)?张照片/i;
+
+const IMAGE_WANT_CONSENT_Q_RE = /要我.{0,8}(找|搜|发|来).{0,4}图|要(不要)?我.{0,8}图/;
 
 export function imageWantWasAsked(ctx) {
   const trigger = String(ctx?.session?.triggerText || '');
   if (trigger && IMAGE_WANT_RE.test(trigger)) return true;
-  // 历史兜底：她刚问过"要我找张图吗"，之后群友回过话 ⇒ 视为同意（与出处查询那条同构）。
+  // 🆕 上下文兜底：最近几条**别人发的**消息里要过图（限时 15 分钟）。
+  //    治的就是"上一句'来张小猫图片'、这一句只说'再试试'"被拦死这种失灵。
+  if (askedInRecentContext(ctx, IMAGE_WANT_RE)) return true;
+  // 再兜一层：她刚问过"要我找张图吗"，之后群友回过话 ⇒ 视为同意。
   try {
     const recent = ctx.store.recent(ctx.chatKey, { limit: 8 });
     const lastSelf = [...recent].reverse().find((m) => m.self);
-    if (lastSelf && /要我.{0,8}(找|搜|发|来).{0,4}图|要(不要)?我.{0,8}图/.test(String(lastSelf.text || ''))) {
+    if (lastSelf && IMAGE_WANT_CONSENT_Q_RE.test(String(lastSelf.text || ''))) {
       return recent.some((m) => !m.self && Number(m.ts) >= Number(lastSelf.ts));
     }
   } catch { /* 读不到历史就不放行，宁可保守 */ }
@@ -1018,7 +1055,7 @@ export function buildToolDefs() {
             return err(`本次运行已经找过 ${used} 次图，达到上限（${maxPerRun} 次）。`
               + '不要再换词重试了：拿手上已有的结果回答，或者如实说"没找到合适的"。');
           }
-          if (String(cfg.keywordPolicy || 'asked').toLowerCase() !== 'free' && !imageWantWasAsked(ctx)) {
+          if (String(cfg.policy || 'asked').toLowerCase() !== 'free' && !imageWantWasAsked(ctx)) {
             return err('这次没有人要图 —— 没人说"来张图""发张看看"这类话。'
               + '不要主动找图：正常聊天就好。如果你觉得确实该给，先用 send_message 问一句"要我找张图吗"，等对方同意再找。');
           }

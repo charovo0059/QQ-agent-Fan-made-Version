@@ -552,15 +552,17 @@ function renderSearchSection(c) {
     <div class="field-row">
       <div class="field"><label>搜图触发策略</label>
         <select id="cfg-imagesearch-policy">
-          <option value="asked" ${(c.imageSearch?.policy || 'asked') === 'asked' ? 'selected' : ''}>只在有人问出处时才搜（推荐）</option>
+          <option value="asked" ${(c.imageSearch?.policy || 'asked') === 'asked' ? 'selected' : ''}>只在有人问出处 / 要图时才搜（推荐）</option>
           <option value="free" ${c.imageSearch?.policy === 'free' ? 'selected' : ''}>交给模型自己判断（容易看到图就搜）</option>
         </select>
-        <div class="hint">「只在被要求时」是<b>代码层拦截</b>，不只靠提示词。</div>
+        <div class="hint">「只在被要求时」是<b>代码层拦截</b>，不只靠提示词。<b>这一个开关同时管两条路</b>：按图查出处、按关键词找图（找图后会发出去）。</div>
         <details class="hint-more">
           <summary>说明：什么算"被要求"</summary>
           <div class="hint-more-body">
-            本次唤醒的消息里没有"出处 / 什么番 / 画师 / 哪来的 / 图里是谁"这类措辞时，工具会直接拒绝，
-            并提示模型先问一句"要我帮你查吗"再搜。
+            两条路各有一套判据（"求出处 / 什么番 / 画师"和"来张图 / 发张看看"），
+            但都由这里这<b>一个开关</b>控制。判据会看<b>最近几条别人发的消息</b>（15 分钟内），
+            不只看触发这一句 —— 所以「来张小猫图片」之后再说「再试试」不会被误拦。<br>
+            都没匹配上时，工具会直接拒绝，并提示模型先问一句"要我找张图吗"再搜。
           </div>
         </details>
       </div>
@@ -580,28 +582,10 @@ function renderSearchSection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-cfbypass" ${c.imageSearch?.cfBypass !== false ? 'checked' : ''} />
       <label for="cfg-cfbypass">Cloudflare 验证自动绕过（被拦截时用内置浏览器自动完成验证，仅限搜图引擎域名）</label></div>
 
-    <!-- ── 关键词找图 + 发图（2026-09-25 第十八对话加）────────────────────────
-         与上面那套"以图搜图"**是两个功能**：上面是"给一张图、问出处"，
-         这里是"给一句话、拿回一批图片直链"，配 send_image 直接发出去。
-         ⚠️ 触发措辞完全不同 ⇒ 策略**单独一个键**（keywordPolicy），不跟上面共用。 -->
     <div class="field-row">
-      <div class="field"><label>找图触发策略（按关键词找图并发送）</label>
-        <select id="cfg-imagesearch-keyword-policy">
-          <option value="asked" ${(c.imageSearch?.keywordPolicy || 'asked') === 'asked' ? 'selected' : ''}>只在有人明确要图时才找（推荐）</option>
-          <option value="free" ${c.imageSearch?.keywordPolicy === 'free' ? 'selected' : ''}>交给模型自己判断</option>
-        </select>
-        <div class="hint">判据是"有人说了『来张图 / 发张看看』这类话"，也是<b>代码层拦截</b>。</div>
-        <details class="hint-more">
-          <summary>说明：为什么这条单独一个开关</summary>
-          <div class="hint-more-body">
-            「以图搜图」听的是"求出处 / 什么番"，这条听的是"要图" —— 措辞完全不同。
-            共用一个策略会互相污染：别人问"这是哪部番"时不该允许她随手找图发出去。
-          </div>
-        </details>
-      </div>
       <div class="field"><label>单次运行最多找几次图</label>
         <input type="number" id="cfg-imagesearch-keyword-max" min="1" max="10" value="${esc(c.imageSearch?.keywordMaxPerRun ?? 2)}" />
-        <div class="hint">与上面那条<b>各算各的</b>：一次运行里"查出处的图"和"找新图"是两件事。</div>
+        <div class="hint">与上面「单次运行最多真搜几次」<b>各算各的</b>：一次运行里"查出处的图"和"找新图"是两件事。</div>
       </div>
     </div>
     <div class="hint" style="font-size:12px;margin:-4px 0 10px">
