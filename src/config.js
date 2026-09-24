@@ -21,6 +21,27 @@ export const DEFAULT_CONFIG = {
     model: '',                              // UI 里选择/填写
     provider: '',                           // 当前模型所属提供商（多提供商目录的选中项）
     vision: true,                           // 模型是否支持图片输入（关掉则移除看图工具）
+    // ── 图片 / 视频专用模型（2026-09-25 第十七对话补：这两个字段以前"读了但不存在"）──
+    // 用途：允许用一个便宜的纯文本模型聊天，只在**真的**要看图/看视频时才切到贵的多模态模型。
+    // 留空 = 不切换（一律走 api.model）⇒ 行为与补之前**一字不差**。
+    //
+    // 🔴 为什么必须补上（这是个"静默失效"的真 bug）：`video-reader.js:154/193` 一直在读
+    //    `cfg.api?.videoModel` 来判定视频走哪条路线，而 `config.js` 里**根本没有这个键**
+    //    ⇒ 恒为空 ⇒ `resolveVideoRoute()` 里"已配置全模态模型 ⇒ 走原生视频输入"
+    //    那条分支**永远走不到**，而且不报错、界面上也看不出来。
+    //    `gif-to-video.js:9` 那条注释（"llm.js 的 specializedModelFor 会自动切到 videoModel"）
+    //    同样是**死注释** —— 我们的 llm.js 没有这个函数。两处都由这次补齐 + 换 llm.js 变真。
+    // ⚠️ 已知边界：设置页**还没有**填这两个字段的输入框 ⇒ 目前只能手改 config.json
+    //    （要不要加输入框是另一件待办，见 `待办与决策记录.md`）。
+    visionModel: '',                        // 图片输入专用模型（留空 = 用 api.model）
+    videoModel: '',                         // 视频输入专用模型（留空 = 用 api.model）
+    // ── 备选模型降级链（同上，2026-09-25 补）──────────────────────────────
+    // 主模型"重试后仍失败"时，按这个数组的顺序逐个换模型再试。
+    // 每项形如 `{ model: 'xxx', provider: 'provId' }`：
+    //   · 写了 provider → 用那个提供商的 baseUrl + Key（跨提供商降级）
+    //   · 不写 provider → 沿用主模型的 baseUrl + Key，只换模型 id
+    // 留空 = 不降级（行为与补之前一字不差）。
+    fallbackModels: [],
     temperature: 0.8,
     maxRounds: 12,                          // 单次运行的最多工具轮数
     timeoutMs: 180000,

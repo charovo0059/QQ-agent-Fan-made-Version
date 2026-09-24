@@ -1,7 +1,7 @@
 // OneBot v11 客户端：WebSocket 只收事件，HTTP API 负责发送与查询。
 // （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
-import { sanitizeUserText, escapeCqText } from './util.js';
+import { sanitizeUserText, escapeCqText, toFileUri } from './util.js';
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
@@ -493,7 +493,17 @@ export async function resolveFreshImageUrl(onebot, { url = '', file = '' } = {})
       const fresh = String(r?.url || r?.file || '').trim();
       if (/^https?:\/\//i.test(fresh)) return { url: fresh, via: 'cache' };
       // 有的实现直接给本地缓存路径，转成 file:// 让 OneBot 自己去读
-      if (/^[a-zA-Z]:[\\/]/.test(fresh)) return { url: `file:///${fresh.replace(/\\/g, '/')}`, via: 'cache-file' };
+      // ⚠️ 2026-09-25（第十七对话）修：这里原来是**手写的**
+      //    `file:///${fresh.replace(/\\/g,'/')}` —— **没做任何百分号编码**，
+      //    于是路径里只要有空格 / `#` / `?`（`#` 与 `?` 在 URI 里是分隔符）就坏，
+      //    而且坏了不报错：上层拿到的 url 仍是字符串、请求照发，只是协议端读不到。
+      //    改用共用件 `toFileUri()`（移植自上游 sender.js，自带单测）。
+      //    ⚠️ 它返回空串时**不要**当作有效 url（否则会把 `url: ''` 交给上层）——
+      //       落回下面的 'stored' 分支，保持与"缓存里没这条"同样的行为。
+      if (/^[a-zA-Z]:[\\/]/.test(fresh)) {
+        const uri = toFileUri(fresh);
+        if (uri) return { url: uri, via: 'cache-file' };
+      }
     } catch { /* 缓存里没有（换机器/清过缓存）→ 退回存下来的链接 */ }
   }
   return { url: String(url || ''), via: 'stored' };

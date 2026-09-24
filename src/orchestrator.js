@@ -754,13 +754,51 @@ export class Orchestrator {
       this.sessions.update(session.id);
       this.emit('session-update', session.id);
     };
+
+    // ── Skill 运行上下文（2026-09-25 第十七对话补）────────────────────────────
+    // 为什么要有：`llm.js` 的 Skill 扩展点（llm.request-params / llm.response /
+    // llm.usage / llm.retry-advisor）要靠它做运行期判断（哪个会话、哪个平台、
+    // 有没有视觉/搜索、是不是主动开口）。llm.js 内部对"没传"的兜底是
+    // `{ api, model, messages }` —— 技能拿不到会话身份，只能按残缺上下文跑。
+    //
+    // ⚠️ 说清边界，免得下一棒以为这里在悄悄改行为：**今天它没有任何行为变化**。
+    //    实测我们只有 2 个技能（doujin-lookup / 合并转发发送），**都不注册任何 `llm.*` 能力**
+    //    ⇒ 转换链此刻本来就是空的。补它是"把线接对"，不是"打开某个功能"。
+    //
+    // ⚠️ 与之相关但**本次刻意没做**的一处：`buildSystemPrompt({ platform })`（本文件上方）
+    //    也接受 skillContext（prompt.js:371 用它渲染技能片段），我们同样没传。
+    //    那处不补会让 `prompt.sections` 拿到空上下文 —— 但补它会**真的改变线上提示词**
+    //    （技能片段从"不出现"变成"出现"），属于要单独拍板的行为变化，不在本次范围内。
+    const skillContext = {
+      chatKey, kind, chatId,
+      chatName,
+      model: cfg.api.model,
+      provider: cfg.api.provider,
+      visionEnabled,
+      searchEnabled: cfg.webSearch?.enabled !== false,
+      proactive,
+      sessionId: session.id
+    };
+
     for (let round = 0; round < maxRounds && !finish; round++) {
       if (this.aborted) { this.sessions.finish(session.id, 'aborted'); return; }
       // 在**调用之前**取：这一轮模型看到的输入里有没有工具结果（用于位置标注）
       const hadToolResult = messages.some((m) => m.role === 'tool');
       markActivity('正在思考…');
       // 网络抖动/5xx/429 会自动重试（同一轮请求，messages 不变，幂等不重复发言）
-      const response = await chatCompletionWithRetry({ messages, tools: openAiTools });
+      // skillContext：Skill 的运行上下文，见循环前那段构造与说明
+      const response = await chatCompletionWithRetry({ messages, tools: openAiTools, skillContext });
+      // ── 降级换提供商后同步渠道（2026-09-25 第十七对话补）────────────────────
+      // 为什么必须回写：`session.vendor` 在进入循环前按**主模型**的配置写死了一次
+      // （见上方 `session.vendor = vendorOfConfig(cfg)`）。一旦备选模型降级链
+      // （api.fallbackModels）切到**另一个提供商**，真实请求走的是那个提供商的
+      // baseUrl/Key，而 vendor 还留着主模型的 ⇒ 成本看板按「渠道:模型」聚合
+      // 会把用量记到错渠道上，而且事后无法追溯（历史 vendor 只认记录下来的那个）。
+      // 上游 0.4 就是在同一位置这么做的；`_usedApi` 是 llm.js 在降级链里记下的
+      // "本次实际用的端点配置"。
+      if (response._usedApi) {
+        session.vendor = vendorOfConfig({ api: response._usedApi, providers: getConfig().providers }) || session.vendor;
+      }
       session.model = response.model || session.model;
       addUsage(session.usage, response.usage);
       session.usage.calls += 1;
