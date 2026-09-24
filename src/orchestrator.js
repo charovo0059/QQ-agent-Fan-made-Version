@@ -663,8 +663,37 @@ export class Orchestrator {
       try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
 
+    // ── Skill 运行上下文（2026-09-25 · 第十七对话补）────────────────────────────
+    // 为什么要有：`llm.js` 的 Skill 扩展点（llm.request-params / llm.response / llm.usage /
+    // llm.retry-advisor）与 `prompt.js` 的技能片段（prompt.sections / promptSections()）
+    // 都要靠它做运行期判断（哪个会话、哪个平台、有没有视觉/搜索、是不是主动开口）。
+    // 上游是这么传的，我们此前**一处都没传** ⇒ 它们拿到的是空上下文
+    //   （llm.js 内部兜底成 `{ api, model, messages }`，prompt.js 兜底成 `{}`）。
+    //
+    // ⚠️ 说清边界（免得下一棒以为这里在悄悄改行为）：**今天它没有任何行为变化**。
+    //    实测我们只有 2 个技能（doujin-lookup / 合并转发发送），**都不注册任何 `llm.*` 能力**；
+    //    而唯一提供提示词片段的 `doujin-lookup.promptSections()` **不接受任何参数**
+    //    （自己读 config）⇒ 传不传 context，输出一字不差。补它是"把线接对"，不是"打开某个功能"。
+    //
+    // ⚠️ 提示词与模型调用**共用同一份** skillContext：以前只在模型调用那处传、提示词那处不传
+    //    —— 两个消费端看到不同上下文，是漂移的温床。为此把 `visionEnabled` 的求值也上移到这里
+    //    （它只依赖 cfg，值不变）。
+    const visionEnabled = cfg.api.vision !== false
+      && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
+    const skillContext = {
+      chatKey, kind, chatId, chatName,
+      platform,
+      model: cfg.api.model,
+      provider: cfg.api.provider,
+      visionEnabled,
+      searchEnabled: cfg.webSearch?.enabled !== false,
+      proactive,
+      sessionId: session.id
+    };
+
     // 组装提示词（无 LLM 历史）
-    const systemPrompt = buildSystemPrompt({ platform });
+    // skillContext 一并传下去：技能据此决定要不要出提示词片段（prompt.js:renderSkillSections）
+    const systemPrompt = buildSystemPrompt({ platform, skillContext });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
       // 平台一并传下去：记忆互通要在提示词里标出"这条来自哪个平台"（QQ↔微信）。
@@ -718,10 +747,9 @@ export class Orchestrator {
       { role: 'user', content: userContent }
     ];
 
-    // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具
-    // 视觉判定 = 全局开关 && 选中模型未被探测为"明确不支持图片"（未探测/unknown 时保持开关行为）
-    const visionEnabled = cfg.api.vision !== false
-      && modelImageVerdict(cfg.api.provider, cfg.api.model) !== 'no-vision';
+    // 工具集按配置过滤：无视觉模型 → 移除看图工具；搜索关闭 → 移除联网工具。
+    // ⚠️ `visionEnabled` 已在**组装提示词之前**算好（skillContext 与这里共用它）—— 别在这里重算，
+    //    两份判定迟早会漂移（本项目"两个真相源"的老毛病）。
     // 工具集按配置过滤（搜索开关 / 视觉 / 本子查询开关）—— 判定逻辑在 tools.js 里，便于单测
     const toolDefs = gateToolDefs(this.toolDefs, cfg, { visionEnabled });
     const openAiTools = toOpenAiTools(toolDefs);
@@ -753,31 +781,6 @@ export class Orchestrator {
       session.activity = String(activity ?? '');
       this.sessions.update(session.id);
       this.emit('session-update', session.id);
-    };
-
-    // ── Skill 运行上下文（2026-09-25 第十七对话补）────────────────────────────
-    // 为什么要有：`llm.js` 的 Skill 扩展点（llm.request-params / llm.response /
-    // llm.usage / llm.retry-advisor）要靠它做运行期判断（哪个会话、哪个平台、
-    // 有没有视觉/搜索、是不是主动开口）。llm.js 内部对"没传"的兜底是
-    // `{ api, model, messages }` —— 技能拿不到会话身份，只能按残缺上下文跑。
-    //
-    // ⚠️ 说清边界，免得下一棒以为这里在悄悄改行为：**今天它没有任何行为变化**。
-    //    实测我们只有 2 个技能（doujin-lookup / 合并转发发送），**都不注册任何 `llm.*` 能力**
-    //    ⇒ 转换链此刻本来就是空的。补它是"把线接对"，不是"打开某个功能"。
-    //
-    // ⚠️ 与之相关但**本次刻意没做**的一处：`buildSystemPrompt({ platform })`（本文件上方）
-    //    也接受 skillContext（prompt.js:371 用它渲染技能片段），我们同样没传。
-    //    那处不补会让 `prompt.sections` 拿到空上下文 —— 但补它会**真的改变线上提示词**
-    //    （技能片段从"不出现"变成"出现"），属于要单独拍板的行为变化，不在本次范围内。
-    const skillContext = {
-      chatKey, kind, chatId,
-      chatName,
-      model: cfg.api.model,
-      provider: cfg.api.provider,
-      visionEnabled,
-      searchEnabled: cfg.webSearch?.enabled !== false,
-      proactive,
-      sessionId: session.id
     };
 
     for (let round = 0; round < maxRounds && !finish; round++) {

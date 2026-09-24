@@ -260,6 +260,32 @@
     </div>
   </div>
 
-  <script src="/app.js"></script>
+  <!-- ⚠️ 2026-09-25（第十七对话）：`ui/app.js`（原 10225 行单文件）已拆成 `ui/app/NN-*.js` 共 18 段。
+       · 它们是**经典 script**（不是 ESM）⇒ 共享同一个全局词法作用域，**顺序即语义**：
+         各段按这里的先后依次执行。**改这里的顺序 = 改行为**，别随手挪。
+       · 每段各自带 `'use strict';` —— 单文件里的 'use strict' 只对**它所在那个 script** 生效，
+         不补的话第 2 段起会变非严格模式。
+       · 拆分前后**逐字节等价**（判据：把各段去掉注入头部后拼回去 == 拆分前的原文）。
+       · 要读"整个前端源码"请用 `测试-现行\_ui-load.mjs`（它按同一顺序拼接）；
+         别直接读 `ui/app.js` —— 那现在只是个路标。
+       · 各段职责见文件名；`ui/app.js` 里留着拆分说明。 -->
+  <script src="/app/00-core.js"></script>
+  <script src="/app/01-utils.js"></script>
+  <script src="/app/02-boot.js"></script>
+  <script src="/app/03-platform.js"></script>
+  <script src="/app/04-skills.js"></script>
+  <script src="/app/05-status-sse.js"></script>
+  <script src="/app/06-sessions.js"></script>
+  <script src="/app/07-snowluma.js"></script>
+  <script src="/app/08-archive-usage.js"></script>
+  <script src="/app/09-memory-dreams.js"></script>
+  <script src="/app/10-settings-load.js"></script>
+  <script src="/app/11-wechat-page.js"></script>
+  <script src="/app/12-settings-render.js"></script>
+  <script src="/app/13-settings-events.js"></script>
+  <script src="/app/14-modals.js"></script>
+  <script src="/app/15-allow-saveconfig.js"></script>
+  <script src="/app/16-misc.js"></script>
+  <script src="/app/17-init.js"></script>
 </body>
 </html>

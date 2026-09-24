@@ -35,6 +35,15 @@ export const DEFAULT_CONFIG = {
     //    （要不要加输入框是另一件待办，见 `待办与决策记录.md`）。
     visionModel: '',                        // 图片输入专用模型（留空 = 用 api.model）
     videoModel: '',                         // 视频输入专用模型（留空 = 用 api.model）
+    // ── 视频走哪条路（2026-09-25 补：`video-reader.js` 有两个调用点在读它）──────
+    // 'auto'（默认）= 配了 videoModel 就按原生视频输入发，否则抽帧，都不行只读元信息
+    // 'native'      = 只按原生视频输入发送（需要视频有 http(s) 地址）
+    // 'frames'      = 只把视频抽帧成图片（需要 ffmpeg 或 frames 技能可用）
+    // 'off'         = 只读元信息，**不喂画面**
+    // ⚠️ 以前这个键**不存在** ⇒ `cfg.api?.videoMode` 恒为 undefined ⇒ resolveVideoRoute
+    //    一律落到 'auto'。补上键本身不改行为（'auto' 就是原来的兜底），只是让旋钮真的存在。
+    // ⚠️ 设置页目前**只有前三个字段的输入框**，本键仍只能手改 config.json（见 §69）。
+    videoMode: 'auto',
     // ── 备选模型降级链（同上，2026-09-25 补）──────────────────────────────
     // 主模型"重试后仍失败"时，按这个数组的顺序逐个换模型再试。
     // 每项形如 `{ model: 'xxx', provider: 'provId' }`：
