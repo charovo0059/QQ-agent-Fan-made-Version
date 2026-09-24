@@ -57,13 +57,50 @@ function writeChatNow(state) {
   fs.renameSync(tmp, chatFile(state.chatKey));
 }
 
+/**
+ * 落盘失败**限流**出声：同一个聊天 60 秒只报一次。
+ * 为什么要限流：写盘在热路径上（每条消息都可能触发），磁盘坏掉时会每毫秒失败一次 ——
+ * 不限流会把日志刷爆，反而让真正的那条看不见。但**也不能一声不吭**（原来就是只有一行 console.error，
+ * 而且调用方还各自再打一遍，用户那边一点痕迹都没有）。
+ */
+const writeFailReportedAt = new Map();
+function reportWriteFailure(key, state, error) {
+  const now = Date.now();
+  if (now - (writeFailReportedAt.get(key) || 0) < 60000) return;
+  writeFailReportedAt.set(key, now);
+  const n = Array.isArray(state?.messages) ? state.messages.length : 0;
+  console.error(`[store] 存档落盘失败（${key}，内存里 ${n} 条）：${error?.message ?? error}`
+    + ' —— ⚠️ 这批改动**仍在内存里**，会随下一次改动 / 下一次 flush / 退出钩子重试；'
+    + '若一直失败请检查磁盘空间与数据目录权限。');
+}
+
 /** 把某个聊天待写的改动立刻落盘（幂等）。 */
 function flushChat(key) {
   const rec = pendingWrites.get(key);
   if (!rec) return;
   if (rec.timer) clearTimeout(rec.timer);
   pendingWrites.delete(key);
-  writeChatNow(rec.state);
+  try {
+    writeChatNow(rec.state);
+  } catch (error) {
+    // 🔴 2026-09-24（第十三对话 · T2「只打日志」型 catch 逐条定性）：**失败必须把待写记录放回去**。
+    //
+    // 原来无论成功失败都已经 `pendingWrites.delete(key)` ⇒ 写盘一抛错，这批改动**永久消失**；
+    // 而四个调用方（`flushChatWrites` / `saveChat` 的定时器 / `#state` 重读前 / 退出钩子）
+    // 全都只 `console.error` ⇒ **用户完全不会知道聊天记录少了一段**。
+    // 这与已收口的 `catch → 默认值 → 写回原路径` 是同一族：本项目最忌讳的"无声丢数据"。
+    //
+    // ⇒ 放回 `pendingWrites`（存最新状态、保留最早 firstAt 以免封顶失效），
+    //   让下一次改动 / 下一次 flush / 退出钩子都还有机会把它写下去。
+    const again = pendingWrites.get(key);
+    pendingWrites.set(key, {
+      state: rec.state,
+      firstAt: again?.firstAt ?? rec.firstAt ?? Date.now(),
+      timer: null,
+    });
+    reportWriteFailure(key, rec.state, error);
+    throw error;   // 契约不变：四个调用方本来就都自己 catch（并各自打了日志）
+  }
 }
 
 /** 把所有待写的改动立刻落盘。 */

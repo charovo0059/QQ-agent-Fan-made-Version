@@ -8518,7 +8518,18 @@ async function openAboutModal() {
       row('Chrome / Node', `${rt.chrome || '-'} / ${rt.node || '-'}`) +
       row('已运行', `${Math.floor((info.uptimeSeconds || 0) / 60)} 分钟`)
     )}
-    ${section('路径', row('程序目录', paths.app || '-') + row('数据目录', paths.data || '-'))}
+    ${section('路径',
+      row('程序目录', paths.app || '-') +
+      row('数据目录', paths.data || '-') +
+      // 🆕 2026-09-24（第十三对话）：数据目录**不可写**时必须写在脸上。
+      // 为什么：那是启动阶段才发现的（electron/main.js 只能打日志），而症状是
+      // "配置改了没反应、记忆与聊天记录一条都不落盘" ⇒ 看起来像全新安装，用户根本猜不到原因。
+      (paths.writable === false
+        ? `<div class="hint" style="color:var(--red);margin-top:4px">🔴 <b>这个数据目录当前不可写</b>：
+             配置 / 记忆 / 聊天记录都写不进去（看起来会像"全新安装"）。请检查磁盘空间与目录权限；
+             应用**不会**退回安装目录内（那里会被覆盖安装删掉）。修好后重启即可。</div>`
+        : '')
+    )}
     ${section('本机自加改动（不是上游自带的）',
       `<div class="hint" style="margin-bottom:5px">升级时对着这份清单核对"哪些要重新合并"。</div>
        <ol style="margin:0;padding-left:20px;font-size:12px;line-height:1.65">${patches.map((p) => `<li>${esc(p)}</li>`).join('')}</ol>`

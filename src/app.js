@@ -1400,7 +1400,16 @@ export function createApp({ log = console.log } = {}) {
         cpus: os.cpus()?.length ?? 0,
         memoryGB: Math.round((os.totalmem() / 1073741824) * 10) / 10
       },
-      paths: { app: ROOT, data: DATA_DIR },
+      // 🆕 2026-09-24（第十三对话）：数据目录**可写性**。
+      // 为什么要有它：`electron/main.js` 的 resolveDataDir 在"外部目录创建/写入失败"时
+      // 只能打日志（那是最早的启动阶段，界面还没起来）—— 于是"配置/记忆/聊天记录全写不进去"
+      // 这件事对用户完全不可见，症状只是"像全新安装"。这里把它带出来，关于页据此显示一条警告。
+      // ⚠️ 没探过（①②③ 三条路，或者裸跑 headless）时是 undefined ⇒ 当作可用，不误报。
+      paths: {
+        app: ROOT,
+        data: DATA_DIR,
+        writable: process.env.QQ_AGENT_DATA_DIR_WRITABLE !== '0'
+      },
       uptimeSeconds: Math.round(process.uptime())
     };
   }
