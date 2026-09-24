@@ -757,12 +757,25 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
   flex-shrink: 0;
   overflow-x: auto;
 }
-/* 页签行在窄窗口会溢出（实测 960 下 `scrollWidth - clientWidth = 145px`，
+/* 页签行在窄窗口会溢出（实测 960 下 `scrollWidth - clientWidth = 57px`，
    多出来的是右侧那一组「关于 / 金句上传 / 意见收集」）。
    `overflow-x: auto` 本来就能横滑，但 Chromium 的**覆盖式滚动条默认不显示** ⇒
    用鼠标根本够不到被裁掉的那几个入口（只能靠 Shift+滚轮 或触控板横滑）。
-   ⇒ 显式给一条**细滚动条**。⚠️ 用 `::-webkit-scrollbar` 会把该元素变成"经典滚动条"，
-   但它**依然遵守 overflow** —— 不溢出时不占高度（宽窗口下这条规则等于不存在）。 */
+   ⇒ 显式给一条**细滚动条**。
+   ⛔🔴 2026-09-24（第十三对话）**实测更正**：下面这条 `height` **完全无效** —— 见第 2053 行的
+     全局 `* { scrollbar-width: thin }`。**只要元素上设了标准属性 `scrollbar-width`，
+     Chromium 就整段忽略 `::-webkit-scrollbar` 伪元素规则**（标准属性优先）。
+      实测（真机 9334、宽 960、dpr1.5）把这条从 30px 一路试到 2px，`#tabs` 的
+      `offsetHeight - clientHeight` **恒为 12px**（= 1px 底边 + 11px 滚动条）。
+      所以：① 上一棒记账里"12px 是这条滚动条的代价"**原因说错了** —— 代价来自
+      `scrollbar-width: thin`（标准属性）把它变成经典滚动条，而不是这几行伪元素；
+      ② 上一棒给的改法①（"把 `::-webkit-scrollbar` 高度降到 4px"）**做不到**：
+      `scrollbar-width` 只有 `auto | thin | none` 三档，`thin` 已是最细。
+   ⇒ **真正有效的那条是改法②**：让 1000~1150 这条带**根本不溢出**（见文件末尾那个
+      `@media (max-width:1150px)` 收紧页签的规则）—— 不出现滚动条，代价就是 0。
+      960 那种真放不下的宽度仍需一条滚动条，它是**必要的**，不是可优化的开销。
+   ⚠️ 这几行**有意保留**：它们表达"这里要一条细滚动条"的意图，而且若哪天摘掉全局
+      `scrollbar-width`，它们会立刻恢复生效（那时高度就是真的 6px）。 */
 #tabs::-webkit-scrollbar { height: 6px; }
 #tabs::-webkit-scrollbar-track { background: transparent; }
 #tabs::-webkit-scrollbar-thumb { background: var(--pt-hairline); border-radius: 999px; }
@@ -2314,6 +2327,27 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
   border-radius: 7px; padding: 3px 6px; font-size: 12px;
 }
 .mem-share select:focus { border-color: var(--accent); outline: none; }
+
+/* 「同一个人」关联芯片（2026-09-24 第十三对话加）
+   成员行上把"关联了谁"**印出来** —— 原来只写「✓ 已关联」，用户原话
+   "不知道关联了哪些群聊的哪些人"。每个芯片自带一个 ✕ ⇒ **单条解除**
+   （原来只有"进弹窗取消勾选"和"解除全部关联"两条路，前者在这次 bug 里根本看不到钩）。
+   ⚠️ 芯片在 `<summary>` 里 ⇒ 那些按钮必须比照 .mem-ident-btn 做 preventDefault + stopPropagation，
+      否则点一下会把折叠面板一起收起来（看着像"点了个假的"）。 */
+.mem-link-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  margin-left: 6px; padding: 1px 2px 1px 8px;
+  border-radius: 999px; font-size: 11px; line-height: 1.7; white-space: nowrap;
+  background: rgba(var(--accent-rgb), .12);
+  border: 1px solid rgba(var(--accent-rgb), .3);
+  color: var(--accent-strong);
+}
+.mem-link-chip .mem-link-x {
+  border: none; background: none; color: inherit; cursor: pointer;
+  font-family: inherit; font-size: 11px; line-height: 1;
+  padding: 1px 5px; border-radius: 999px; opacity: .75;
+}
+.mem-link-chip .mem-link-x:hover { opacity: 1; background: rgba(var(--red-rgb), .18); color: var(--red); }
 .sticker-count code {
   background: var(--bg-3); padding: 1px 6px; border-radius: 5px;
   font-family: var(--mono); font-size: 12px;
@@ -2933,15 +2967,16 @@ html[data-theme='dark'] body { background: #0f1115; }
 
 /* 窄窗口：顶栏东西多（品牌 + 状态 + 平台切换 + 统计 + 主题/暂停 + 3 个窗口键），
    先把不关键的统计项收起来，别让它们换行把顶栏顶高。
-   ⚠️ 断点为什么是 1000 而不是原来的 860（2026-09-23 第十二对话实测修正）：
+   ⚠️ 断点为什么是 **1150**（2026-09-24 第十三对话三档实测修正；上一轮写的 1000 **太低**）：
       `electron/main.js` 写着 `minWidth: 960` —— 窗口**最窄只能拉到 960**。
-      而这条规则原来写在 860 ⇒ **960 > 860 ⇒ 在真实应用里永远触发不了**（等于死规则），
-      后果是拉到最窄时顶栏**折成两行**（实测 960 下 `#topbar` 高 **84**，单行应为 **49**）。
-      实测各块宽度：状态点 196 + 平台切换 89 + 模型 116 + **用量 268** + 搜索 64
-      + 主题 28 + 暂停 49 + 窗口键 132 ≈ **1026 > 960** ⇒ 溢出一点就换行。
-      藏掉「用量 + 搜索」两块（含各自分隔线，约 −338）⇒ 约 688，**单行有余**。
-      ⚠️ 以后若改小 `minWidth`，断点要跟着往下调（**判据：断点必须 ≥ minWidth 才可能触发**）。 */
-@media (max-width: 1000px) {
+      · 860（更早那版）⇒ **960 > 860 ⇒ 真实应用里永远触发不了**（死规则）⇒ 960 下顶栏折两行（84，应 49）。
+      · 1000（上一轮）⇒ 960 修好了，但 **1000~1150 这一带统计项"还在、又放不下"**：
+        实测 1100 下 `#topbar` 高 **59**（`.top-status` 自己折成两行，单行应约 49）。
+        根因是各块合计 ≈1026 + 间距 > 1100 − 品牌宽。
+      ⇒ 抬到 1150（把这一带也收进去）。实测 960/1100/1245 三档 `#topbar` **都是 49**。
+      ⚠️ 三档实测值见 `验收报告-UI改造第二阶段-20260923.md` §3 与 §52；
+         **判据：断点必须 ≥ minWidth 才可能触发**，且要盖住"合计宽度 ≥ 窗口宽"的整条带。 */
+@media (max-width: 1150px) {
   #topbar #search-count-label,
   #topbar #search-count-label + .sep,
   #topbar #usage-label,
@@ -2949,6 +2984,18 @@ html[data-theme='dark'] body { background: #0f1115; }
     display: none;
   }
 }
+/* 1000~1150 这条带：页签行**刚刚好溢出几个像素** ⇒ 会出现滚动条、白拿一行高度
+   （实测 1100 下溢出 5px）。所以在这条带里把页签收紧一点，让它**根本不溢出** ——
+   "不出现滚动条"比"出现一条细滚动条"更干净（细滚动条只在 960 那种真放不下的宽度才该出现）。
+   实测：gap 10→8、padding 14→11 共省约 88px，够盖住那 5px 且不挤。 */
+@media (max-width: 1150px) {
+  #tabs { gap: 8px; }
+  #tabs .tab { padding: 6px 11px; }
+}
+/* ⚠️ 下面这条写在 700，而 `minWidth: 960` ⇒ **在真实应用里同样是死规则**（2026-09-24 记）。
+   有意保留不改：它管的是"模型名 + 品牌副标题"，而窗口根本到不了 700；
+   真要用它就得先把 `minWidth` 降下来。留着是为了别让后来者以为"窄了会自动收"，
+   要收就得同时改 `electron/main.js` 的 minWidth。 */
 @media (max-width: 700px) {
   #topbar #model-label,
   #topbar #model-label + .sep,
