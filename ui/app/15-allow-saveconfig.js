@@ -274,10 +274,10 @@ async function saveConfig({ quiet = false } = {}) {
       // 触发策略 + 单次运行上限（见 src/tools.js 的 search_image_source）
       policy: val('#cfg-imagesearch-policy', c.imageSearch?.policy || 'asked'),
       maxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-max', c.imageSearch?.maxPerRun ?? 2)) || 2)),
-      // 🆕 2026-09-25（第十八对话）：**关键词找图**（search_images / send_image）的策略与上限。
-      //    与上面那条**各算各的**：触发措辞完全不同（一个是"求出处"，一个是"要图"），
-      //    共用一个 policy 会互相污染。见 src/tools.js 的 imageWantWasAsked。 
-      keywordPolicy: String(val('#cfg-imagesearch-keyword-policy', c.imageSearch?.keywordPolicy || 'asked')).toLowerCase() === 'free' ? 'free' : 'asked',
+      // 🆕 2026-09-25（第十八对话）：**找图**（search_images / send_image）的单次上限。
+      //    ⚠️ 触发策略**不在这里** —— 它与"以图搜图"共用 `policy` 一个开关
+      //    （曾经单独立过 `keywordPolicy`，界面上成了两个几乎同名的下拉框、用户当场设错，
+      //      当天就合并回去了；见 config.js 的注释）。
       keywordMaxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-keyword-max', c.imageSearch?.keywordMaxPerRun ?? 2)) || 2)),
       cfBypass: chk('#cfg-cfbypass', c.imageSearch?.cfBypass !== false),
       // ****** = 保持原 Key 不变；明文或新输入才更新

@@ -254,11 +254,12 @@ function qqSceneRules(platform) {
       '- 【搜图次数上限】同一次运行最多真搜 2 次：一个引擎没结果可以换一个再试，还不行就如实说"没搜到"，**不要**把 tracemoe/saucenao/iqdb/soutubot 挨个试一遍（又慢又费 SauceNAO 额度）。'
     );
     // 🆕 2026-09-25（第十八对话 · 交接 §3 待办 1 选项 B）：**关键词找图 + 发图**。
-    //   与上面那条是**两个功能**（上面是"给图问出处"，这里是"给话找图"），
-    //   所以措辞、闸门、次数上限都是**各算各的**（tools.js 的 imageWantWasAsked / keywordPolicy）。
+    //   与上面那条是**两个功能**（上面是"给图问出处"，这里是"给话找图"）⇒ 词表分开；
+    //   但**开关共用**（`imageSearch.policy`）—— 曾经给找图单独立过一个键，
+    //   结果界面上成了两个几乎同名的下拉框、用户当场设错，当天就合并回去了（见 config.js 的注释）。
     //   ⚠️ 必须与工具集同开关：`search_images` / `send_image` 被 gateToolDefs 拿掉之后，
     //      提示词里就不能再提它们（否则模型会去调不存在的工具）。
-    const keywordAskedOnly = String(cfg.imageSearch?.keywordPolicy || 'asked').toLowerCase() !== 'free';
+    const keywordAskedOnly = String(cfg.imageSearch?.policy || 'asked').toLowerCase() !== 'free';
     lines.push(
       '- 有人明确要图时（"来张图""发张看看""给我找张 XX 的图"），用 search_images 按关键词找，再用 **send_image** 把选中的那张发出来。'
         + '⚠️ 光把链接贴在正文里等于没发 —— 群里看到的是一串网址；要让她看到图，必须走 send_image。',
