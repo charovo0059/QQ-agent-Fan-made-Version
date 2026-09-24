@@ -12,7 +12,7 @@ import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, fetchForward, forwardIdFromData } from './onebot.js';
 import { ensureStickerImage, buildToolDefs } from './tools.js';
 import { ChatStore } from './store.js';
-import { MemoryStore } from './memory.js';
+import { MemoryStore, buildIdentityCandidates } from './memory.js';
 import { StickerManager } from './sticker-manager.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
@@ -2948,20 +2948,38 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, { files, consolidating: [...busy], hiddenEmpty: [...hiddenEmpty] });
       }
 
-      // 「同一个人」身份表：列出所有有记忆的会话与它们的成员（含平台），
-      // 供记忆页挑"哪个会话里的哪个人 = 当前这个人"。
-      // 为什么要一个接口：QQ 与微信 id **会撞号**（微信 id 是桥派生的 31 位数字），
+      // 「同一个人」身份表：列出候选的"哪个会话里的哪个人"，供记忆页把当前这个人
+      // 与别处的人标成同一个人。
+      // 为什么要一个接口：QQ 与微信 id **会撞号**（微信 id 是桥派生的数字），
       // 所以必须带上**平台**才敢做身份关联；前端自己拼不出平台。
+      //
+      // 🔴 2026-09-24（第十三对话）改：候选原来**只来自"有记忆文件的成员"**
+      //    （末尾还 `.filter(c => c.members.length)`）⇒ 微信侧「某群友」没有任何记忆文件
+      //    ⇒ 他**根本不在候选里** ⇒ 用户想把他与 QQ 的某群友关联时只能勾到自己
+      //    ⇒ 静默空操作（线上实证，见 待办与决策记录 §51.4）。
+      //    这正是"先有鸡还是先有蛋"：要有记忆才进候选，可要关联的恰恰是还没印象的人。
+      //
+      //    合并规则（三个来源、去重、noImpression 标记）已抽到 `memory.js` 的
+      //    `buildIdentityCandidates()` —— **纯函数**，所以能离开 HTTP 与真实数据目录单测
+      //    （它出错的样子是静默的"那个人不在列表里"，这种 bug 必须有测试守着）。
+      //    ⚠️ 群成员**有意不列**（要列就得调 OneBot ⇒ 记忆页依赖网络与机器人状态）。
       if (pathname === '/api/memory-identity' && method === 'GET') {
-        const chats = memory.listChats().map((chatKey) => ({
-          chatKey,
-          platform: memory.platformOf(chatKey),
-          members: memory.members(chatKey)
-            .filter((m) => m.userId)
-            .map((m) => ({ userId: String(m.userId), name: String(m.name || ''), count: (m.impressions || []).length }))
-            // 顺手带上每个人当前的身份键，前端好显示"已关联"
-            .map((m) => ({ ...m, identityKey: `${memory.platformOf(chatKey)}:${m.userId}` }))
-        })).filter((c) => c.members.length);
+        const contacts = (() => {
+          try { return listContacts({ kind: 'private' }) } catch (e) {
+            // 微信联系人表读不出来不该让整个候选清单消失（它只是三个来源之一）——
+            // 但必须出声，否则"微信侧那个人不见了"会被当成"他就是没印象"。
+            log('[memory-identity] 读微信联系人表失败：' + (e?.message ?? e));
+            return [];
+          }
+        })();
+        const chats = buildIdentityCandidates({
+          chatKeys: memory.listChats(),
+          membersOf: (k) => memory.members(k),
+          platformOf: (k) => memory.platformOf(k),
+          contacts,
+          notes: getConfig().memberNotes || {},
+          allowPrivate: getConfig().allow?.private || []
+        });
         return json(res, 200, { chats, identity: memory.identityMap() });
       }
 

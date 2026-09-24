@@ -4433,11 +4433,24 @@ async function loadMemoryDetail(chatKey) {
       // 「同一个人」：把这个会话里的这个人，与**别的会话**里的某人标成同一人。
       // 为什么必须人工标：QQ 号与微信派生 id 在同一个数值空间里会撞号，
       // 而同一个真人两边 id 又不同 ⇒ 自动合并两头都错（详见 config.js 的 memory.identity 注释）。
+      //
+      // 🔴 N3+N4（2026-09-24 第十三对话）：这里原来只写「✓ 已关联」，**不说是谁** ——
+      //    用户原话"不知道关联了哪些群聊的哪些人"。现在把关联到的**每个人都印出来**
+      //    （`某群友（微信 1000000001）`），并且每个自带一个 ✕ ⇒ **单条解除**。
+      //    原来只有两条路：进弹窗取消勾选（可那次 bug 恰恰是看不到钩）、或「解除全部关联」（一刀切）。
       const chatPlat = state.chatPlatforms?.[chatKey] || 'qq';
-      const linked = !!(identMap[`${chatPlat}:${m.userId}`]);
+      const myKey = `${chatPlat}:${m.userId}`;
+      const linkedKeys = identityLinkedKeys(identMap, myKey);
+      const chips = linkedKeys.map((k) => {
+        const info = identityLabelOf(k);
+        const where = info.chats.map((ck) => formatChatTitle(ck, chatNameOf(ck))).join('、');
+        return `<span class="mem-link-chip" title="已关联：${esc(info.text)}${where ? `（出现在 ${esc(where)}）` : ''}">${esc(info.text)}`
+          + `<button class="mem-link-x" data-key="${esc(k)}" title="只解除与这一个人的关联">✕</button></span>`;
+      }).join('');
       const identLabel = canDel
-        ? `<button class="btn btn-small mem-ident-btn" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px"
-             title="把这个人与别的会话里的某人标成「同一个人」，跨平台/跨会话认人才成立">${linked ? '✓ 已关联' : '同一个人…'}</button>`
+        ? `${linkedKeys.length ? `<span class="muted" style="font-size:11px;margin-left:6px">已关联</span>${chips}` : ''}
+           <button class="btn btn-small mem-ident-btn" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px"
+             title="把这个人与别的会话里的某人标成「同一个人」，跨平台/跨会话认人才成立">${linkedKeys.length ? '改关联…' : '同一个人…'}</button>`
         : '';
       return `<div class="collapsible" open>
         <summary>${esc(who)}${qq}（${m.impressions.length} 条）
@@ -4518,6 +4531,14 @@ async function loadMemoryDetail(chatKey) {
         e.stopPropagation();   // 别把 <details> 收起来
         const m = members.find((x) => String(x.userId) === String(el.dataset.qq));
         openIdentityModal(chatKey, m || { userId: el.dataset.qq, name: el.dataset.name });
+      });
+    });
+    // N4 单条解除：成员行上每个关联对象自带 ✕，点它只解除那一个（不动同组其它人）
+    $$('.mem-link-x', detail).forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();   // 点在 <summary> 里 ⇒ 不拦就会顺手把折叠面板收起来
+        unlinkOneIdentity(String(el.dataset.key || ''), chatKey);
       });
     });
     // 跨会话互通方向：按 QQ 号全局设，改完写进 config.memory.share
@@ -4794,6 +4815,116 @@ async function addGroupWithChat(chatKey, detail) {
  */
 
 /**
+ * 身份表里"和 myKey 是同一个人"的其它键（**不含** myKey 自己）。
+ *
+ * 抽成纯函数有两个理由：① 详情区与弹窗必须用**同一份判据**（两处各写一份必然漂移）；
+ * ② 「关联了谁」这件事要能单测 —— 它就是 §51.4 那个 bug 的正中心。
+ */
+function identityLinkedKeys(identMap, myKey) {
+  const person = String((identMap || {})[myKey] || '');
+  if (!person) return [];
+  return Object.keys(identMap).filter((k) => String(identMap[k]) === person && k !== myKey);
+}
+
+/**
+ * 清掉"只剩一个人"的 person 组。
+ *
+ * 🔴 不变式：**身份表里不留单人组**。单人组等于没关联 —— 而线上那个 bug 的症状正是
+ * "存下来了、重开却没有钩"（勾了同平台同号的项 ⇒ `next[myKey]` 与 `next[k]` 是同一个键
+ * ⇒ 落盘只有一个键 ⇒ `linked` 必空，见 §51.4）。留着单个键只会让人以为关联成功。
+ */
+function pruneIdentitySingletons(identMap) {
+  const count = {};
+  for (const v of Object.values(identMap || {})) count[v] = (count[v] || 0) + 1;
+  const out = {};
+  for (const [k, v] of Object.entries(identMap || {})) if (count[v] >= 2) out[k] = v;
+  return out;
+}
+
+/**
+ * 算出"保存之后"的身份表（纯函数）：先解掉本人与**原本同一组**的所有键，再按 picked 重新成组。
+ *
+ * 为什么必须先整组解掉再重写（而不是逐个 delete 勾掉的）：用户取消一个勾时，
+ * 我们要的是"这一组从现在起就是 picked 这些人"，而不是"在旧组上做增量"——
+ * 增量会让旧组里没勾的人偷偷留着（正是"看不到钩"那类静默偏差）。
+ *
+ * @param newPersonId 原本没有 person 时用的新组号（由调用方生成 ⇒ 本函数保持纯、可测）
+ */
+function nextIdentityMap(identMap, myKey, picked, newPersonId) {
+  const next = { ...(identMap || {}) };
+  const person = String(next[myKey] || '');
+  const group = person ? Object.keys(next).filter((k) => String(next[k]) === person) : [];
+  delete next[myKey];
+  for (const k of group) delete next[k];
+  // 同键不算候选：`平台:id` 与本人都一样时它就是本人，写进去是空操作（§51.4 的根因）
+  const picks = (picked || []).filter((k) => k && k !== myKey);
+  if (picks.length) {
+    const id = person || newPersonId;
+    next[myKey] = id;
+    for (const k of picks) next[k] = id;
+  }
+  return pruneIdentitySingletons(next);
+}
+
+/** 单条解除：只摘掉这一个键（同组其他人不动），同样不留单人组。 */
+function removeIdentityKey(identMap, key) {
+  const next = { ...(identMap || {}) };
+  delete next[key];
+  return pruneIdentitySingletons(next);
+}
+
+/**
+ * 身份键 → 人话。用户要的是"关联了哪个群聊的哪个人"，所以名字与 id 都要给出。
+ * 名字可能查不到（那个会话还没记忆、或者人没昵称）⇒ 退回 id，绝不留空白。
+ */
+function identityLabelOf(key) {
+  const raw = String(key || '');
+  const m = /^([a-z]+):(.+)$/.exec(raw);
+  const platform = m ? m[1] : 'qq';
+  const userId = m ? m[2] : raw;
+  let name = '';
+  const chats = [];
+  for (const c of (state.identityChats || [])) {
+    for (const mm of (c.members || [])) {
+      if (`${c.platform}:${mm.userId}` !== raw) continue;
+      if (!name && mm.name) name = String(mm.name);
+      if (!chats.includes(c.chatKey)) chats.push(c.chatKey);
+    }
+  }
+  const platName = platform === 'wechat' ? '微信' : 'QQ';
+  const who = name || userId;
+  return { platform, userId, name: who, chats, text: `${who}（${platName} ${userId}）` };
+}
+
+/**
+ * 从候选会话里剔掉"与 myKey 同键"的项（纯函数）。
+ *
+ * 🔴 N2（2026-09-24 第十三对话）：身份键是 `平台:id`、**不含会话** ⇒
+ *    同一个平台同一个号**本来就是同一个人**。而候选原来把"同一个号在别的群里出现"
+ *    也列成可勾选项 —— 它们的键与本人**一模一样** ⇒ 勾上等于把 myKey 又写一遍
+ *    ⇒ 落盘只有一个键 ⇒ 重开弹窗 `linked` 必空 ⇒ **看不到钩，而且是静默的**
+ *    （线上实证见 待办与决策记录 §51.4）。
+ *    ⇒ 这类项不是"要不要关联"的问题，是**压根不该出现在候选里**；
+ *      但**不能悄悄消失** —— 返回 `hiddenSameKey` 让界面把"为什么看不见它们"说清楚。
+ *
+ * @returns {{chats: Array, hiddenSameKey: number}}
+ */
+function identityCandidateChats(chats, chatKey, myKey) {
+  let hiddenSameKey = 0;
+  const out = (chats || [])
+    .filter((c) => c.chatKey !== chatKey)
+    .map((c) => ({
+      ...c,
+      members: (c.members || []).filter((mm) => {
+        if (`${c.platform}:${mm.userId}` === myKey) { hiddenSameKey++; return false }
+        return true
+      })
+    }))
+    .filter((c) => c.members.length);
+  return { chats: out, hiddenSameKey };
+}
+
+/**
  * 「同一个人」关联弹窗（2026-09-20 第九对话加）。
  *
  * 用途：把**当前会话里的这个人**与**别的会话里的某人**标成同一个人。
@@ -4807,26 +4938,32 @@ async function addGroupWithChat(chatKey, detail) {
  */
 function openIdentityModal(chatKey, member) {
   const uid = String(member?.userId || '');
-  const chats = (state.identityChats || []).filter((c) => c.chatKey !== chatKey);
   const identMap = (state.config?.memory?.identity) || {};
   const myPlat = state.chatPlatforms?.[chatKey] || 'qq';
   const myKey = `${myPlat}:${uid}`;
-  const myPerson = identMap[myKey] || '';
 
   // 当前已关联到哪些（同一 person 值的其它键）
-  const linked = Object.entries(identMap)
-    .filter(([k, v]) => v === myPerson && k !== myKey)
-    .map(([k]) => k);
+  const linked = identityLinkedKeys(identMap, myKey);
+
+  // 🔴 N2（2026-09-24 第十三对话）：**把"与自己同键"的项从候选里剔掉**，并说明理由。
+  //    判据与理由见 identityCandidateChats() 的注释（线上那个"看不到钩"的 bug 就在那里）。
+  const { chats, hiddenSameKey } = identityCandidateChats(state.identityChats || [], chatKey, myKey);
 
   const rows = chats.length
     ? chats.map((c) => {
       const opts = c.members.map((mm) => {
         const k = `${c.platform}:${mm.userId}`;
         const on = linked.includes(k);
+        // 「还没有印象」与"0 条"必须分开说：前者是"从没整理过这个人"
+        // （候选来自白名单/微信联系人表，见 /api/memory-identity），后者是真的 0 条。
+        const meta = mm.noImpression
+          ? '<span class="muted" style="font-size:11px;white-space:nowrap">还没有印象</span>'
+          : `<span class="muted" style="font-size:11px;white-space:nowrap">${mm.count} 条</span>`;
         return `<label style="display:flex;align-items:center;gap:8px;padding:3px 0">
           <input type="checkbox" class="id-pick" value="${esc(k)}" ${on ? 'checked' : ''}>
           <span>${esc(mm.name || mm.userId)}</span>
-          <span class="muted" style="font-size:11px;white-space:nowrap">${esc(k)} · ${mm.count} 条</span>
+          <span class="muted" style="font-size:11px;white-space:nowrap">${esc(k)}</span>
+          ${meta}
         </label>`;
       }).join('');
       return `<details style="margin:4px 0">
@@ -4834,7 +4971,7 @@ function openIdentityModal(chatKey, member) {
         <div style="padding:4px 0 4px 16px">${opts}</div>
       </details>`;
     }).join('')
-    : '<div class="muted">别的会话还没有任何有 id 的记忆成员。</div>';
+    : '<div class="muted">别的会话里还没有可以关联的人。<br>候选来自：有记忆的成员 · 白名单里的私聊 · 微信联系人表（没印象的人也在）。</div>';
 
   const overlay = modelModalShell({
     head: `同一个人：${member?.name || uid}`,
@@ -4846,6 +4983,10 @@ function openIdentityModal(chatKey, member) {
         「同一个人的记忆」开关控制）。<br>
         ⚠️ <b>只勾真的是同一个人的</b> —— QQ 与微信的数字 id 会撞号，勾错等于把两个人合并。
       </div>
+      ${hiddenSameKey ? `<div class="hint" style="margin-top:6px" id="id-hidden-note">
+        已自动隐藏 <b>${hiddenSameKey}</b> 个「同一个平台 + 同一个号」的条目 ——
+        它们与本人是<b>同一个身份键</b>（身份键只到"平台:号"，不含会话），列出来勾了也是空操作。
+      </div>` : ''}
       <div style="max-height:300px;overflow:auto;margin-top:8px;border:1px solid var(--line,#333);border-radius:6px;padding:6px">
         ${rows}
       </div>
@@ -4857,23 +4998,14 @@ function openIdentityModal(chatKey, member) {
 
   overlay.querySelector('#id-cancel').addEventListener('click', () => closeModelModal(overlay));
 
-  /** 把"本会话这个人 + 勾选的其它 id"写成身份表（幂等：先清掉这些键再写）。 */
+  /** 把"本会话这个人 + 勾选的其它 id"写成身份表（幂等：先清掉这一组再重写）。 */
   const applyIdentity = async (picked) => {
     const fresh = await api('/api/config');
-    const next = { ...((fresh.memory && fresh.memory.identity) || {}) };
-    // 先解掉本键与所有"原同一人"的键（用户可能取消了某几个勾）
-    delete next[myKey];
-    for (const k of linked) delete next[k];
-    if (picked.length) {
-      // 复用已有 person 值（保持既有分组），没有就新生成一个
-      const person = myPerson || `p_${Date.now().toString(36)}`;
-      next[myKey] = person;
-      for (const k of picked) next[k] = person;
-    }
-    await api('/api/config', {
-      method: 'POST',
-      body: JSON.stringify({ memory: { identity: { __replace__: next } } })
-    });
+    const cur = (fresh.memory && fresh.memory.identity) || {};
+    // 分组逻辑抽在 nextIdentityMap 里（纯函数、可单测）—— 它保证"不留单人组"，
+    // 而"单人组"正是那个静默空操作 bug 的产物。
+    const next = nextIdentityMap(cur, myKey, picked, `p_${Date.now().toString(36)}`);
+    await writeIdentity(next);
     state.config = await api('/api/config');
   };
 
@@ -4898,6 +5030,43 @@ function openIdentityModal(chatKey, member) {
       await loadMemoryView();
     } catch (e) { if (err) err.textContent = `解除失败：${e.message}` }
   });
+}
+
+/**
+ * 把整张身份表写回去。
+ *
+ * ⚠️ 必须用 `__replace__` 整体替换：普通深合并**删不掉已有键** ⇒「解除关联」会静默无效。
+ * ⚠️ **空表也要能写**（`{ __replace__: {} }`）—— 解到最后一对时必须真的清干净，
+ *    留一个单人组就是本文件要根除的那种"看着成功其实没关联"。
+ */
+async function writeIdentity(next) {
+  await api('/api/config', {
+    method: 'POST',
+    body: JSON.stringify({ memory: { identity: { __replace__: next || {} } } })
+  });
+}
+
+/**
+ * 单条解除：只把这个身份键从身份表里摘掉，同组其它人不动。
+ *
+ * 🔴 N4（2026-09-24 第十三对话）：用户已选"要单条解除"。
+ *    原来只有两条路 —— ① 进弹窗把某个勾取消（但那次 bug 恰恰是"看不到钩"，无从取消）、
+ *    ② 「解除全部关联」（一刀切，误伤太大）。现在成员行上每个关联对象自带 ✕。
+ */
+async function unlinkOneIdentity(key, chatKey) {
+  const k = String(key || '').trim();
+  if (!k) return;
+  try {
+    // 现取现用：身份表是整体替换，拿缓存里的旧表算 next 会把别处刚加的关联抹掉
+    const fresh = await api('/api/config');
+    const cur = (fresh.memory && fresh.memory.identity) || {};
+    await writeIdentity(removeIdentityKey(cur, k));
+    state.config = await api('/api/config');
+    await loadMemoryDetail(chatKey);
+    await loadMemoryView();
+  } catch (e) {
+    alert(`解除关联失败：${e.message}`);
+  }
 }
 
 /**

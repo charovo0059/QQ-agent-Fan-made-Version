@@ -37,6 +37,95 @@ export function memoryDirOf(chatKey) {
   return chatDir(String(chatKey || ''));
 }
 
+/**
+ * 「同一个人」候选清单（2026-09-24 第十三对话加）。
+ *
+ * 为什么在 memory.js 里：身份表（`memory.identity`）本来就归它管
+ * （见下面的 `#identityMap` / `identityMap()`），候选清单是同一件事的另一半 ——
+ * "有哪些人可以跟谁标成同一个人"。
+ *
+ * 为什么写成**纯函数**（依赖全部由参数传入）：这段逻辑有三个来源、四种去重/标记规则，
+ * 而它出错的样子是**静默的**（用户想关联的那个人根本没出现在列表里 —— 见
+ * 待办与决策记录 §51.4，线上就是这么坏的）。要能脱离 HTTP、真实数据目录与机器人状态
+ * 单独钉住它，就必须把"取数据"和"算清单"分开。
+ *
+ * 三个来源（同一个「平台:id」只出现一次 —— 候选是**人**，不是"人在哪些会话里出现"）：
+ *   ① 有记忆文件的成员           —— count = 印象条数，`noImpression: false`
+ *   ② 白名单里还没有印象的私聊   —— 对端本人就是那个人，count = 0，`noImpression: true`
+ *   ③ 微信联系人表里的联系人     —— 桥学过 id ↔ 昵称，没聊过也在，count = 0，`noImpression: true`
+ *
+ * ⚠️ **群聊成员不在此列**：群成员名单本地没有，要列就得调 OneBot
+ *    （`get_group_member_list`）⇒ 记忆页会依赖网络与机器人状态。这里有意不调。
+ *
+ * ⚠️ ②③ 的 `count` 是 0，但它与"有记忆文件、只是印象数恰好为 0"**不是一回事**，
+ *    所以必须带 `noImpression` 让界面说「还没有印象」而不是"0 条"。
+ *
+ * @param {object}   deps
+ * @param {string[]} deps.chatKeys     有记忆文件的会话（`memory.listChats()`）
+ * @param {Function} deps.membersOf    `(chatKey) => [{userId,name,impressions}]`
+ * @param {Function} deps.platformOf   `(chatKey) => 'qq'|'wechat'`
+ * @param {Array}    deps.contacts     微信联系人表（`listContacts({kind:'private'})`）
+ * @param {object}   deps.notes        `config.memberNotes`（QQ 侧没有昵称时的名字来源）
+ * @param {string[]} deps.allowPrivate `config.allow.private`
+ */
+export function buildIdentityCandidates({
+  chatKeys = [], membersOf, platformOf, contacts = [], notes = {}, allowPrivate = []
+} = {}) {
+  const chats = [];
+  const byChat = new Map();
+  const byKey = new Map();
+  const seenKey = new Set();
+  const addPerson = (chatKey, platform, userId, name, count, noImpression) => {
+    const uid = String(userId ?? '');
+    if (!uid) return;
+    const key = `${platform}:${uid}`;
+    if (seenKey.has(key)) {
+      // 同一个人可能在**多个会话**里都有记忆文件 ⇒ 条数**累加**。
+      // 为什么不是"先到先得"：那会让界面上显示的数字取决于 `memory.listChats()` 的排序，
+      // 而那个顺序是任意的 ⇒ 同一份数据换个顺序显示的数就变，属于"看着有依据其实是噪声"。
+      const prev = byKey.get(key);
+      if (prev && !prev.noImpression) prev.count += Number(count) || 0;
+      return;
+    }
+    seenKey.add(key);
+    if (!byChat.has(chatKey)) {
+      const entry = { chatKey, platform, members: [] };
+      byChat.set(chatKey, entry);
+      chats.push(entry);
+    }
+    const member = {
+      userId: uid,
+      name: String(name || ''),
+      count: Number(count) || 0,
+      identityKey: key,
+      noImpression: !!noImpression
+    };
+    byChat.get(chatKey).members.push(member);
+    byKey.set(key, member);
+  };
+
+  // ① 有记忆文件的成员（原有来源，语义不变）
+  for (const chatKey of chatKeys) {
+    const platform = platformOf(chatKey);
+    for (const m of membersOf(chatKey)) {
+      if (!m.userId) continue;
+      addPerson(chatKey, platform, m.userId, m.name, (m.impressions || []).length, false);
+    }
+  }
+  // ② 白名单里的私聊：没有记忆也要能选（对端本人就是"那个人"）
+  const contactName = new Map((contacts || []).map((c) => [String(c.id), String(c.name || '')]));
+  for (const uid of allowPrivate) {
+    const chatKey = `private:${String(uid)}`;
+    const platform = platformOf(chatKey);
+    const name = platform === 'wechat' ? (contactName.get(String(uid)) || '') : (notes[String(uid)] || '');
+    addPerson(chatKey, platform, uid, name, 0, true);
+  }
+  // ③ 微信联系人表：桥学过的人都列出来（微信 id 只有桥知道，用户认的是昵称）
+  for (const c of (contacts || [])) addPerson(`private:${String(c.id)}`, 'wechat', c.id, c.name, 0, true);
+
+  return chats.filter((c) => c.members.length);
+}
+
 function memberFileName(userId, name = '') {
   if (String(userId ?? '').trim()) {
     const id = String(userId).trim();
