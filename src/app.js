@@ -3370,7 +3370,17 @@ export function createApp({ log = console.log } = {}) {
             }
           }
           return total;
-        } catch { return undefined; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } } }
+        } catch (e) {
+          // 🆕 2026-09-24（第十五对话 · 交接 §3 待办 7 / §46.3 留的那条）：原来是一句裸的
+          //    `catch { return undefined }` —— "走页数行失败"（库坏了/没权限/IO 错）与
+          //    "库太小、不用数"在界面上是**同一个样子**（`rows` 字段直接省掉 ⇒ 显示"行数未知"）。
+          //    契约**一字不变**（仍 `undefined`），只是出声。
+          //    这一处**不配限流**：它是冷路径 —— 只有打开本子设置页、且库 ≤64MB 时才会走到
+          //    （同 `memory.js` 里"冷路径不用限流"的分档理由）。
+          console.warn(`[doujin] 数行失败（${fp}）：${e?.message || e}`
+            + ' —— 界面会显示"行数未知"（⚠️ 这不代表库是空的；本子库只读，可从源重建）');
+          return undefined;
+        } finally { if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } } }
       }
 
       /** 只读回报当前离线库状况；**不拉子进程**（进设置页不该有这种副作用）。读不到的字段一律省略。 */

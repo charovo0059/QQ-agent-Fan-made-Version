@@ -59,6 +59,33 @@ export function reengageWaitMs(cfg, unanswered) {
   return Math.min(after * Math.pow(backoff, over), maxH) * 3600000;
 }
 
+// ── 群名取不到时的**限流出声**（2026-09-24 第十五对话 · 交接 §3 待办 7）──────────
+// 为什么要有：`#chatName` 原来是 `catch { /* 拿不到就用群号 */ }` —— 群名取不到时
+// **没有任何痕迹**（界面显示群号、提示词里群名为空），而失败原因（OneBot 报错 / 群不存在 /
+// 没权限）一个字都不留。返回值契约**一字不变**（仍是 `''`，调用方照旧回落显示群号）。
+//
+// ⚠️ 顺带一个坑：`待办与决策记录.md` §46.3 当时点名要加日志的是**公开版** `getChatName()`
+//    （它 `catch { return '' }`）—— 但真正吞掉 `getGroupInfo` 异常的是**它下面这一层**
+//    （公开版那个 catch 几乎打不到）。**"点名的位置"与"问题真正在的位置"可以不在一处**（项目坑 §4 第 24 条）。
+//
+// 为什么必须限流：这是**热路径** —— 失败时群里没有缓存 ⇒ 每次取群名都会重试，
+// 一个不存在的群会按"每条消息 × 每次渲染"刷屏，反而把真正的那条淹掉。
+// 形状照 `store.js`（落盘失败）与 `memory.js`（读失败）同款：**各自实现，本仓库没有共用件可复用**
+// （那两处的注释里也写了"没有共用件"），所以这里同样只做到"同款"而不是"抽公共件"。
+const CHAT_NAME_FAIL_LOG_COOLDOWN_MS = 60 * 1000;
+/** groupId -> 上次出声时刻。群多了可能上千个键 ⇒ 到顶整体清空（只会让某个群多报一次，不会漏报）。 */
+const chatNameFailLogAt = new Map();
+function reportChatNameFailure(groupId, err) {
+  const key = String(groupId);
+  const now = Date.now();
+  if (chatNameFailLogAt.size >= 512) chatNameFailLogAt.clear();
+  if (now - (chatNameFailLogAt.get(key) || 0) < CHAT_NAME_FAIL_LOG_COOLDOWN_MS) return;
+  chatNameFailLogAt.set(key, now);
+  console.warn(`[orchestrator] 群 ${key} 的名字取不到（${err?.message || err}）`
+    + ' —— 界面与提示词里会退回显示群号；'
+    + `同一群的这条提示 ${CHAT_NAME_FAIL_LOG_COOLDOWN_MS / 1000} 秒内只报一次`);
+}
+
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, mutes = null }) {
     this.store = store;
@@ -981,6 +1008,10 @@ export class Orchestrator {
     try {
       return (await this.#chatName(groupId)) || '';
     } catch {
+      // ⚠️ 这里**刻意不出声**：真正的失败（OneBot 报错）在下一层 `#chatName` 里就已经
+      // catch 并**限流出声**了（见 `reportChatNameFailure` 的注释），这一层只是
+      // "HTTP 接口不许因异常 500"的兜底 —— 真走到这里说明 `#chatName` 自己抛了，
+      // 重复出声只会让一次故障变成两条日志。（`查-吞异常.mjs` 把"写了理由的空/裸 catch"归 D 类。）
       return '';
     }
   }
@@ -993,7 +1024,10 @@ export class Orchestrator {
         this.chatNameCache.set(groupId, String(info.group_name));
         return String(info.group_name);
       }
-    } catch { /* 拿不到就用群号 */ }
+    } catch (e) {
+      // 🆕 2026-09-24（第十五对话 · §46.6 留的那条）：语义不变（仍返回 ''），**但出声**，且限流。
+      reportChatNameFailure(groupId, e);
+    }
     return '';
   }
 
