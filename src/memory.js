@@ -561,7 +561,7 @@ export class MemoryStore {
       // 2026-09-19 加：这条印象是谁写的。
       //   model        = 聊天时模型自己记的（原话在会话日志里可查）
       //   consolidation= 整理（做梦）重写/合并出来的 —— 原来是不可追的那一半
-      //   manual       = 在记忆页签手工编辑的
+      //   manual       = 在印象页签手工编辑的
       // 老条目没有这个字段 ⇒ 消费方按 undefined 显示"未知（早于 09-19）"
       source: String(source || 'model')
     };
@@ -606,7 +606,7 @@ export class MemoryStore {
     return { memberImpression };
   }
 
-  /** 成员级视图（记忆页签用）。 */
+  /** 成员级视图（印象页签用）。 */
   members(chatKey) {
     const map = this.#ensureChat(chatKey);
     const list = [];
@@ -795,11 +795,11 @@ export class MemoryStore {
   }
 
   /**
-   * 彻底删除某会话的全部记忆（管理端「记忆」页的"清空本群记忆"）。
+   * 彻底删除某会话的全部印象（管理端「印象」页的"清空本群印象"）。
    *
    * 比 clear() 彻底：连会话目录、旧版单文件、以及整理前的自动备份一起删。
    * 否则 data/memory/backups/<会话>/ 里还留着一份，用户以为删干净了其实没有。
-   * 删完该会话就从「记忆」列表消失（listChats 是扫目录的）。
+   * 删完该会话就从「印象」列表消失（listChats 是扫目录的）。
    *
    * @returns {number} 被删掉的成员数（含无 QQ 号的兜底条目）
    */
@@ -828,6 +828,8 @@ export class MemoryStore {
    *   ② 同一个人的印象来自别处（`config.memory.share` 按人 + `unifiedMembers` 跨平台/跨组）
    *   ③ **别的会话里别人的印象**（`config.memory.groups` 按组 / `memory.unified` 全互通）
    * ②③ 都要标「来自哪、属于谁」，并且都占 `CROSS_CHAT_TOTAL` 的额度、都要过门槛。
+   * ④ 是**身份表确认过的同一个人**（`memory.identity`）—— 它带来的行会**明说「同一个人·」**
+   *    并配一句"他本人的另一个号"的说明；②③ 带来的**别人**的行照旧（那确实是别人/别的场合）。
    *
    * ⚠️ ②③ 是**一个循环里轮流取**的，不能分两趟：分两趟就等于给先跑的那趟
    *    额外发一份额度，"公平取样"当场失效（本项目 2026-09-15 已经因为
@@ -858,15 +860,25 @@ export class MemoryStore {
     //    分趟等于给每趟单独发一份额度，"公平取样"当场失效
     //    （本项目 2026-09-15 已经因为"按 createdAt 全局排序"吃过一次亏）。
     const buckets = [];
-    const pushed = new Set();
-    const pushBucket = (chat, m, isSpeaking, cross) => {
+    const pushed = new Map();   // sig → bucket（不只是"记过去重"，还要能**补记事实**，见下面的 samePerson）
+    const pushBucket = (chat, m, isSpeaking, cross, samePerson = false) => {
       const items = (m?.impressions || []).filter((e) => e?.content);
       if (!items.length) return;
       // 同一个 (会话, 成员) 可能被多条轴同时选中 ⇒ 去重，否则那一桶的权重凭空翻倍。
       const sig = chat + '\u0000' + String(m?.userId || '') + '\u0000' + (cross ? 'x' : 's');
-      if (pushed.has(sig)) return;
-      pushed.add(sig);
-      buckets.push({ chat, m, items, isSpeaking, sameChat: chat === chatKey, cross });
+      const already = pushed.get(sig);
+      if (already) {
+        // 🔴 **去重只能去掉"桶"，不能丢掉"事实"**（2026-09-25 第十九对话实测）：
+        //    同一个成员可能**既**被"按组 / 全互通"那条轴选中、**又**被"同一个人"那条轴选中
+        //    （两条轴的范围本来就会重叠）。若这里直接 return，那一行就**漏标「同一个人·」**
+        //    —— 症状是"她又不认人了"，而且**看不出来**（标记没了不会报错）。
+        if (samePerson) already.samePerson = true;
+        if (isSpeaking) already.isSpeaking = true;
+        return;
+      }
+      const bucket = { chat, m, items, isSpeaking, sameChat: chat === chatKey, cross, samePerson };
+      pushed.set(sig, bucket);
+      buckets.push(bucket);
     };
 
     // ① 本会话：按 userIds 过滤（原行为，speaking 的人会加权）
@@ -898,10 +910,17 @@ export class MemoryStore {
       const plain = String(uid);
       for (const other of this.ownVisibleChats(chatKey, mine, plain)) {
         if (other === chatKey) continue;
-        // 先用身份表在这个会话里找出"同一个人"的 id；没声明就退回按 id 相等（老行为）
-        const otherId = this.samePersonIdIn(other, mine, plain) || plain;
-        const m = this.memberIn(other, otherId);
-        if (m) pushBucket(other, m, true, true);
+        // 先用身份表在这个会话里找出"同一个人"的 id。
+        // 🔴 **两条路的标记不一样**（2026-09-25 第十九对话，判据当场抓出来的）：
+        //    · 身份表**真的答上了** ⇒ 这是"同一个人"，渲染时要明说（`samePerson = true`）；
+        //    · 没声明 ⇒ 退回按 id 相等的老行为，那只是"同一个号在别处"，**不许**标成同一个人
+        //      （标了就是**凭空认亲**：QQ 号与微信 id 会撞号，同一个数字可能是两个人）。
+        const confirmed = this.samePersonIdIn(other, mine, plain);
+        const m = this.memberIn(other, confirmed || plain);
+        // 为什么必须有这个标记（§75.7 实测）：没有它，她看到的是"另一个 id + 来自那边"，
+        // 而本段引导语又写着"id 相同才是同一个人" ⇒ 她按手里的规则只能把那些事当成**别人的事**。
+        // （用户当天问了两次"对我的印象是什么"，她一次都没提 QQ 侧的事。）
+        if (m) pushBucket(other, m, true, true, !!confirmed);
       }
     }
 
@@ -909,6 +928,7 @@ export class MemoryStore {
     let crossBudget = CROSS_CHAT_TOTAL;
     let admitted = 0;
     let otherCross = false;   // 出现了"别人的"印象（③别人的会话内容）
+    let samePersonSeen = false;   // 出现了"同一个人的另一个号"的印象（④身份表那条轴）
     const seen = new Set();
 
     // ⚠️ 两条轴**分开轮流**，别让一条把额度吃光（第九对话实测踩到）：
@@ -950,10 +970,19 @@ export class MemoryStore {
           if (crossBudget <= 0) continue;
           seen.add(content);
           const tag = sourceTag(b.chat, { mine, platform: this.platformOf(b.chat) });
-          lines.push(`- ${whoLabel(uid, name)}｜来自${tag}：${content}`);
+          // 🔴 「同一个人」这个标记是**给她看的身份事实**（2026-09-25 第十九对话加）：
+          //    没有它，她看到的就是"另一个 id + 来自那边"，而下面的引导语又写着
+          //    "id 相同才是同一个人" ⇒ 按她手里的规则，那些事只能是**别人的事**。
+          //    ⚠️ 只标在**身份表真的答上了**的行上；"按组/按人"带来的行照旧（那确实是别人/别的场合）。
+          //    ⚠️ 位置：夹在名字和「｜来自…」之间 —— **不许插进 `｜来自QQ·` 里面**，
+          //       因为 `工具-会话诊断\查-跨平台标记与回复漏出.mjs` 就是靠 `｜来自QQ·` 扫真实会话存档的
+          //       （标记一插进去，那个工具会永远扫到 0 个样本，而且**不报错**）。
+          const same = b.samePerson ? '「同一个人」' : '';
+          lines.push(`- ${whoLabel(uid, name)}${same}｜来自${tag}：${content}`);
           crossBudget -= 1;
           admitted += 1;
-          if (!speaking.has(uid)) otherCross = true;   // 这条属于**这个会话里没在说话的人**
+          if (b.samePerson) samePersonSeen = true;          // 本人（另一个号）——**不是**"别人"
+          else if (!speaking.has(uid)) otherCross = true;   // 这条属于**这个会话里没在说话的人**
         }
       }
       if (!progressed) break;   // 所有桶都取空了
@@ -965,14 +994,28 @@ export class MemoryStore {
 
     // 引导语：把"id 是锚、名字只是线索"说清楚（用户明确要求"让她知道属于谁"）。
     // 插在标题下面，尽量短 —— 这段每轮都在提示词里，占 token。
-    lines.splice(1, 0, '（名字后面的 `id` 才是认人的依据：同一个人可能换名字；id 相同就是同一个人。）');
+    // ⚠️ 「同一个人」是**人工确认过的例外**：不写这句，她就只能按"id 不同 = 不同人"判
+    //    （§75.7 实测踩到）。**只在真有这种行时才加** ⇒ 常见情况一个 token 都不多花。
+    lines.splice(1, 0, samePersonSeen
+      ? '（名字后面的 `id` 才是认人的依据：同一个人可能换名字；id 相同就是同一个人 —— '
+        + '**但标了「同一个人」的是人工确认过的例外：id 不同也是同一个人**。）'
+      : '（名字后面的 `id` 才是认人的依据：同一个人可能换名字；id 相同就是同一个人。）');
     if (crossBudget < CROSS_CHAT_TOTAL) {
-      const note = otherCross
-        ? '（带「来自…」的是在**别的会话**里记下的、属于那里的人：这里的人不知道那些事，'
-          + '别拿出来说、也别把两个会话的人搞混。）'
-        : '（带「来自…」的是**别的场合**记下的：那件事只在那个场合说，别主动拿到这里提；'
-          + '对方自己提起来再接。）';
-      lines.splice(2, 0, note);
+      // 说明**分两句、各管各的**：本人（另一个号）一句、别人一句。
+      // ⚠️ 别合并成一句 —— 合并之后必然要么把本人当外人、要么让别人蹭到"本人"的待遇。
+      const notes = [];
+      if (samePersonSeen) {
+        notes.push('（标了「同一个人」的是**他本人的另一个号**在那边记下的：**认得出是同一个人**，'
+          + '但那件事是在那边说的 —— 别主动拿到这里提，对方自己提起来再接。）');
+      }
+      if (otherCross) {
+        notes.push('（带「来自…」的其他行是在**别的会话**里记下的、属于那里的人：这里的人不知道那些事，'
+          + '别拿出来说、也别把两个会话的人搞混。）');
+      } else if (!samePersonSeen) {
+        notes.push('（带「来自…」的是**别的场合**记下的：那件事只在那个场合说，别主动拿到这里提；'
+          + '对方自己提起来再接。）');
+      }
+      lines.splice(2, 0, ...notes);
     }
     // 🆕 2026-09-21（第十对话）：把"你不在时记忆被动过"那句也插进说明区。
     //    放在这里而不是末尾，理由与上面两句相同：它是**关于这份材料的说明**，
@@ -1063,7 +1106,7 @@ export class MemoryStore {
   // ── 跨会话互通 ──────────────────────────────────────────────────────
   //
   // 背景：印象文件是按「会话 + 群友」切的（data/memory/<chatKey>/<QQ>.json），
-  // 所以同一个人在私聊和各个群里本来是互不相通的几份。管理端「记忆」页可以逐个
+  // 所以同一个人在私聊和各个群里本来是互不相通的几份。管理端「印象」页可以逐个
   // QQ 号选方向（config.memory.share），让这个人在别处的印象也进当前会话的提示词。
   //
   // 只影响**读**：写入永远只写当前会话，所以每条印象都还能追溯到是哪个场合记下的。

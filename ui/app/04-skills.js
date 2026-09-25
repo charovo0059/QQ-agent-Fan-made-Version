@@ -21,7 +21,7 @@ if (!state.skills) state.skills = [];
 if (!state.skillsSummary) state.skillsSummary = {};
 if (!state.uninstalledSkills) state.uninstalledSkills = [];
 if (state.skillsHotReload === undefined) state.skillsHotReload = true;
-// 待审提案（记忆页顶部那块）。取不到时保持原值，别清空成"没有提案"的假象。
+// 待审提案（印象页顶部那块）。取不到时保持原值，别清空成"没有提案"的假象。
 if (!Array.isArray(state.proposals)) state.proposals = [];
 if (!state.proposalCounts) state.proposalCounts = {};
 

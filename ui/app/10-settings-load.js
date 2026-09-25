@@ -702,7 +702,7 @@ function renderSettingsSidebar() {
   const menu = [
     ['api', '模型 API'],
     ['search', '搜索服务'],
-    ['memory', '记忆'],
+    ['memory', '印象与整理'],
     ['persona', '人设'],
     ['allow', '聊天白名单'],
     ['wechat', '微信联系人'],

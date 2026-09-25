@@ -105,7 +105,7 @@
   <nav id="tabs" data-page-node-id="E9BCxQoSdlNgyXwJBELj6z">
     <button class="tab active" data-tab="sessions" data-page-node-id="QA2pcdHYdARJK2APBNKZmC">会话</button>
     <button class="tab" data-tab="chats" data-page-node-id="AdXD0D2NiWH5UBfpPQqzQ2">存档</button>
-    <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">记忆</button>
+    <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">印象</button>
     <button class="tab" data-tab="dreams" id="tab-dreams">笔记</button>
     <button class="tab" data-tab="stickers" id="tab-stickers">表情包</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
@@ -189,7 +189,7 @@
       <div id="wechat-page"></div>
     </section>
 
-    <!-- 记忆视图 -->
+    <!-- 印象视图 -->
     <section id="view-memory" class="view" data-page-node-id="leNhwCaiL4AF1vB9JaXEQw">
       <aside id="memory-list" class="list-pane" data-page-node-id="bPnh3N5qAcbMSCpVxYthSd">
         <!-- 待审提案区（2026-09-19 加）：她提议改自己的地方。
@@ -197,25 +197,25 @@
                 #memory-detail 的 innerHTML，放那边会"点一下会话就消失"（第一版就是这么写错的）。
              ⚠️ 这里只展示 + 打标记，**不执行任何提案内容**，见 src/proposals.js 顶部。 -->
         <div id="proposal-review" class="proposal-review"></div>
-        <!-- 「显示空记忆」开关（2026-09-23 第十二对话：用户点名**移回左栏列表头**）。
+        <!-- 「显示空印象」开关（2026-09-23 第十二对话：用户点名**移回左栏列表头**）。
              ⚠️ 它只在**这一处**存在，全页只有一个 `#mem-show-empty` —— 这条必须守住：
                 两个同名 id 会让 `$('#mem-show-empty')` **静默只拿到第一个**，
                 第二个变成永远点不动的死件（第十对话把它挪进详情区时就是踩了这个才写这段注释的）。
              ⚠️ 它管的是"左栏列表里列哪些会话"，挂在**列表头**语义是对的；
                 右栏详情里那份已同时撤掉，**别两边都放**。 -->
         <div class="list-head list-head--row" data-page-node-id="LVSsdebq14ic87yIdKe0k1">
-          <span class="muted">记忆</span>
+          <span class="muted">印象</span>
           <span class="ph-spacer"></span>
-          <label class="toggle" id="mem-empty-toggle-wrap" title="勾上之后，白名单里那些还没有记忆文件的会话也会出现在这个列表里 —— 便于点进去手动添加印象">
+          <label class="toggle" id="mem-empty-toggle-wrap" title="勾上之后，白名单里那些还没有印象的会话也会出现在这个列表里 —— 便于点进去手动添加印象">
             <input type="checkbox" id="mem-show-empty">
             <span class="tg-track"><span class="tg-knob"></span></span>
-            <span class="tg-text">显示空记忆</span>
+            <span class="tg-text">显示空印象</span>
           </label>
         </div>
         <div id="memory-items" data-page-node-id="Nd0JwkZfmnInPLDO9AjVAD"></div>
       </aside>
       <div id="memory-detail" class="detail-pane" data-page-node-id="fXph3DU6yHzmzVZOtXuAii">
-        <div class="empty-hint" data-page-node-id="BSa8XGxI6gVbgsfrKC7QAq">← 选择会话查看记忆</div>
+        <div class="empty-hint" data-page-node-id="BSa8XGxI6gVbgsfrKC7QAq">← 选择会话查看印象</div>
       </div>
     </section>
 
