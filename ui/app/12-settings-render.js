@@ -740,14 +740,19 @@ function renderSystemPromptEditor(c) {
     ? '当前生效：整份覆盖'
     : (overrideCount ? `当前生效：逐段覆盖 ${overrideCount} 段` : '当前生效：内置系统提示');
 
+  // 这几段的**内置默认按平台不同**（buildDefaultSegments 的四处分叉）⇒ 标题上标出看的是哪一版，
+  // 免得出现"标题写 QQ、内容其实是微信"（2026-09-25 用户当场看出来的那个坑）。
+  const PLATFORM_VARY = new Set(['intro', 'toolProtocol', 'stickerRules', 'qqSceneRules']);
+  const platTag = (sp && sp.platform === 'wechat') ? '微信版' : 'QQ版';
   const segHtml = sp
     ? sp.segments.map((s) => {
       const overridden = String(overrides[s.key] ?? '').trim();
       const cur = overridden || s.default || '';
+      const title = PLATFORM_VARY.has(s.key) ? `${s.label}（${platTag}）` : s.label;
       // data-default 存内置默认，供「恢复默认」按钮和实时「已覆盖」标记比对用
       return `<div class="sp-seg">
         <div class="sp-seg-head">
-          <span class="sp-seg-title">${esc(s.label)}</span>
+          <span class="sp-seg-title">${esc(title)}</span>
           <span class="sp-badge sp-badge-seg sp-seg-flag${overridden ? '' : ' hidden'}">已覆盖</span>
           <span class="sp-seg-count">${cur.length} 字符</span>
           <button type="button" class="btn btn-small sp-seg-reset" title="恢复为内置默认文本">恢复默认</button>
@@ -775,10 +780,14 @@ function renderSystemPromptEditor(c) {
         </div>
         <div class="sp-callout">
           <span class="sp-callout-icon">🆕</span>
-          <div><b>逐段替换只对 QQ 生效</b>（2026-09-20 起）。微信侧一律用内置的平台版——
-            因为人写覆盖时想的是 QQ 的能力（<code>send_sticker</code>、<code>send_poke</code>、表情包…），
-            套到微信侧会<b>诱导她去调一个不存在的能力</b>。
-            想让微信侧也有自定义措辞，请等「微信专用覆盖」这个功能（还没做）。</div>
+          <div><b>逐段替换分 QQ / 微信两套</b>（2026-09-25 起）：下面每个框编辑的是
+            <b>当前平台（${platTag === '微信版' ? '微信' : 'QQ'}）</b>那一套 —— 标题里带「（${platTag}）」的段，
+            内置默认本来就按平台不同。切到另一个平台页签就能改那一套，两套互不影响。
+            <b>留空 = 用内置的平台版</b>。<br>
+            当前已覆盖：<b>QQ 侧 ${(sp && sp.overrideCounts && sp.overrideCounts.qq) || 0} 段</b> ·
+            <b>微信侧 ${(sp && sp.overrideCounts && sp.overrideCounts.wechat) || 0} 段</b>。
+            ⚠️ 别把 QQ 的说法抄进微信那套 —— 微信没有拍一拍/表情包能力，
+            那样会<b>诱导她去调一个不存在的能力</b>。</div>
         </div>
         <div class="field"><label>完整系统提示（留空 = 使用内置）</label>
           <textarea id="cfg-sysprompt" class="persona-role-text sp-full-text" placeholder="留空即使用内置系统提示。点下方「载入内置默认」可把内置提示填进来再改。" spellcheck="false">${esc(persona.systemPrompt || '')}</textarea></div>
