@@ -130,6 +130,35 @@ function bindAllowChips() {
   });
 }
 
+/**
+ * 发送去重窗口的界面值 → 写盘值（2026-09-25 第二十一对话，交接 §3 待办 4）。
+ *
+ * 🔴 **为什么不能只写 `Number(val(...)) || 8000`**：
+ *    `send.dedupeWindowMs` 的语义里 **`0` 是"明确关闭去重"**（不是"没填"）——
+ *    这一条在 `src/sender.js` 的 `#dedupeWindow` 里是有断言的。
+ *    而 `|| 8000` 会把 `0` 当假值丢掉 ⇒ 用户填 0 之后**去重照样在跑**，
+ *    症状是"我明明关了它还是只发一条"，而且**看不出来**。
+ *
+ * 口径：
+ *   · 读到 `0` 或正数（含小数，向下取整）⇒ **照实写**（0 就是 0）
+ *   · NaN / 负数 / 读不到        ⇒ 回落默认 8000
+ *
+ * 单独抽成**纯函数**（而不是留一个内联 IIFE）是为了**能真跑它**：
+ * `测试-现行\test-专用模型输入框.mjs` 会把这段源码抠出来在最小沙箱里逐例断言
+ * （与 `normalizeVideoMode` 同一个做法 —— 不然判据只能靠正则看源码写了什么）。
+ */
+function normalizeDedupeWindowMs(raw) {
+  // 🔴 null / undefined / 空串**必须单独挡掉**，不能只靠 Number()：
+  //    `Number(null) === 0`、`Number('') === 0` ⇒ 会把"输入框被清空/没有值"
+  //    当成"用户要关闭去重"，于是**静默把去重关掉**（而且看起来很正常）。
+  //    实测这就是本函数第一版的行为，被判据当场抓出来（真值表里 null/'' 那一格红了）。
+  //    ⇒ 只有**显式**的 0 才算关闭；"没有值"一律回落默认 8000。
+  if (raw === null || raw === undefined || String(raw).trim() === '') return 8000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 8000;
+  return Math.floor(n);
+}
+
 /** ⚠️ 2026-09-22（条目 6）：`parseList()` 已删除。
  *  它做的是"把逗号文本框的内容切成数组"，而白名单现在用**芯片输入**（`.chipbox`），
  *  名单的权威来源是 DOM 里的芯片（`readAllowChips`）。
@@ -436,7 +465,9 @@ async function saveConfig({ quiet = false } = {}) {
       maxPerMinute: Number(val('#cfg-maxpermin', c.send?.maxPerMinute)) || 80,
       maxPerHour: Number(val('#cfg-maxperhour', c.send?.maxPerHour)) || 500,
       byLengthMs: Number(val('#cfg-bylength', c.send?.byLengthMs)) || 20,
-      hardSplitAt: Number(val('#cfg-hardsplit', c.send?.hardSplitAt)) || 0
+      hardSplitAt: Number(val('#cfg-hardsplit', c.send?.hardSplitAt)) || 0,
+      // 🆕 2026-09-25（第二十一对话，交接 §3 待办 4）：发送去重窗口的界面接线。
+      dedupeWindowMs: normalizeDedupeWindowMs(val('#cfg-dedupewindow', c.send?.dedupeWindowMs ?? 8000))
     };
     patch.proactive = {
       ...c.proactive,

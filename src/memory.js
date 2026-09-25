@@ -271,7 +271,7 @@ const IMPRESSION_KEYWORD_CAP = 3;
  *                   这是 Generative Agents 踩过的坑（`retrieve.py` 检索后刷 `last_accessed`，
  *                   而 reflect 按 `last_accessed` 排序，"被想起的更容易再被想起"，它没做任何抑制）。
  */
-export function scoreImpression(entry, { member = {}, isSpeaking = false, keywords = [], now = Date.now() } = {}) {
+export function scoreImpression(entry, { member = {}, keywords = [], now = Date.now() } = {}) {
   if (!entry || typeof entry !== 'object') return 0;
   const text = String(entry.content ?? '');
   if (!text.trim()) return 0;
@@ -922,7 +922,7 @@ export class MemoryStore {
     //    （本项目 2026-09-15 已经因为"按 createdAt 全局排序"吃过一次亏）。
     const buckets = [];
     const pushed = new Map();   // sig → bucket（不只是"记过去重"，还要能**补记事实**，见下面的 samePerson）
-    const pushBucket = (chat, m, isSpeaking, cross, samePerson = false) => {
+    const pushBucket = (chat, m, cross, samePerson = false) => {
       const items = (m?.impressions || []).filter((e) => e?.content);
       if (!items.length) return;
       // 同一个 (会话, 成员) 可能被多条轴同时选中 ⇒ 去重，否则那一桶的权重凭空翻倍。
@@ -934,16 +934,21 @@ export class MemoryStore {
         //    （两条轴的范围本来就会重叠）。若这里直接 return，那一行就**漏标「同一个人·」**
         //    —— 症状是"她又不认人了"，而且**看不出来**（标记没了不会报错）。
         if (samePerson) already.samePerson = true;
-        if (isSpeaking) already.isSpeaking = true;
         return;
       }
-      const bucket = { chat, m, items, isSpeaking, sameChat: chat === chatKey, cross, samePerson };
+      const bucket = { chat, m, items, sameChat: chat === chatKey, cross, samePerson };
       pushed.set(sig, bucket);
       buckets.push(bucket);
     };
 
-    // ① 本会话：按 userIds 过滤（原行为，speaking 的人会加权）
-    for (const m of picked) pushBucket(chatKey, m, !!(m.userId && speaking.has(String(m.userId))), false);
+    // ① 本会话：按 userIds 过滤
+    // ⚠️ 2026-09-25 第二十一对话：这里原来传的是 `!!(m.userId && speaking.has(String(m.userId)))`
+    //    （"正在说话的人"标记）。它一路被塞进 `bucket.isSpeaking`、再展开进 `scoreImpression`，
+    //    而那个参数**从来没有参与过任何计算**（实测 true/false 同分，交接 §3 待办 3）。
+    //    ⇒ 按"二选一"的处置**删掉参数**：留着一个不参与计算的字段比没有更坏 ——
+    //      它会让人以为"正在说话的人在打分上有优势"（本棒就被它带偏过一次）。
+    //      这里同时删掉 `bucket.isSpeaking`：它存在的唯一用途就是喂那个死参数。
+    for (const m of picked) pushBucket(chatKey, m, false);
 
     // ② **按人**那条轴（`config.memory.share`）—— 原有功能，必须继续有效。
     //    对这一轮相关的人，把他在**别处**的印象也装进来。
@@ -953,14 +958,29 @@ export class MemoryStore {
       for (const other of this.listChats()) {
         if (other === chatKey) continue;
         const m = this.memberIn(other, uid);
+        // ⚠️ 尾参数 `samePerson` **必须保留为 true**：这条轴（`memory.share` 按人）带来的
+        //    就是"这个人在别处的印象"，本来就要标「同一个人」。
+        //    旧签名是 `(chat, m, isSpeaking, cross, samePerson)`，这里原来是 `(other, m, true, true)`
+        //    = isSpeaking=true、**cross=true**，而 samePerson 走的是**默认 false**。
+        //    🔴 删 `isSpeaking` 时这一处**不能**只把 cross 补成 true 就完事 —— 实测那样会让
+        //       samePerson 变 false，"本人另一个号"不再被标出来，
+        //       `test-记忆互通-按会话成组.mjs` 当场红 2 条（本人标记与"别人"说明同时错位）。
+        //    ⇒ 正确形状：`(other, m, /*cross*/ true, /*samePerson*/ true)`。
         if (m) pushBucket(other, m, true, true);
       }
     }
 
     // ③ **按会话组 / 全互通**那条轴 —— 组内**所有人**的印象（`groups` / `unified`）。
     //    这是"别的会话里别人说的话也能带过来"，占额度、也要过门槛。
+    //    ⚠️ **不带**「同一个人」：组/全互通说的是"会话之间互通"，**不是**"人是同一个人"。
+    //       （旧签名是 `(chat, m, isSpeaking, cross, samePerson)`，这里原来写
+    //        `(other, m, false, true)` —— 第 3 个 `false` 是 **cross** 吗？不是：
+    //        按旧签名它是 `isSpeaking`，所以那行的真意是 cross=**true**、samePerson=走默认 false。
+    //        🔴 删 `isSpeaking` 之后参数整体左移一格，**同一个字面值含义全变了** ——
+    //        本棒就因此把它读成了 samePerson=true，判据当场红 2 条。
+    //        ⇒ 现在签名是 `(chat, m, cross, samePerson)`，此处正解为 cross=true。）
     for (const other of this.memberVisibleChats(chatKey, mine)) {
-      for (const m of this.members(other)) pushBucket(other, m, false, true);
+      for (const m of this.members(other)) pushBucket(other, m, true);
     }
 
     // ④ **跨平台/同平台的"同一个人的记忆"**（`unifiedMembers`），哪怕他一个组都没进。
@@ -981,7 +1001,12 @@ export class MemoryStore {
         // 为什么必须有这个标记（§75.7 实测）：没有它，她看到的是"另一个 id + 来自那边"，
         // 而本段引导语又写着"id 相同才是同一个人" ⇒ 她按手里的规则只能把那些事当成**别人的事**。
         // （用户当天问了两次"对我的印象是什么"，她一次都没提 QQ 侧的事。）
-        if (m) pushBucket(other, m, true, true, !!confirmed);
+        // ⚠️ 2026-09-25 第二十一对话删 `isSpeaking` 时这里**必须连着改**：原调用是
+        //    `pushBucket(other, m, true, true, !!confirmed)` —— 第 3 个 `true` 是被删的
+        //    `isSpeaking`。删掉它之后如果只把参数往左挪一格，`samePerson` 会**恒为 true**
+        //    ⇒ 所有人都被标成「同一个人」（凭空认亲）。判据当场抓出来了：
+        //    `test-记忆互通-按会话成组.mjs` 那两条"别人的行不许带同一个人标记"变红。
+        if (m) pushBucket(other, m, true, !!confirmed);
       }
     }
 
@@ -1042,10 +1067,12 @@ export class MemoryStore {
           const content = String(e.content ?? '').trim();
           if (!content || seen.has(content)) continue;
           // ⚠️ `keywords` / `now` 必须**显式传**：`scoreImpression` 的签名是
-          //    `{ member, isSpeaking, keywords = [], now = Date.now() }`，而桶对象里
+          //    `{ member, keywords = [], now = Date.now() }`，而桶对象里
           //    **没有** keywords 这个字段 ⇒ 展开 b 之后它会被默认成 `[]`，
           //    关键词那一项恒为 0、所有印象都卡在 0.295 过不了 0.30 的门槛 ——
           //    症状是"记忆段永远为空"，**不报错**。（第九对话实测踩到。）
+          //    （2026-09-25 第二十一对话：签名里那个从不参与计算的 `isSpeaking` 已删，
+          //      展开 b 不再会把它带进来 —— 见 `pushBucket` 上方那段注释。）
           const s = scoreImpression({ content, createdAt: e.createdAt }, { ...b, keywords, now });
           // 门槛：过线才进（"错的不如空着"）。
           // 🆕 2026-09-25：**问到印象那一轮**，名单里的"本人"印象放宽进来（见上面 relaxedKeys）。

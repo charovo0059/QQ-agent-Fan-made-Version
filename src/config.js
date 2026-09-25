@@ -661,14 +661,93 @@ export function loadConfig() {
 let currentConfig = null;
 let saveTimers = new Map();
 
+/**
+ * 🆕 2026-09-25（第二十一对话，交接 §3 待办 7）：**上一次配置写入是谁发起的**。
+ *
+ * 为什么需要（回归里那条警报一直分不清真信号还是噪声）：
+ *   跑回归时，"线上配置保护"报过一次「线上配置被测试改动了：`memory`」——
+ *   而它很可能是**应用自己**写的（那"还原"就是把一次合法写入退了回去）。
+ *   原来没有任何字段能回答"这次写入是谁干的" ⇒ 只能当噪声，或者反过来冤枉测试。
+ *
+ * 怎么做的：`updateConfig()` 每次写入时把调用点记在这里，并**顺手打一行日志**。
+ *   ① `source` 显式传入 ⇒ 用它（调用方最清楚自己在干什么）；
+ *   ② 没传 ⇒ 取**第一个不在本文件里的栈帧**（= 真正发起写入的那个模块:行号）。
+ *   ⛔ 刻意**不做栈遍历之外的任何猜测** —— 也不去猜"是测试还是应用"
+ *      （那要靠调用点自己说，工具只负责如实记录）。
+ *
+ * 怎么用：`import { configWriteSource } from './src/config.js'` 读它；
+ *   或看日志里那行 `[config] 写入来源 …`。
+ */
+let lastWriteSource = null;
+
+/** 取第一个不在 config.js 里的调用栈帧，形如 `src/app.js:1703`。 */
+function callerFrame() {
+  const prev = Error.stackTraceLimit;
+  Error.stackTraceLimit = 12;
+  let lines = [];
+  try {
+    lines = String(new Error().stack || '').split('\n');
+  } catch { /* 拿不到就算了 */ } finally {
+    Error.stackTraceLimit = prev;
+  }
+  // frames[0..1] 是 "Error" 与本函数自身
+  for (let i = 2; i < lines.length; i++) {
+    const m = lines[i].match(/\((.*?):(\d+):\d+\)\s*$/) || lines[i].match(/at\s+(.*?):(\d+):\d+\s*$/);
+    if (!m) continue;
+    let file = m[1];
+    // 🔴 ESM 的栈帧给的是 `file:///E:/dsh%E5%B7%A5...`（**百分号编码**）。
+    //    直接记下来会得到一串看不懂的百分号 —— 而这条日志存在的唯一目的就是**给人看**。
+    //    项目坑 §4-9/§57.1：中文路径的 file URL 必须解回来。
+    if (file.startsWith('file://')) {
+      try {
+        file = fileURLToPath(file);
+      } catch {
+        try { file = decodeURIComponent(file.replace(/^file:\/\/\/?/, '')); } catch { /* 保留原样 */ }
+      }
+    }
+    file = file.replace(/\\/g, '/');
+    if (/(^|\/)config\.js$/.test(file)) continue;      // 跳过本文件自己的帧
+    const short = file.split('/app/').pop() || file.split('/').slice(-2).join('/');
+    return `${short}:${m[2]}`;
+  }
+  return '未知（拿不到调用栈）';
+}
+
+/** 上一次配置写入的来源（`{ at, source, keys, explicit }`），从没写过则为 null。 */
+export function configWriteSource() {
+  return lastWriteSource;
+}
+
 /** 取当前生效配置（未初始化时从磁盘读）。 */
 export function getConfig() {
   if (!currentConfig) currentConfig = loadConfig();
   return currentConfig;
 }
 
-/** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
-export function updateConfig(patch) {
+/**
+ * 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。
+ *
+ * @param {object} patch    要写进去的那一小块
+ * @param {string} [source] 🆕 **谁在写**（交接 §3 待办 7）。不传则从调用栈取。
+ *                          调用点知道自己在干什么时应该显式传，例如 `'api:/api/allow'`、
+ *                          `'boot:sliderToTier'`。显式值会原样记进日志与 `configWriteSource()`。
+ */
+export function updateConfig(patch, source) {
+  // 🔴 记录"谁在写"必须放在**最前面**：哪怕后面写盘抛错，也留下了"是谁发起的"。
+  const keys = Object.keys(patch || {});
+  const explicit = typeof source === 'string' && source.length > 0;
+  const from = explicit ? source : callerFrame();
+  lastWriteSource = {
+    at: new Date().toISOString(),
+    source: from,
+    keys,
+    explicit,
+  };
+  // 🔴 必须走 **stderr**：本项目有测试是**跑一个进程、把它的 stdout 当 JSON 解析**的
+  //    （`test-配置损坏留档.mjs` 就这么干）⇒ 往 stdout 打一行日志会把那类判据打成
+  //    `Unexpected token '['` 这种假红。本文件里其它诊断（配置损坏等）本来也走 stderr，保持一致。
+  console.error(`[config] 写入来源 ${from}${explicit ? '（调用方显式声明）' : ''}；patch 顶层键=[${keys.join(', ')}]`);
+
   currentConfig = deepMerge(getConfig(), patch);
 
   // ── 响应档位：以滑条位置为唯一真相，派生 tier 与随机概率 ──
