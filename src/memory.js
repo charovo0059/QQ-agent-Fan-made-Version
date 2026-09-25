@@ -313,14 +313,48 @@ export function scoreImpression(entry, { member = {}, isSpeaking = false, keywor
  */
 export const IMPRESSION_THRESHOLD = 0.3;
 
-/** 从这一轮的消息里抽关键词（只取 2 字及以上的中文词与 2+ 的英文/数字串，去重、限量）。 */
+/**
+ * 中文**虚词**：双字块里两个字都在这张表里时，就不算关键词（"我的"/"什么"/"这个"…）。
+ *
+ * ⚠️ 刻意做成**字符集**而不是"词表"：词表要维护、会过期、还得为它写判据；
+ *    而"哪些字是虚词"这件事很稳定。漏掉的（比如"怎么"里的"怎"）顶多多抽一个块，
+ *    代价只是"多一个可能命中的机会" —— 那正是这一轮要的东西。
+ */
+const CJK_STOP_CHARS = new Set('的了是我你他她它们在有和就不都也很到说要去会着看好这那什么怎呢吧吗啊哦嗯个一二三四五六七八九十'.split(''));
+
+/**
+ * 从这一轮的消息里抽关键词（中文 **2 字滑窗**、英文/数字 2+ 串，去重、限量）。
+ *
+ * 🔴 2026-09-25（第十九对话）**改掉了旧的"2~4 字定长块"**，原因是一次实测：
+ *    旧实现是 `/[\u4e00-\u9fa5]{2,4}/g` —— **贪婪且不重叠**，中文没有空格，
+ *    于是「对我的印象是什么」被切成 `对我的印` / `象是什么`，**句子里的词（"印象"）根本不在里面**；
+ *    而计分是 `印象正文.includes(块)` ⇒ **中文自然句几乎必然 0 命中**
+ *    ⇒ 分数停在 0.300（"仅仅是新"的水位线）⇒ 记忆段长期为空，**而且不报错**。
+ *    实测证据：用户问「对我的印象是什么」，微信侧 6 条印象只有**恰好含"跨平台记忆互通测试"**
+ *    那一条进来（2 个词命中 0.800），另外 5 条全停在 0.300 被挡；
+ *    换成空格隔开的「爸爸 创造者 大肥鱼 删记忆」⇒ 立刻 3 条进（含 QQ 侧那条）。
+ *    ⇒ **问题从来不是"记忆没互通"，是"找记忆的钥匙配错了"。**
+ *
+ * ⚠️ 滑动窗口的代价：命中率上去，**噪声也上来**（一个普通双字块也能造成 1 次命中）。
+ *    缓解手段是**已有的**那套，没有新加：每条印象的命中数封顶 3（最多 +0.75）、
+ *    门槛 0.30 仍然要求"够新"或"命中≥1"、跨会话还有额度上限。
+ *    **反悔点**：哪天开始觉得"她老翻不相关的旧账"，先回来量这里的双字块，再考虑上真分词。
+ */
 export function extractKeywords(text, limit = 40) {
   const t = String(text ?? '');
   if (!t.trim()) return [];
   const out = [];
   const seen = new Set();
-  // 中文 2~4 字滑窗 + 英文/数字词。刻意粗一点：宁可多抽，反正后面按"命中"计分。
-  const cjk = t.match(/[\u4e00-\u9fa5]{2,4}/g) || [];
+  // 中文：**2 字滑窗（重叠）**。先按连续汉字段切，再在段内逐字滑 —— 跨标点/空格不会拼出假词。
+  const cjk = [];
+  for (const run of t.match(/[\u4e00-\u9fa5]+/g) || []) {
+    if (run.length < 2) continue;
+    for (let i = 0; i + 2 <= run.length; i++) {
+      const g = run.slice(i, i + 2);
+      if (CJK_STOP_CHARS.has(g[0]) && CJK_STOP_CHARS.has(g[1])) continue;
+      cjk.push(g);
+    }
+  }
   const latin = t.match(/[A-Za-z0-9_]{2,}/g) || [];
   for (const w of [...cjk, ...latin]) {
     const k = w.toLowerCase();
@@ -331,6 +365,30 @@ export function extractKeywords(text, limit = 40) {
   }
   return out;
 }
+
+/**
+ * 这一句是不是在问「你记得我吗 / 对我的印象」？（2026-09-25 第十九对话加）
+ *
+ * 🔴 为什么光改关键词还不够：用户问「对我的印象是什么」时，**相关的那几条印象里根本没有
+ *    他问句中的任何词**（"爸爸/创造者/大肥鱼"）—— 任何分词方案都救不了这种问句，
+ *    而这恰恰是"她最该拿出记忆"的时候。⇒ **认人靠"谁在说话"（`userIds`），不靠词。**
+ *
+ * 命中时的行为见 `formatForPrompt`：只把**正在说话那个人自己**（含身份表确认的同一个人）
+ * 的印象放宽进来，每轮最多 `SELF_RECALL_MAX` 条；**别人**的仍然要过 0.30 门槛
+ * （"错的不如空着"这条原则不变）。
+ *
+ * ⚠️ 措辞表刻意写宽一点：按 §73 的教训，**闸门过窄和过宽一样是失灵**，而且更难解释
+ *    （用户会觉得"我明明问了它就是不说"）。误判的代价只是"这一轮多带 3 条关于他的印象"。
+ * 反悔点：若出现"她突然翻旧账"，先看这条是不是放宽过头。
+ */
+export function askedAboutImpressions(text) {
+  const t = String(text ?? '');
+  if (!t.trim()) return false;
+  return /对我的印象|对我的看法|对我的评价|印象是什么|什么印象|你(还)?记得我|你还认得我|认得我|记得我是谁|知道我是谁|我是谁|了解我|还记得我吗/.test(t);
+}
+
+/** 问到印象时，每轮最多放宽进来几条（含"同一个人的另一个号"那些行）。 */
+export const SELF_RECALL_MAX = 3;
 
 // ── 跨会话互通的两个上限（控 token）──
 // 记忆是按「会话 + 群友」切的，互通后同一个人可能同时带来好几个会话的印象。
@@ -851,6 +909,9 @@ export class MemoryStore {
 
     // 门槛制：按相关度打分，过线才进（低于门槛宁可零条）。
     const keywords = extractKeywords(queryText);
+    // 🆕 2026-09-25：这一句是不是在问"你记得我吗/对我的印象"？（见 askedAboutImpressions 的注释）
+    //    命中的那一轮，把**本人**的印象放宽进来 —— 因为那种问句里根本没有相关印象的词。
+    const selfRecall = askedAboutImpressions(queryText);
     const speaking = new Set(userIds ? [...userIds].map(String) : []);
 
     // 每个 (会话, 成员) 装一桶 —— 公平取样的单位是**成员**不是会话：
@@ -939,6 +1000,37 @@ export class MemoryStore {
     const ownAxis = buckets.filter((b) => !b.cross);    // 本会话
     const crossAxis = buckets.filter((b) => b.cross);   // 别的会话（按人 + 按组）
 
+    // 🆕 2026-09-25：**问到印象那一轮**的放宽名单（见 askedAboutImpressions）。
+    //
+    // 为什么单独算一遍名单、而不是在下面的循环里"遇到就放"：
+    //   实测（用户真实那句「现在还认得我是谁吗？」）——照桶的轮转顺序放，先进来的是**群里**那几条
+    //   （"他在群里怎么说话"），而**最像"他是谁"的那条**（QQ 私聊里记下的"爸爸/创造者…"）
+    //   因为排在后面被挤掉了。⇒ 得先按"哪条最像他是谁"排序，再取前几条。
+    //
+    // 排序依据（两条，都是判据能钉住的）：
+    //   ① **私聊优先**：一对一里记下的更接近"他本人是谁"；群里的多是"他在群里怎么说话"。
+    //   ② 其次按分数降序（分数 = 关键词命中 + 时间衰减）。
+    // ⚠️ 只对"本人"（正在说话的人 + 身份表确认的同一个人）放宽；**别人**照旧过门槛。
+    // 反悔点：若出现"她突然翻旧账"，先看这里的上限与排序；若嫌条例不对，改排序键即可。
+    const relaxedKeys = new Set();
+    if (selfRecall) {
+      const cands = [];
+      for (const b of buckets) {
+        const isSelf = speaking.has(String(b.m?.userId || '')) || b.samePerson;
+        if (!isSelf) continue;
+        // 每个桶最多看最新 2 条（再多也不是"他是谁"了）
+        for (let i = b.items.length - 1, seenN = 0; i >= 0 && seenN < 2; i--, seenN++) {
+          const content = String(b.items[i].content ?? '').trim();
+          if (!content) continue;
+          const s = scoreImpression({ content, createdAt: b.items[i].createdAt }, { keywords, now });
+          if (s > IMPRESSION_THRESHOLD) continue;   // 本来就能过门槛的不用占放宽名额
+          cands.push({ b, content, s, priv: b.chat.startsWith('private:') ? 1 : 0 });
+        }
+      }
+      cands.sort((x, y) => (y.priv - x.priv) || (y.s - x.s));
+      for (const c of cands.slice(0, SELF_RECALL_MAX)) relaxedKeys.add(c.b.chat + '\u0000' + c.content);
+    }
+
     // 每一轮，每个桶各拿一条（从各自**最新的一条往前**），拿满额度为止。
     for (let round = 0; ; round++) {
       let progressed = false;
@@ -955,7 +1047,10 @@ export class MemoryStore {
           //    关键词那一项恒为 0、所有印象都卡在 0.295 过不了 0.30 的门槛 ——
           //    症状是"记忆段永远为空"，**不报错**。（第九对话实测踩到。）
           const s = scoreImpression({ content, createdAt: e.createdAt }, { ...b, keywords, now });
-          if (s <= IMPRESSION_THRESHOLD) continue;
+          // 门槛：过线才进（"错的不如空着"）。
+          // 🆕 2026-09-25：**问到印象那一轮**，名单里的"本人"印象放宽进来（见上面 relaxedKeys）。
+          const pass = s > IMPRESSION_THRESHOLD || relaxedKeys.has(b.chat + '\u0000' + content);
+          if (!pass) continue;
 
           const uid = String(b.m?.userId || '');
           const name = notes[uid] || b.m?.name || '';

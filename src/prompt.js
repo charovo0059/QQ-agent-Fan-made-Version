@@ -399,7 +399,13 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
     ? cfg.systemPromptSegments
     : {};
   const keys = Object.keys(defaults);
-  // 🔴 逐段覆盖**只对 QQ 生效**（用户 2026-09-20 拍板选 A）。
+  // 🔴 逐段覆盖分**两套命名空间**（2026-09-25 第十九对话起）：
+  //    QQ 用 `persona.systemPromptSegments`、微信用 `persona.systemPromptSegmentsWechat`（同一批 key）。
+  //    **留空 = 用内置平台版** ⇒ 默认行为与旧版"微信侧一律忽略覆盖"**逐字节相同**（判据钉着）。
+  //    起因：管理员问"微信侧的【别露馅】能不能改"——旧版答案是"改不了"（只能改源码）。
+  //    现在改成"分开的键"，风险照旧被隔离（微信那套是独立文本，不会把 QQ 的能力写进微信）。
+  //
+  // ── 以下是 2026-09-20 那版"只对 QQ 生效"的理由，**保留作历史**，别删 ──
   //
   // ── 为什么（线上实测出来的）────────────────────────────────────────────
   // 覆盖是**平台无关**的：管理员写 `stickerRules` 覆盖时想的是 QQ 的能力
@@ -415,6 +421,10 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
   // ⚠️ 界面（设置 → 人设 → 系统提示自定义）里已写明"逐段替换只对 QQ 生效"，
   //    否则用户会以为自己的定制在微信侧也生效了 —— 那是**界面在说谎**。
   const isWechat = String(platform) === 'wechat';
+  // 微信那一套覆盖（同 key 的另一个命名空间）；没配就是空对象 ⇒ 全部走内置平台版。
+  const overridesWx = cfg.systemPromptSegmentsWechat && typeof cfg.systemPromptSegmentsWechat === 'object'
+    ? cfg.systemPromptSegmentsWechat
+    : {};
   // ⚠️ **跳过空段**（2026-09-20 加，K3 第二轮回执 · 问题二 C 要用）：
   //    微信侧的 `stickerRules` 现在是**空串**（整段下线），而原来那段 `parts.push('')`
   //    的写法会让它留下一个**空行**（= 提示词里凭空多一个空块）。
@@ -423,7 +433,7 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
   //    所以 QQ 侧一个字都没变 —— 有 test-skills基础设施.mjs 的 sha256 钉着。
   const blocks = [];
   keys.forEach((key) => {
-    const override = isWechat ? '' : overrides[key];
+    const override = isWechat ? overridesWx[key] : overrides[key];
     const text = override && String(override).trim()
       ? expandPlaceholders(String(override).trim(), cfg)
       : defaults[key];

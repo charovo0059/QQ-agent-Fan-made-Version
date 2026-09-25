@@ -2708,14 +2708,19 @@ export function createApp({ log = console.log } = {}) {
         const mode = String(getConfig().ui?.mode || 'qq');
         const platform = (q === 'wechat' || q === 'qq') ? q : (mode === 'wechat' ? 'wechat' : 'qq');
         const defaults = buildDefaultSegments(persona, { platform });
-        const overrides = persona.systemPromptSegments && typeof persona.systemPromptSegments === 'object'
-          ? persona.systemPromptSegments
-          : {};
+        // 🆕 2026-09-25：逐段覆盖分**两套命名空间**（QQ / 微信）。这里返回**当前平台那一套**
+        //    （界面照着它读写即可），同时把两套的覆盖段数都回传，便于界面提示"另一套有几段被覆盖"。
+        const segMap = (v) => (v && typeof v === 'object' ? v : {});
+        const ovQQ = segMap(persona.systemPromptSegments);
+        const ovWx = segMap(persona.systemPromptSegmentsWechat);
+        const overrides = platform === 'wechat' ? ovWx : ovQQ;
+        const countOf = (m) => Object.values(m).filter((v) => String(v ?? '').trim()).length;
         return json(res, 200, {
           ok: true,
           platform,
           platformSource: q ? 'query' : 'ui.mode',
           fullOverride: String(persona.systemPrompt ?? ''),
+          overrideCounts: { qq: countOf(ovQQ), wechat: countOf(ovWx) },
           segments: Object.keys(defaults).map((key) => ({
             key,
             label: SYSTEM_SEGMENT_LABELS[key] || key,

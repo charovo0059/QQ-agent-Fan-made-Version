@@ -328,8 +328,15 @@ async function saveConfig({ quiet = false } = {}) {
         // 与"加载时的内置默认"一致 → 不写覆盖；于是把某段改回原样就等于取消该段覆盖。
         if (value && value !== String(loaded[key] ?? '').trim()) segs[key] = value;
       }
+      // 🔴 写哪一套？**看这次渲染的是哪个平台**（`/api/system-prompt` 会回报 platform）。
+      //    🆕 2026-09-25：逐段覆盖分 QQ / 微信两套命名空间（`systemPromptSegments` /
+      //    `systemPromptSegmentsWechat`）。默认（没拉到 platform）按 QQ ——
+      //    与旧版"只对 QQ 生效"一致，不在新旧之间漂。
+      const field = state.systemPrompt?.platform === 'wechat'
+        ? 'systemPromptSegmentsWechat'
+        : 'systemPromptSegments';
       // __replace__：整体替换，这样"清空某段"才会真的删掉该段的覆盖（深合并删不掉键）。
-      patch.persona.systemPromptSegments = { __replace__: segs };
+      patch.persona[field] = { __replace__: segs };
     }
   }
 
