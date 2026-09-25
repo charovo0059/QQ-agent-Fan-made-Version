@@ -1109,6 +1109,23 @@ return `
       <div class="field"><label>按字数附加间隔（毫秒/字）</label><input type="number" id="cfg-bylength" min="0" value="${esc(c.send.byLengthMs ?? 20)}" /></div>
       <div class="field"><label>QQ 硬限制切分长度（0 = 不切）</label><input type="number" id="cfg-hardsplit" min="0" value="${esc(c.send.hardSplitAt ?? 4000)}" /></div>
     </div>
+    <!-- 🆕 2026-09-25（第二十一对话，交接 §3 待办 4）：send.dedupeWindowMs 的界面。
+         这个键 2026-09-25 第十八对话就加进 config 了（默认 8000），但**一直只在配置文件里**
+         ⇒ 想改只能手改 config.json。与补 api.videoMode、浏览锁定那两次是同一类坑：
+         **键是真的、默认也在跑、就是界面没有。**
+         ⚠️ 0 是**明确的关闭值**（不是"回落默认"）—— 这条语义在 sender.js 里是有断言的，
+            所以界面上必须写明，否则用户填 0 会以为自己填错了。
+         ⚠️ 本注释里**不许出现反引号**：这是模板字符串，一个反引号就把整串截断
+            （项目坑 §4-27，本轮又踩了一次，node --check 当场报 Unexpected identifier）。 -->
+    <div class="field-row">
+      <div class="field"><label>发送去重窗口（毫秒，0 = 关闭）</label><input type="number" id="cfg-dedupewindow" min="0" step="500" value="${esc(c.send.dedupeWindowMs ?? 8000)}" /></div>
+    </div>
+    <div class="hint" style="font-size:12px;margin:-6px 0 10px">
+      同一会话里、<b>发出去的纯文本完全一样</b>的两条，在这个窗口内只发第一条。防的是模型重复调用发送、
+      或超时看起来失败而上层重试 —— 用户会看到两条一模一样的。默认 <b>8000</b>（8 秒），填 <b>0</b> 关掉。
+      ⚠️ 只拦<b>完全相同</b>的文本（<b>粗体</b>与 粗体 视为相同）；<b>发失败不记账</b>（合法重试不会被误杀）；
+      窗口按会话各算各的；不管表情包与拍一拍（那两条各有自己的限频）。
+    </div>
 
     <h3>主动开话题</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-proactive" ${c.proactive.enabled ? 'checked' : ''} />
