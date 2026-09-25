@@ -1,13 +1,13 @@
 'use strict';
 // 第 10/18 段：09-memory-dreams（拆自 ui/app.js，2026-09-25 第十七对话；加载顺序见 ui/index.html）
 
-// ── 记忆视图 ──
+// ── 印象视图 ──
 /**
- * 待审提案区（渲染进「记忆」页顶部）。
+ * 待审提案区（渲染进「印象」页顶部）。
  *
  * 设计边界：**只展示与打标记，不执行**。理由见 src/proposals.js 顶部（注入通道 + 无审核点）。
- * 位置选在记忆页顶部而不是新开页签：提案里最多的就是"想改记忆方式"，
- * 放在记忆旁边最容易被看到；也不必再写一个页面的骨架。
+ * 位置选在印象页顶部而不是新开页签：提案里最多的就是"想改记忆与印象的方式"，
+ * 放在印象旁边最容易被看到；也不必再写一个页面的骨架。
  */
 function renderProposalReview() {
   const box = $('#proposal-review');
@@ -84,7 +84,7 @@ function renderProposalReview() {
     </div>
     ${hintLine('只记录想法，不会自动执行。',
       '采纳只是打个标记、列进待办，真正动手由人来做（见 src/proposals.js 顶部）。'
-      + '提案里最多的就是"想改记忆方式"，所以放在记忆页而不是新开页签。')}
+      + '提案里最多的就是"想改记忆与印象的方式"，所以放在印象页而不是新开页签。')}
     ${items.map((p) => card(p, false)).join('')}
     ${acceptedHtml}`;
 
@@ -133,7 +133,7 @@ async function loadMemoryView() {
     const files = await api('/api/memory-files');
     state.memoryFiles = files.files || [];
     state.chats = chats.chats || [];
-    await loadProposals();   // 待审提案（记忆页顶部那块）
+    await loadProposals();   // 待审提案（印象页顶部那块）
     // 用后端状态校正本地记录：覆盖"页面刚刷新""SSE 断连期间状态变化"两种情况。
     // 后端 consolidating 是唯一可信来源（它在 orchestrator 里真实维护）。
     for (const f of state.memoryFiles) {
@@ -152,7 +152,7 @@ async function loadMemoryView() {
     renderMemoryList();
     if (state.currentMemoryChatKey) loadMemoryDetail(state.currentMemoryChatKey);
   } catch (e) {
-    console.error('加载记忆视图失败:', e);
+    console.error('加载印象视图失败:', e);
     $('#memory-items').innerHTML = '<div class="list-head muted">加载失败</div>';
   }
 }
@@ -309,7 +309,7 @@ function renderMemoryList() {
   //    详见 src/proposals.js 顶部的边界说明。
   renderProposalReview();
 
-  // 「显示空记忆」开关 —— 2026-09-23（第十二对话，用户点名）**归位左栏列表头**。
+  // 「显示空印象」开关 —— 2026-09-23（第十二对话，用户点名）**归位左栏列表头**。
   // ⚠️ 它现在是**常驻元素**（在 index.html 的 .list-head--row 里，`renderMemoryList` 只重绘
   //    `#memory-items`，碰不到它）⇒ 监听器**只能绑一次**，用 `__bound` 守住。
   //    它以前住在**每轮重建的详情区**里，那里必须每次重绑，还专门为此写过一段注释；
@@ -327,8 +327,8 @@ function renderMemoryList() {
     }
   }
 
-  // 空记忆（白名单里还没有记忆文件的会话）默认不显示；手动隐藏过的同理。
-  // 它们**不是文件**，删不掉 —— 记忆页是按白名单生成的，删了下次渲染又长出来。
+  // 空印象（白名单里还没有印象的会话）默认不显示；手动隐藏过的同理。
+  // 它们**不是文件**，删不掉 —— 印象页是按白名单生成的，删了下次渲染又长出来。
   const showEmpty = state.showEmptyMemory === true;
   const visible = files.filter((f) => {
     if (f.hidden) return showEmpty;          // 手动隐藏的：只在打开开关时出现
@@ -337,11 +337,11 @@ function renderMemoryList() {
   });
 
   if (!files.length) {
-    box.innerHTML = '<div class="list-head muted">还没有任何记忆（等机器人使用记忆工具后才会出现）</div>';
+    box.innerHTML = '<div class="list-head muted">还没有任何印象（等机器人记下之后才会出现）</div>';
     return;
   }
   if (!visible.length) {
-    box.innerHTML = '<div class="list-head muted">这里没有有记忆的会话。勾选上面的「显示空记忆」可以看到白名单里那些还没有记忆的。</div>';
+    box.innerHTML = '<div class="list-head muted">这里没有任何有印象的会话。勾选上面的「显示空印象」可以看到白名单里那些还没有印象的。</div>';
     return;
   }
   box.innerHTML = visible.map((f) => {
@@ -352,13 +352,13 @@ function renderMemoryList() {
       ? `<span class="unread-pill" style="background:var(--color-background-warning)">整理中…</span>`
       : '';
     const sub = busy
-      ? '正在整理本群记忆'
+      ? '正在整理本群印象'
       : (f.memberCount
         ? `${f.memberCount} 位群友 · ${f.impressionCount} 条印象`
-        : (f.hidden ? '没有记忆文件（已隐藏）' : '没有记忆文件（空壳，删不掉）'));
-    // 有记忆 → 清空；空壳 → 隐藏 / 恢复隐藏
+        : (f.hidden ? '还没有印象（已隐藏）' : '还没有印象（空壳，删不掉）'));
+    // 有印象 → 清空；空壳 → 隐藏 / 恢复隐藏
     const action = !f.empty
-      ? `<button class="btn btn-small btn-danger mem-list-del" data-key="${esc(key)}" data-act="wipe" title="清空这个会话的记忆">删除</button>`
+      ? `<button class="btn btn-small btn-danger mem-list-del" data-key="${esc(key)}" data-act="wipe" title="清空这个会话的印象">删除</button>`
       : (f.hidden
         ? `<button class="btn btn-small mem-list-del" data-key="${esc(key)}" data-act="unhide" title="重新显示这个空壳">恢复</button>`
         : `<button class="btn btn-small mem-list-del" data-key="${esc(key)}" data-act="hide" title="从列表里隐藏（它不是文件，删不掉）">隐藏</button>`);
@@ -389,8 +389,8 @@ function renderMemoryList() {
 }
 
 /**
- * 记忆列表行上的操作。
- *   wipe   —— 有记忆：清空（等价于详情页的「清空本群记忆」）
+ * 印象列表行上的操作。
+ *   wipe   —— 有印象：清空（等价于详情页的「清空本群印象」）
  *   hide   —— 空壳：记进 config.memory.hiddenEmptyChats，列表里不再显示
  *   unhide —— 把隐藏的空壳放出来
  */
@@ -401,7 +401,7 @@ async function memoryListAction(act, chatKey) {
 
   if (act === 'wipe') {
     confirmDanger({
-      head: '清空本会话记忆',
+      head: '清空本会话印象',
       okText: '清空',
       text: `<b>${esc(name)}</b> 的 <b>${f.memberCount || 0}</b> 位群友、<b>${f.impressionCount || 0}</b> 条印象将全部删除：
         <code>data/memory/${esc(chatKey.replace(':', '_'))}/</code> 整个目录连同整理备份一起删掉。<br><br>
@@ -411,7 +411,7 @@ async function memoryListAction(act, chatKey) {
         if (state.currentMemoryChatKey === chatKey) {
           state.currentMemoryChatKey = null;
           const detail = $('#memory-detail');
-          if (detail) detail.innerHTML = '<div class="empty-hint">← 选择会话查看记忆</div>';
+          if (detail) detail.innerHTML = '<div class="empty-hint">← 选择会话查看印象</div>';
         }
         await loadMemoryView();
       }
@@ -429,7 +429,7 @@ async function memoryListAction(act, chatKey) {
     await api('/api/config', { method: 'POST', body: JSON.stringify({ memory: { hiddenEmptyChats: { __replace__: next } } }) });
     await loadMemoryView();
     if (act === 'hide') {
-      showNoticeModal('已隐藏这个空壳', `「${name}」本来就没有记忆文件 —— 它出现在列表里，是因为它在白名单里（这是为了让你从列表点进去手动添加印象）。\n\n现在它不再占用列表位置。想找回来：勾选列表上方的「显示空记忆」。\n\n注意：这不影响机器人在这个会话里工作；如果你是不想让它在这个群/私聊里干活，请去「白名单」页把它移除。`);
+      showNoticeModal('已隐藏这个空壳', `「${name}」本来就没有任何印象 —— 它出现在列表里，是因为它在白名单里（这是为了让你从列表点进去手动添加印象）。\n\n现在它不再占用列表位置。想找回来：勾选列表上方的「显示空印象」。\n\n注意：这不影响机器人在这个会话里工作；如果你是不想让它在这个群/私聊里干活，请去「白名单」页把它移除。`);
     }
   } catch (e) {
     alert(`操作失败：${e.message}`);
@@ -468,11 +468,11 @@ async function loadMemoryDetail(chatKey) {
       const qq = m.userId ? ` <span class="muted">(QQ ${esc(m.userId)})</span>` : '';
       const imps = m.impressions.map((e) => `- ${e.content}`).join('\n');
       // 没有 QQ 号的旧数据（早期按名字落文件的兜底条目）定位不到成员接口，
-      // 只能走"清空本群记忆"，这里把按钮禁掉并说明原因，别让用户点了没反应。
+      // 只能走"清空本群印象"，这里把按钮禁掉并说明原因，别让用户点了没反应。
       const canDel = /^\d{1,15}$/.test(String(m.userId || ''));
       const delTitle = canDel
         ? '删除这个人的全部印象'
-        : '这条记忆没有 QQ 号（旧数据），请用右上角「清空本群记忆」删除';
+        : '这条印象没有 QQ 号（旧数据），请用右上角「清空本群印象」删除';
       // 跨会话互通：方向是**按 QQ 号全局**设的（不是按会话），所以在哪个会话里改都一样。
       // 没有 QQ 号的旧数据选不了，直接不显示这个下拉。
       const shareSel = canDel
@@ -511,7 +511,7 @@ async function loadMemoryDetail(chatKey) {
       return `<div class="collapsible" open>
         <summary>${esc(who)}${qq}（${m.impressions.length} 条）
           <button class="btn btn-small mem-edit-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:8px">编辑</button>
-          <button class="btn btn-small mem-refresh-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px" title="让模型重新分析这个人：有印象则整理合并，没印象则从聊天记录里提炼">更新记忆</button>
+          <button class="btn btn-small mem-refresh-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px" title="让模型重新分析这个人：有印象则整理合并，没印象则从聊天记录里提炼">更新印象</button>
           <button class="btn btn-small btn-danger mem-del-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px" ${canDel ? '' : 'disabled'} title="${delTitle}">删除</button>
           ${identLabel}
           ${shareSel}
@@ -536,25 +536,25 @@ async function loadMemoryDetail(chatKey) {
     }
     detail.innerHTML = `
       <div class="detail-header">
-        <h2>${esc(formatChatTitle(chatKey, chatNameOf(chatKey)))} 的记忆</h2>
+        <h2>${esc(formatChatTitle(chatKey, chatNameOf(chatKey)))} 的印象</h2>
         <div class="sub">
           <span>每个群友一个文件：data/memory/${esc(chatKey.replace(':', '_'))}/&lt;QQ&gt;.json</span>
           <button class="btn btn-small" id="mem-add-imp-btn">＋ 添加印象</button>
-          <button class="btn btn-small" id="mem-consolidate-btn" ${busy ? 'disabled' : ''}>${busy ? '整理中…' : '整理本群记忆'}</button>
-          <button class="btn btn-small btn-danger" id="mem-clear-btn" ${members.length ? '' : 'disabled title="这个会话没有记忆文件（它出现在列表里是因为在白名单里），没什么可清的"'}>清空本群记忆</button>
+          <button class="btn btn-small" id="mem-consolidate-btn" ${busy ? 'disabled' : ''}>${busy ? '整理中…' : '整理本群印象'}</button>
+          <button class="btn btn-small btn-danger" id="mem-clear-btn" ${members.length ? '' : 'disabled title="这个会话还没有印象（它出现在列表里是因为在白名单里），没什么可清的"'}>清空本群印象</button>
           <span id="mem-share-status" class="muted"></span>
           ${consolidateStatusHtml}
         </div>
       </div>
       ${memInteropHtml(chatKey)}
-      <!-- 「显示空记忆」开关**已挪到左栏列表头**（2026-09-23 第十二对话，用户点名）。
+      <!-- 「显示空印象」开关**已挪到左栏列表头**（2026-09-23 第十二对话，用户点名）。
            ⚠️ 这里不要再放第二个：全页只能有一个 #mem-show-empty —— 同名 id 会让
               $('#mem-show-empty') 静默只拿到第一个，第二个变成点不动的死件。 -->
-      <div class="pt-sec">记忆 <span class="muted" style="font-weight:400">这个会话记住的每个人</span></div>
+      <div class="pt-sec">印象 <span class="muted" style="font-weight:400">这个会话记住的每个人</span></div>
       ${membersHtml}
-      ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>'}
+      ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群印象」让模型从聊天记录里提炼）。</div>'}
     `;
-    // 「记忆互通」这一节：三个开关都**默认关**，改完立刻写 config（见 saveMemoryInterop）
+    // 「印象互通」这一节：三个开关都**默认关**，改完立刻写 config（见 saveMemoryInterop）
     const uniOn = $('#mem-unified');
     if (uniOn) {
       uniOn.addEventListener('change', () => saveMemoryInterop({ unified: uniOn.checked }, detail));
@@ -615,7 +615,7 @@ async function loadMemoryDetail(chatKey) {
         deleteMemberMemory(chatKey, String(el.dataset.qq || ''), el.dataset.name || '');
       });
     });
-    // 针对单个群友更新记忆：有印象→整理合并；无印象→从聊天记录提炼
+    // 针对单个群友更新印象：有印象→整理合并；无印象→从聊天记录提炼
     $$('.mem-refresh-imp', detail).forEach((el) => {
       el.addEventListener('click', async (e) => {
         e.preventDefault();
@@ -638,7 +638,7 @@ async function loadMemoryDetail(chatKey) {
           el.textContent = '已提交 ✓';
         } catch (err) {
           el.textContent = '失败';
-          alert(`更新记忆失败：${err.message}`);
+          alert(`更新印象失败：${err.message}`);
         }
         setTimeout(() => { el.disabled = false; el.textContent = old; }, 2500);
       });
@@ -662,7 +662,7 @@ async function loadMemoryDetail(chatKey) {
           delete state.consolidating[chatKey];
           state.consolidateResult[chatKey] = { note: `失败：${r.error}`, at: Date.now(), failed: true };
           if (status) status.textContent = `失败：${r.error}`;
-          if (btn) { btn.disabled = false; btn.textContent = '整理本群记忆'; }
+          if (btn) { btn.disabled = false; btn.textContent = '整理本群印象'; }
           renderMemoryList();
         }
         // 成功时保持"整理中"，等 SSE 的 consolidate-done 事件来收尾
@@ -670,7 +670,7 @@ async function loadMemoryDetail(chatKey) {
         delete state.consolidating[chatKey];
         state.consolidateResult[chatKey] = { note: `失败：${e.message}`, at: Date.now(), failed: true };
         if (status) status.textContent = `失败：${e.message}`;
-        if (btn) { btn.disabled = false; btn.textContent = '整理本群记忆'; }
+        if (btn) { btn.disabled = false; btn.textContent = '整理本群印象'; }
         renderMemoryList();
       }
     });
@@ -682,11 +682,11 @@ async function loadMemoryDetail(chatKey) {
 }
 
 /**
- * 「记忆互通」设置区（记忆页里那个折叠块）—— 2026-09-20 第九对话加。
+ * 「印象互通」设置区（印象页里那个折叠块）—— 2026-09-20 第九对话加。
  *
  * 三个开关的语义（都**默认关**，见 config.js 的 memory 段注释）：
  *   · 全互通          `memory.unified`        —— 忽略分组，所有会话一个池子（含 QQ↔微信）
- *   · 同一个人的记忆   `memory.unifiedMembers` —— off / samePlatform / all
+ *   · 同一个人的印象   `memory.unifiedMembers` —— off / samePlatform / all
  *   · 互通组          `memory.groups`         —— { 组名: [chatKey, ...] }，一个会话可在多个组
  *
  * ⚠️ 这里是**跨人**的互通，所以默认关：开了之后 A 私聊里的事可能出现在 B 私聊里。
@@ -702,7 +702,7 @@ async function loadMemoryDetail(chatKey) {
  *    ⇒ 教训：**要用 token 就用存在的 token**；写 `var(--x, #硬编码)` 等于埋一个静默的错色。
  *
  * ⚠️ 下面这些 **id 与类名是三个界面验证脚本的锚点**，改名会直接弄坏它们
- *    （`工具-会话诊断\验-记忆互通界面.mjs` / `验-新建互通组弹窗.mjs` / `验-记忆互通会改配置的动作.mjs`）：
+ *    （`工具-会话诊断\验-印象互通界面.mjs` / `验-新建互通组弹窗.mjs` / `验-印象互通会改配置的动作.mjs`）：
  *    `details.mem-interop`、其中的 `summary`、`#mem-unified`、`#mem-members-scope`、
  *    `#mem-group-add`、`.mem-group-toggle`。
  */
@@ -727,7 +727,7 @@ function memInteropHtml(chatKey) {
   }).join('');
 
   // ── UI 改造第二阶段 条目 5：互通块默认折叠 + **折叠态显示配置摘要** ──────
-  // 方案要求："默认折叠为单行（▸ 记忆互通 · 跨会话共享印象），**折叠态显示配置摘要**
+  // 方案要求："默认折叠为单行（▸ 印象互通 · 跨会话共享印象），**折叠态显示配置摘要**
   //   （如「当前：全互通 开 · 全平台互通 · 0 个互通组」）；展开态三组设置卡片化（各一行说明）；
   //   总说明压底部一行 ⓘ；互通组空态文案保留（本身是操作引导）"
   //
@@ -739,7 +739,7 @@ function memInteropHtml(chatKey) {
   const summaryText = `当前：${unified ? '全互通 开' : '全互通 关'} · ${esc(scopeLabel)} · ${groupCount} 个互通组`;
 
   return `<details class="mem-interop">
-    <summary>🔗 记忆互通 <span class="mi-sum">${summaryText}</span></summary>
+    <summary>🔗 印象互通 <span class="mi-sum">${summaryText}</span></summary>
     <div class="mem-interop-body">
       <label class="mem-interop-row">
         <input type="checkbox" id="mem-unified" ${unified ? 'checked' : ''}>
@@ -747,7 +747,7 @@ function memInteropHtml(chatKey) {
         <span class="mem-interop-note">所有会话一个池子（含 QQ ↔ 微信）；开了它就忽略下面的分组</span>
       </label>
       <label class="mem-interop-row">
-        <b>同一个人的记忆</b>
+        <b>同一个人的印象</b>
         <select id="mem-members-scope">
           <option value="off"${scope === 'off' ? ' selected' : ''}>各聊各的</option>
           <option value="samePlatform"${scope === 'samePlatform' ? ' selected' : ''}>同平台内互通（QQ 自己通、微信自己通）</option>
@@ -856,9 +856,9 @@ async function addGroupWithChat(chatKey, detail) {
     if (!picked.length) { if (err) err.textContent = '至少要选一个会话'; return }
     groups[name] = picked;
     // ⚠️ 关弹窗要放在保存**成功之后**分支里；失败时留着让用户改（saveMemoryInterop 会把错误写在
-    //    记忆页的状态行里）。这里先关再保存的话，失败时用户看不到任何提示 —— 与"按了没反应"同类。
+    //    印象页的状态行里）。这里先关再保存的话，失败时用户看不到任何提示 —— 与"按了没反应"同类。
     const okSaved = await saveMemoryInterop({ groups }, detail);
-    if (!okSaved) { if (err) err.textContent = '保存失败，看记忆页右上角的状态提示'; return }
+    if (!okSaved) { if (err) err.textContent = '保存失败，看印象页右上角的状态提示'; return }
     closeModelModal(overlay);
     await loadMemoryDetail(chatKey);
   });
@@ -931,7 +931,7 @@ function removeIdentityKey(identMap, key) {
 
 /**
  * 身份键 → 人话。用户要的是"关联了哪个群聊的哪个人"，所以名字与 id 都要给出。
- * 名字可能查不到（那个会话还没记忆、或者人没昵称）⇒ 退回 id，绝不留空白。
+ * 名字可能查不到（那个会话还没印象、或者人没昵称）⇒ 退回 id，绝不留空白。
  */
 function identityLabelOf(key) {
   const raw = String(key || '');
@@ -1027,7 +1027,7 @@ function openIdentityModal(chatKey, member) {
         <div style="padding:4px 0 4px 16px">${opts}</div>
       </details>`;
     }).join('')
-    : '<div class="muted">别的会话里还没有可以关联的人。<br>候选来自：有记忆的成员 · 白名单里的私聊 · 微信联系人表（没印象的人也在）。</div>';
+    : '<div class="muted">别的会话里还没有可以关联的人。<br>候选来自：有印象的成员 · 白名单里的私聊 · 微信联系人表（没印象的人也在）。</div>';
 
   const overlay = modelModalShell({
     head: `同一个人：${member?.name || uid}`,
@@ -1035,8 +1035,8 @@ function openIdentityModal(chatKey, member) {
       <div class="hint">本会话这个人：<b>${esc(member?.name || uid)}</b>
         <span class="muted">${esc(myKey)}</span></div>
       <div class="hint" style="margin-top:6px">
-        勾上<b>别的会话里属于同一个真人</b>的条目。勾选后，两边的印象会互相看见（受「记忆互通」里的
-        「同一个人的记忆」开关控制）。<br>
+        勾上<b>别的会话里属于同一个真人</b>的条目。勾选后，两边的印象会互相看见（受「印象互通」里的
+        「同一个人的印象」开关控制）。<br>
         ⚠️ <b>只勾真的是同一个人的</b> —— QQ 与微信的数字 id 会撞号，勾错等于把两个人合并。
       </div>
       ${hiddenSameKey ? `<div class="hint" style="margin-top:6px" id="id-hidden-note">
@@ -1126,7 +1126,7 @@ async function unlinkOneIdentity(key, chatKey) {
 }
 
 /**
- * 保存某个 QQ 号的「跨会话记忆互通」方向。
+ * 保存某个 QQ 号的「跨会话印象互通」方向。
  *
  * 几个要点：
  * - 方向是**按 QQ 号全局**的（config.memory.share），在哪个会话里改都一样；
@@ -1171,16 +1171,16 @@ async function saveMemoryShare(userId, mode, detail) {
  */
 function deleteMemberMemory(chatKey, userId, name) {
   if (!/^\d{1,15}$/.test(String(userId || ''))) {
-    showNoticeModal('无法删除', '这条记忆没有 QQ 号（早期按名字落文件的旧数据），只能用右上角的「清空本群记忆」删除。');
+    showNoticeModal('无法删除', '这条印象没有 QQ 号（早期按名字落文件的旧数据），只能用右上角的「清空本群印象」删除。');
     return;
   }
   const cfg = state.config || {};
   const who = (cfg.memberNotes || {})[userId] || name || userId;
   confirmDanger({
-    head: '删除群友记忆',
+    head: '删除群友印象',
     okText: '删除',
     text: `将删除 <b>${esc(who)}</b>（QQ ${esc(userId)}）在本群的<b>全部印象</b>。<br><br>
-      机器人之后不会再记得这些印象 —— 除非以后重新整理记忆又把它总结出来。<br><br>
+      机器人之后不会再记得这些印象 —— 除非以后重新整理印象又把它总结出来。<br><br>
       此操作不可撤销。`,
     onOk: async () => {
       await api(`/api/memory-files/${chatKey.replace(':', '_')}/members/${userId}`, { method: 'DELETE', body: '{}' });
@@ -1190,7 +1190,7 @@ function deleteMemberMemory(chatKey, userId, name) {
 }
 
 /**
- * 清空某个会话的全部记忆。
+ * 清空某个会话的全部印象。
  *
  * 后端连 data/memory/<会话>/ 目录、旧版单文件、以及 data/memory/backups/<会话>/
  * 里的整理备份一起删 —— 备份是"整理前自动留的一份"，如果留着，用户以为删干净了
@@ -1204,14 +1204,14 @@ function clearChatMemory(chatKey) {
   const imps = Number(entry.impressionCount) || 0;
   const dir = esc(chatKey.replace(':', '_'));
   confirmDanger({
-    head: '清空本群记忆',
+    head: '清空本群印象',
     okText: '清空',
     text: `<b>${esc(name)}</b> 的 <b>${n}</b> 位群友、<b>${imps}</b> 条印象将全部删除。<br><br>
       磁盘上这些都会被删掉：<br>
       · <code>data/memory/${dir}/</code>（每个群友一个文件）<br>
       · <code>data/memory/backups/${dir}/</code>（整理前的自动备份）<br><br>
       ⚠️ 聊天记录存档是另一个文件，不受影响 —— 要清去「存档」页。<br>
-      ${state.consolidating[chatKey] ? '<b style="color:var(--red)">本群正在整理记忆：建议等整理结束再清空，否则整理结果可能又写回来。</b><br><br>' : ''}
+      ${state.consolidating[chatKey] ? '<b style="color:var(--red)">本群正在整理印象：建议等整理结束再清空，否则整理结果可能又写回来。</b><br><br>' : ''}
       此操作不可撤销。`,
     onOk: async () => {
       await api(`/api/memory-files/${chatKey.replace(':', '_')}`, { method: 'DELETE', body: '{}' });
@@ -1219,7 +1219,7 @@ function clearChatMemory(chatKey) {
       delete state.consolidating[chatKey];
       delete state.consolidateResult[chatKey];
       const detail = $('#memory-detail');
-      if (detail) detail.innerHTML = '<div class="empty-hint">← 选择会话查看记忆</div>';
+      if (detail) detail.innerHTML = '<div class="empty-hint">← 选择会话查看印象</div>';
       await loadMemoryView();
     }
   });
@@ -1326,7 +1326,7 @@ async function openMemberNoteModal(qq, chatKey) {
     body: `
       <div class="field"><label>QQ 号</label><input type="text" value="${esc(qq)}" readonly style="width:100%" /></div>
       <div class="field"><label>备注名</label><input type="text" id="mn-note" value="${esc(oldNote)}" placeholder="${esc(displayName || '备注名（如 老王）')}" style="width:100%" /></div>
-      <div class="hint">保存后，聊天记录、记忆、群成员列表都会优先显示这个备注；留空则显示原群名片/昵称。</div>`,
+      <div class="hint">保存后，聊天记录、印象、群成员列表都会优先显示这个备注；留空则显示原群名片/昵称。</div>`,
     foot: `<button class="btn" id="mn-cancel">取消</button>
            ${oldNote ? '<button class="btn btn-danger" id="mn-delete">删除备注</button>' : ''}
            <button class="btn btn-primary" id="mn-save">保存</button>`

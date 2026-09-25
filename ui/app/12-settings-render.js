@@ -694,13 +694,13 @@ function renderMemorySettingsSection(c) {
   const selP = providers.find((p) => p.id === mem.provider);
   const currentDisplay = selP ? `${selP.displayName || selP.id} · ${mem.model || '未选模型'}` : (mem.model || '未选模型');
   return `
-    <h3 id="settings-memory">记忆整理</h3>
+    <h3 id="settings-memory">印象整理</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-mem-consolidate" ${mem.consolidateEnabled !== false ? 'checked' : ''} />
-      <label for="cfg-mem-consolidate">启用记忆自动整理</label></div>
+      <label for="cfg-mem-consolidate">启用印象自动整理</label></div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-mem-usechat" ${useChat ? 'checked' : ''} />
       <label for="cfg-mem-usechat">使用与聊天机器人相同的模型</label></div>
     <div id="mem-model-box" style="${useChat ? 'display:none' : ''}">
-      <div class="field"><label>记忆整理模型（点击选择）</label>
+      <div class="field"><label>印象整理模型（点击选择）</label>
         <div style="display:flex;gap:8px">
           <input type="text" id="cfg-mem-model-pick" readonly placeholder="点击选择模型" value="${esc(currentDisplay)}" style="flex:1;cursor:pointer" />
         </div>

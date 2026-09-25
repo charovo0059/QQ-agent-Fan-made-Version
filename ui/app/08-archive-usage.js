@@ -216,7 +216,7 @@ function clearChatArchive(chatKey) {
     text: `<b>${esc(name)}</b> 的 <b>${meta.total || 0}</b> 条消息存档将全部删除，
       磁盘文件 <code>data/messages/${esc(chatKey.replace(':', '_'))}.json</code> 一并删除。<br><br>
       ⚠️ 机器人从此<b>完全不记得</b>这段对话（提示词里不再有【过去状态】）。<br>
-      「记忆」页里对群友的长期印象是另一个文件，不受影响 —— 要清得去记忆页。<br><br>
+      「印象」页里对群友的长期印象是另一个文件，不受影响 —— 要清得去印象页。<br><br>
       此操作不可撤销。`,
     onOk: async () => {
       await api(`/api/chats/${chatKey.replace(':', '_')}`, { method: 'DELETE', body: '{}' });
