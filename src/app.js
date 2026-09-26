@@ -13,6 +13,11 @@ import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNo
 import { ensureStickerImage, buildToolDefs } from './tools.js';
 import { ChatStore } from './store.js';
 import { MemoryStore, buildIdentityCandidates } from './memory.js';
+// 「记忆召回预览」的实现（2026-09-26 第二十二对话 · 交接 §3 待办 2）：
+// 命令行工具 `工具-会话诊断\看-记忆召回预览.mjs` 与本文件的路由**共用这一份**——
+// 复刻第二份必然与真函数分家，而分家的表现是"看着完全正常"。
+// ⚠️ 它刻意不在顶层 import memory.js（见该文件文件头），所以这里静态 import 它是安全的。
+import { buildPreview, renderPreview, previewApi } from './memory-preview.js';
 import { StickerManager } from './sticker-manager.js';
 import { SendQueue } from './sender.js';
 import { SessionRegistry } from './sessions.js';
@@ -2995,6 +3000,37 @@ export function createApp({ log = console.log } = {}) {
           allowPrivate: getConfig().allow?.private || []
         });
         return json(res, 200, { chats, identity: memory.identityMap() });
+      }
+
+      // 「记忆召回预览」（只读）—— 这一轮她到底会想起哪几条？（2026-09-26 · 交接 §3 待办 2）
+      // 与命令行工具 `工具-会话诊断\看-记忆召回预览.mjs` **同一份实现**（`src/memory-preview.js`）：
+      // 复刻第二份必然与真函数分家，而分家的表现恰恰是"看着完全正常"。
+      // 为什么值得有个界面：以前只能靠"问她一句"来试，而那拿到的是"她说了什么"，
+      // 拿不到"她本来会看到什么" ⇒ 机制问题（关键词抽不出来）看起来跟能力问题（记不住）一模一样。
+      //
+      // 🔴 **主判据不许丢**：`promptBlock` 就是 `memory.formatForPrompt(chatKey, opts)` 的**返回值本身**
+      //    （见 `src/memory-preview.js` 文件头），`opts` 一并回传 ⇒ 调用方拿同样的 opts 再算一次即可逐字比对。
+      //    `测试-现行\test-记忆召回预览界面.mjs` 就是这么钉的（也只读：不写盘、不发消息、不改配置）。
+      if (pathname === '/api/memory/preview' && method === 'GET') {
+        try {
+          const chatKey = String(url.searchParams.get('chat') || '').trim();
+          if (!chatKey) return json(res, 400, { ok: false, error: '缺少 chat 参数（形如 private:1000000001 或 group:1000000005）' });
+          const queryText = String(url.searchParams.get('query') || '');
+          const idsParam = String(url.searchParams.get('userIds') || '').trim();
+          // 私聊默认把对方当 userIds（与真实唤醒一致 —— orchestrator 私聊就传对方）；
+          // 群聊不给就是 null，并在渲染文本头部说清（免得被误读成"记忆是空的"）。
+          const userIds = idsParam
+            ? idsParam.split(',').map((s) => s.trim()).filter(Boolean)
+            : (chatKey.startsWith('private:') ? [chatKey.slice('private:'.length)] : null);
+          const top = Math.max(1, Math.min(200, Number(url.searchParams.get('top')) || 15));
+          const all = url.searchParams.get('all') === '1';
+          const preview = buildPreview(memory, await previewApi(), chatKey, {
+            userIds, queryText, top, all, now: Date.now()
+          });
+          return json(res, 200, { ok: true, ...preview, text: renderPreview(preview, { all, top }) });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
       }
 
       const memoryFileMatch = /^\/api\/memory-files\/(group|private)_(\w+)$/.exec(pathname);

@@ -2868,6 +2868,26 @@ body::before {
   color: var(--muted);
 }
 
+/* ── 「记忆召回预览」的输出框（2026-09-26 第二十二对话 · 交接 §3 待办 2）────────
+ * 内容是**等宽排版的纯文本**（工具原本打在终端里），所以用 pre + `white-space: pre-wrap`：
+ * 不折行的话长印象会把弹窗撑破，而 `pre` 的默认 `pre` 又不换行。
+ * ⚠️ `overflow:auto` 必须有：候选表可能上百行，撑高弹窗会把"关闭"按钮顶出屏幕。
+ */
+.mem-preview-out {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 46vh;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-soft, rgba(127, 127, 127, .06));
+}
+
 /* ══ 无边框窗口：自绘窗口控制 + 拖拽区 ═══════════════════════════════════
  * 依据《无边框窗口改造实施方案》v1.0（2026-09-22）。窗口去掉了系统标题栏
  * （electron/main.js 的 `frame: false`），拖拽与三个控制按钮全部改由这里接管。

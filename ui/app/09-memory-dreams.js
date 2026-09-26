@@ -540,6 +540,7 @@ async function loadMemoryDetail(chatKey) {
         <div class="sub">
           <span>每个群友一个文件：data/memory/${esc(chatKey.replace(':', '_'))}/&lt;QQ&gt;.json</span>
           <button class="btn btn-small" id="mem-add-imp-btn">＋ 添加印象</button>
+          <button class="btn btn-small" id="mem-preview-btn" title="只读：这一轮她到底会想起哪几条？第①段就是真的会写进提示词的那一段（逐字来自真 formatForPrompt）">召回预览</button>
           <button class="btn btn-small" id="mem-consolidate-btn" ${busy ? 'disabled' : ''}>${busy ? '整理中…' : '整理本群印象'}</button>
           <button class="btn btn-small btn-danger" id="mem-clear-btn" ${members.length ? '' : 'disabled title="这个会话还没有印象（它出现在列表里是因为在白名单里），没什么可清的"'}>清空本群印象</button>
           <span id="mem-share-status" class="muted"></span>
@@ -579,6 +580,7 @@ async function loadMemoryDetail(chatKey) {
       });
     });
     $('#mem-add-imp-btn')?.addEventListener('click', () => openMemberImpressModal(chatKey, null));
+    $('#mem-preview-btn')?.addEventListener('click', () => openRecallPreviewModal(chatKey));
     $('#mem-clear-btn')?.addEventListener('click', () => clearChatMemory(chatKey));
     // 「同一个人」关联：把这个会话里的这个人，与别的会话里的某人标成同一人
     $$('.mem-ident-btn', detail).forEach((el) => {
@@ -1278,6 +1280,90 @@ function openMemberImpressModal(chatKey, member) {
       loadMemoryDetail(chatKey);
     } catch (e) {
       alert(`删除失败：${e.message}`);
+    }
+  });
+}
+
+// ── 「记忆召回预览」（2026-09-26 第二十二对话 · 交接 §3 待办 2）────────────────
+//
+// 以前这件事只有命令行工具（`工具-会话诊断\看-记忆召回预览.mjs`）能看，
+// 而用户要的恰恰是"在界面上点一下"。两处**共用同一份实现**
+// （`src/memory-preview.js`，界面走 `GET /api/memory/preview`）——
+// 复刻第二份必然与真函数分家，而分家的表现是"看着完全正常"。
+//
+// 🔴 主判据（不许因为搬进界面就丢）：预览的第①段就是真 `formatForPrompt()` 的返回值本身。
+//    `测试-现行\test-记忆召回预览界面.mjs` 拿同样的 opts 再算一次做逐字比对。
+//
+// 下面两个是**纯函数**（没有 DOM、没有网络），所以判据能把它们抠进沙箱真跑，
+// 而不是只能对着源码做正则（本项目对"只扫源码"的判据一直很警惕）。
+
+/** 预览请求的路径。私聊可以不传 userIds（后端默认取对方，与真实唤醒一致）。 */
+function recallPreviewQuery(chatKey, queryText, { all = false, top = 15, userIds = null } = {}) {
+  const qs = [`chat=${encodeURIComponent(String(chatKey || ''))}`];
+  const q = String(queryText || '').trim();
+  if (q) qs.push(`query=${encodeURIComponent(q)}`);
+  if (Array.isArray(userIds) && userIds.length) qs.push(`userIds=${encodeURIComponent(userIds.join(','))}`);
+  if (all) qs.push('all=1');
+  qs.push(`top=${Number(top) > 0 ? Math.floor(Number(top)) : 15}`);
+  return `/api/memory/preview?${qs.join('&')}`;
+}
+
+/**
+ * 把预览结果渲染成 HTML。
+ * ⚠️ 全文 esc：印象正文是从聊天里学来的，可能含尖括号/引号（不转义就是一处注入口）。
+ */
+function recallPreviewHtml(pv) {
+  if (!pv || typeof pv !== 'object') return '<div class="muted">（没有结果）</div>';
+  const flags = [
+    `门槛 ${esc(pv.threshold)}`,
+    `关键词 ${(pv.keywords || []).length} 个`,
+    `全库 ${esc(pv.total)} 条`,
+    `进提示词 ${esc(pv.admittedCount)} 条`
+  ].join(' · ');
+  return `<div class="muted" style="margin-bottom:6px">${flags}</div>`
+    + `<pre class="mem-preview-out">${esc(pv.text || '')}</pre>`;
+}
+
+/** 打开某个会话的召回预览弹窗。 */
+function openRecallPreviewModal(chatKey) {
+  const isPrivate = String(chatKey).startsWith('private:');
+  const overlay = modelModalShell({
+    head: `记忆召回预览：${formatChatTitle(chatKey, chatNameOf(chatKey))}`,
+    body: `
+      <div class="muted" style="margin-bottom:8px;line-height:1.6">
+        只读：不写盘、不发消息、不改配置。第①段就是这一轮**真的会写进提示词**的那一段（逐字来自真 formatForPrompt）。
+      </div>
+      <div class="field"><label>这一轮别人说的那句话（不填 ⇒ 记忆段必然是空的，这是设计不是故障）</label>
+        <input type="text" id="mp-query" placeholder="对我的印象是什么，我在做跨平台记忆互通测试" /></div>
+      <div class="field-row">
+        <div class="field"><label>本轮卷进来的人（群聊必填，逗号分隔）</label>
+          <input type="text" id="mp-users" value="${esc(isPrivate ? String(chatKey).slice('private:'.length) : '')}" /></div>
+        <div class="field" style="max-width:120px"><label>列出条数</label><input type="text" id="mp-top" value="15" /></div>
+      </div>
+      <label class="muted" style="display:block;margin:6px 0 10px"><input type="checkbox" id="mp-all" /> 列出全部印象（不只看分数最高的那些）</label>
+      <div id="mp-out"><div class="muted">点「预览」开始（只读，不会惊动任何人）。</div></div>`,
+    foot: `<button class="btn" id="mp-close">关闭</button><button class="btn btn-primary" id="mp-run">预览</button>`
+  });
+  overlay.querySelector('#mp-close').addEventListener('click', () => closeModelModal(overlay));
+  overlay.querySelector('#mp-run').addEventListener('click', async () => {
+    const out = overlay.querySelector('#mp-out');
+    const btn = overlay.querySelector('#mp-run');
+    const users = String(overlay.querySelector('#mp-users')?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const top = Number(overlay.querySelector('#mp-top')?.value) || 15;
+    const all = !!overlay.querySelector('#mp-all')?.checked;
+    btn.disabled = true;
+    btn.textContent = '预览中…';
+    out.innerHTML = '<div class="muted">读取中…</div>';
+    try {
+      const pv = await api(recallPreviewQuery(chatKey, overlay.querySelector('#mp-query')?.value || '', { all, top, userIds: users }));
+      out.innerHTML = recallPreviewHtml(pv);
+    } catch (e) {
+      // 与记忆页其它地方一致：出错让人看见（别把失败渲染成一个空的预览框 ——
+      // "空"在这条路上有明确含义："这一轮一条印象都没过线"，两者绝不能混）。
+      out.innerHTML = `<div class="muted">预览失败：${esc(e && e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '预览';
     }
   });
 }
