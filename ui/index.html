@@ -186,7 +186,15 @@
          ⚠️ 这一页**不参与平台切换的隐藏**（hideInWechat 只藏 表情包/SnowLuma）：
             它在 QQ 模式下也要能看见，否则用户根本找不到入口（默认就是 QQ 模式）。 -->
     <section id="view-wechat" class="view">
-      <div id="wechat-page"></div>
+      <!-- 🆕 2026-09-26（第二十二对话）：用户要求「微信页也做成和 SnowLuma 页一样居中的、被框起来的样式」。
+           ⇒ 容器类与 SnowLuma 页**共用同一条规则**（`.snowluma-pane`）：flex:1 + 纵向滚动 + 22/26/40 的内边距，
+             卡片由 `wechatPageShell()` 里的 `.snowluma-page-card` 提供（原型 `index.prototype.html:809`
+             本来就是这么写的，只是当时没落到真 UI）。
+           ⚠️ 类名带着 snowluma 是历史包袱（那一页先有）。这两条规则现在**两个通道页共用** ——
+             改它们等于同时改两页，别只看一页。
+           ⚠️ 本页**不参与平台切换的隐藏**（`hideInWechat` 只藏 表情包/SnowLuma）：
+             它在 QQ 模式下也要能看见，否则用户根本找不到入口（默认就是 QQ 模式）。 -->
+      <div id="wechat-page" class="snowluma-pane"></div>
     </section>
 
     <!-- 印象视图 -->
