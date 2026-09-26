@@ -21,6 +21,32 @@ async function loadWechatContacts() {
   tmp.innerHTML = renderWechatContactsSection(state.config).trim();
   const fresh = tmp.querySelector('#wx-contact-list');
   if (fresh) box.innerHTML = fresh.innerHTML;
+  // 🆕 2026-09-27（第二十七对话）：「↻ 同步名字」——去微信那边现问一次名字表。
+  //    为什么要有它：名字原来只在入站消息里学 ⇒ 在微信里改了备注，要等那个人下次发消息界面才变。
+  //    ⚠️ 这个按钮**不在** `box`（#wx-contact-list）里面 —— 本函数重画时只换 box 的 innerHTML，
+  //       按钮不会被重建 ⇒ 用 dataset 标记**防重复绑定**（整页重渲染后按钮是新的，标记跟着没，会重绑）。
+  const syncBtn = $('#wx-contacts-sync');
+  if (syncBtn && !syncBtn.dataset.bound) {
+    syncBtn.dataset.bound = '1';
+    syncBtn.addEventListener('click', async () => {
+      const hint = $('#wx-contacts-sync-hint');
+      syncBtn.disabled = true;
+      if (hint) hint.textContent = '正在问微信那边要名字…';
+      try {
+        const r = await api('/api/wechat-contacts/sync', { method: 'POST' });
+        if (hint) {
+          hint.textContent = r.ok
+            ? `已同步：新增 ${r.added}、改名 ${r.renamed}、没变 ${r.unchanged}（共 ${r.rows} 条）`
+            : `没同步成：${r.error || '未知原因'}（旧名字原样保留）`;
+        }
+        await loadWechatContacts();     // 列表里的名字要跟着变
+      } catch (e) {
+        if (hint) hint.textContent = `同步失败：${e.message}`;
+      } finally {
+        syncBtn.disabled = false;
+      }
+    });
+  }
   $$('.wx-contact-cb', box).forEach((cb) => {
     cb.addEventListener('change', async () => {
       const id = cb.dataset.id;

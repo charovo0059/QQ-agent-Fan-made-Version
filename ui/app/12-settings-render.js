@@ -949,9 +949,10 @@ function renderWechatContactsSection(c) {
     }
     if (!list.length) {
       return `<div class="hint">还没有学到任何微信联系人。<br>
-        <b>这是正常的"第一次"状态</b>：这些条目是从<b>收到的微信消息</b>里学来的，
-        而白名单没放行时消息不会进来 ⇒ 第一次放行需要：<b>让别人给这个小号发一条消息</b>
-        （那条消息会被挡下，但联系人会被记下来），然后回到这里勾选放行。</div>`;
+        <b>这是正常的"第一次"状态</b>：条目来自<b>收到的微信消息</b>，以及<b>点上面的「↻ 同步名字」</b>
+        从微信那边主动问一次。<br>
+        而白名单没放行时消息不会进来 ⇒ 第一次放行可以：<b>让别人给这个小号发一条消息</b>
+        （那条消息会被挡下，但联系人会被记下来），<b>或者直接点「↻ 同步名字」</b>，然后回到这里勾选放行。</div>`;
     }
     return list.map((x) => `
       <div class="checkbox-row" style="align-items:center">
@@ -966,14 +967,21 @@ function renderWechatContactsSection(c) {
     <h3 id="settings-wechat">微信联系人</h3>
     <div class="hint" style="margin-bottom:10px">
       勾选 = 放进白名单（与「聊天白名单」是<b>同一份</b>配置：私聊进 <code>allow.private</code>、群进 <code>allow.groups</code>）。
-      <br>这里显示的是<b>从收到的微信消息里学到</b>的 id 与昵称 —— 微信侧的会话 id 是桥派生的<b>数字</b>，
+      <br>这里显示的是微信侧的 id 与<b>当前名字</b> —— 微信侧的会话 id 是桥派生的<b>数字</b>，
       光看微信是看不到的，所以请在这里点选，别去手填。
+      <br>名字有两个来源：<b>收到的微信消息</b>（记下 id↔名字）与<b>「↻ 同步名字」</b>
+      （去微信那边现问一次）。<b>同步只改显示，不动白名单、不动发送对象</b>。
     </div>
     ${blockedHint}
     <div class="field"><label>已知的微信联系人 / 群（勾选即放行）</label>
       <div id="wx-contact-list" style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
         ${rows}
       </div></div>
+    <div class="field" style="display:flex;align-items:center;gap:10px;margin-top:8px">
+      <button class="btn btn-small" id="wx-contacts-sync"
+        title="去微信那边现问一次名字表（备注/昵称改了之后点它，不用等对方再发消息）">↻ 同步名字</button>
+      <span class="muted" id="wx-contacts-sync-hint">在微信里改了备注或昵称之后点一下即可（开机时也会自动同步一次）。</span>
+    </div>
     <div class="hint">排障：微信通道通没通，看顶栏那个状态点（切到「微信」模式）。</div>`;
 }
 

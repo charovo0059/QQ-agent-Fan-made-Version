@@ -132,6 +132,84 @@ export function listContacts({ kind = null } = {}) {
   return out;
 }
 
+/**
+ * 用**桥同步来的名字表**刷新这张表（2026-09-27 第二十七对话新增）。
+ *
+ * 为什么要有它（真机实测）：这张表的名字原来**只在入站消息里学** ⇒ 用户在微信里改了备注，
+ * 管理端要等到那个人**下次发消息**才跟着变。实测病例：id `1000000003` 界面显示「某群友的妈妈」，
+ * 而微信那边早已改成「另一位家属」（同一个人，`_wxid_to_int('example_wxid_00001') === 1000000003`）。
+ * 桥那边新增了一条只读 action（`get_wechat_contacts`）现问 WeFlow，把结果喂给这里。
+ *
+ * ── 四条不变式（判据钉着，改这一段前先看它们）────────────────────────────
+ *   ① **只增不删**：同步**永远不删**条目。表里没有 ≠ 那个人不存在
+ *      （WeFlow 的联系人表本来就只是它自己有的那些，实测只有 7 条）。
+ *   ② 空名字**不覆盖**已有名字（与 `learnContact` 同口径）。
+ *   ③ 名字没变就**不动**（幂等：每次开机同步一遍不会把文件反复重写）。
+ *   ④ 已有条目的 `firstSeen / lastSeen / count` **一个都不动** —— 那三个是"学到过什么"的证据。
+ *   ⑤ ⚠️ **群只改名、不新增**：群的数字 id 走的是另一条派生规则（`_group_to_int`），
+ *      而它没在真机上验过 —— 往"只增不删"的表里塞一条永远对不上的错 id 是不可逆的脏数据。
+ *      私聊可以新增（私聊的派生实测过：某群友 = 1000000001）。
+ *
+ * @param {Array<{id:string,kind?:string,name:string,username?:string}>} rows 桥给的名单
+ * @returns {{added:number,renamed:number,unchanged:number,skippedNoName:number,
+ *            skippedUnknownGroup:number,total:number,wrote:boolean}}
+ */
+export function syncContacts(rows) {
+  const doc = load();
+  const now = Date.now();
+  const stat = {
+    added: 0, renamed: 0, unchanged: 0,
+    skippedNoName: 0, skippedUnknownGroup: 0, total: 0, wrote: false
+  };
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = String(row?.id ?? '').trim();
+    const name = String(row?.name ?? '').trim();
+    const kind = row?.kind === 'group' ? 'group' : 'private';
+    const username = String(row?.username ?? '').trim();
+    if (!id) continue;
+    if (!name) { stat.skippedNoName += 1; continue; }
+
+    const table = doc[kind];
+    const prev = table[id];
+    if (!prev) {
+      if (kind === 'group') { stat.skippedUnknownGroup += 1; continue; }   // 见不变式 ⑤
+      table[id] = {
+        name,                       // 同步来的名字
+        firstSeen: now,
+        // 🔴 刻意留空：`count/lastSeen` 是"**他敲过门**"的证据（界面用它提示"收到过消息但没放行"），
+        //    同步只说明"微信那边有这个人"，**不能**伪造成"他发过消息"。
+        lastSeen: 0,
+        count: 0,
+        username,
+        nameAt: now,
+        nameFrom: 'sync'
+      };
+      stat.added += 1;
+      continue;
+    }
+    let touched = false;
+    if (username && username !== prev.username) { prev.username = username; touched = true; }
+    if (name !== prev.name) {
+      prev.name = name;
+      prev.nameAt = now;
+      prev.nameFrom = 'sync';
+      stat.renamed += 1;
+      touched = true;
+    } else {
+      stat.unchanged += 1;
+    }
+    if (touched) stat.wrote = true;
+  }
+  stat.total = Object.keys(doc.private || {}).length + Object.keys(doc.group || {}).length;
+  if (stat.added || stat.renamed) {
+    // 低频操作（开机一次 / 用户点一次），直接落盘；消息热路径才需要那 2 秒防抖。
+    dirty = true;
+    flushContacts();
+    stat.wrote = true;
+  }
+  return stat;
+}
+
 /** 立即落盘（测试与退出前用）。 */
 export function flushContacts() {
   if (timer) { clearTimeout(timer); timer = null; }

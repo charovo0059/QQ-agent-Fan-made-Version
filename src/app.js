@@ -28,7 +28,7 @@ import { GroupMutes, reseedGroupMutes } from './mutes.js';
 import { WechatChannel } from './wechat-channel.js';
 // 微信联系人登记表（2026-09-20）：把桥派生的数字 id 与昵称对应起来，
 // 让白名单可以点选而不是手填数字。见该文件顶部注释（含"为什么必须有它"）。
-import { learnContact, listContacts } from './wechat-contacts.js';
+import { learnContact, listContacts, syncContacts } from './wechat-contacts.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { jmRequest, jmPaths, jmPing, stopJm } from './jm-bridge.js';
 import { createZip } from './zip.js';
@@ -655,6 +655,14 @@ export function createApp({ log = console.log } = {}) {
     }
     wechatUpstream.checkedAt = Date.now();
 
+    // 🆕 2026-09-27（第二十七对话）：通道真的在线时，**顺手同步一次名字表**。
+    //   放这里的理由：`online === true` 恰好就是"桥连着、WeFlow 也在"的那个时刻，
+    //   而"开机自动更新一次"要的正是这个时机 —— 不必另起一个定时器（本项目对全局定时器很克制）。
+    //   限流与失败处理都在 maybeSyncWechatContacts 里；这里 fire-and-forget，绝不拖慢 /api/status。
+    if (wechatUpstream.online === true) {
+      maybeSyncWechatContacts('通道在线').catch(() => {});
+    }
+
     // 顺带补一次身份：agent 完全可能**先于** Bridge 连上中继，那时 `get_login_info` 还是 0/空，
     // 而中继学到身份之后**不会主动告诉** agent ⇒ 不补的话 `self` 就一直停在 0（实测就是这样）。
     if (!wechatOnebot.selfInfo?.user_id && Date.now() - wechatUpstream.identityAt > 10000) {
@@ -666,6 +674,56 @@ export function createApp({ log = console.log } = {}) {
           log(`[wechat] 补到微信侧身份：${info.nickname}（${info.user_id}）`);
         }
       } catch { /* 拿不到就下次再说 */ }
+    }
+  }
+
+  /**
+   * 主动向桥要一次"微信侧现在的名字表"，写进联系人表（2026-09-27 第二十七对话新增）。
+   *
+   * 为什么需要（真机实测）：这张表原来**只在入站消息里学** ⇒ 你在微信里改了备注，
+   * 管理端要等那个人下次发消息才变（实测 id 1000000003 显示旧名「某群友的妈妈」）。
+   * 桥那边加了一条只读 action；这里负责"什么时候问"。
+   *
+   * 🔴 名字是**纯显示层**：白名单判定、发送目标、记忆文件全部按数字 id ⇒
+   *    这个同步整个坏掉，也不会放错人、不会发错人（只是界面显示旧名字）。
+   */
+  async function syncWechatContactsFromBridge(reason = '') {
+    if (!wechatOnebot) return { ok: false, error: '微信通道没启用（config.wechat.enabled=false）' };
+    if (!wechatOnebot.connected) return { ok: false, error: '微信 agent 还没连上中继 —— 通道没起来时没有名字可同步' };
+    let raw
+    try {
+      raw = await withTimeout(wechatOnebot.call('get_wechat_contacts', {}), 10000, 'get_wechat_contacts 超时');
+    } catch (e) {
+      return { ok: false, error: `问桥失败：${String(e?.message ?? e)}` };
+    }
+    const rows = Array.isArray(raw?.contacts) ? raw.contacts : (Array.isArray(raw) ? raw : []);
+    if (!rows.length) {
+      return { ok: false, error: '桥回了 0 条 —— WeFlow 没跑、或者它的表当前是空的（这时保留旧名字，不覆盖）' };
+    }
+    const stat = syncContacts(rows);
+    log(`[wechat-contacts] 同步名字（${reason || '未注明'}）：读到 ${rows.length} 条 ⇒ `
+      + `新增 ${stat.added}、改名 ${stat.renamed}、未变 ${stat.unchanged}`
+      + `（跳过：无名 ${stat.skippedNoName}、未知群 ${stat.skippedUnknownGroup}；表内共 ${stat.total}）`);
+    try { emit('wechat-contacts-update', { ...stat, reason, rows: rows.length }); } catch { /* ignore */ }
+    return { ok: true, rows: rows.length, ...stat };
+  }
+
+  // "开机 / 通道连上后自动同步一次"的限流器。
+  // ⚠️ 为什么要有 30 分钟这道闸：同步的触发点是 `/api/status`（前端每 15 秒轮询一次）⇒
+  //    不拦就会变成"每 15 秒问一次桥"。而名字是给人看的，30 分钟内不会有人在意。
+  //    手动按钮**绕过**这道闸（用户点了就该真的去问）。
+  const wechatContactSync = { at: 0, running: false, last: null };
+  async function maybeSyncWechatContacts(reason) {
+    if (wechatContactSync.running) return;
+    if (Date.now() - wechatContactSync.at < 30 * 60 * 1000) return;
+    wechatContactSync.running = true;
+    try {
+      const r = await syncWechatContactsFromBridge(reason);
+      if (r.ok) { wechatContactSync.at = Date.now(); wechatContactSync.last = r; }
+    } catch (e) {
+      log('[wechat-contacts] 自动同步失败：' + String(e?.message ?? e));
+    } finally {
+      wechatContactSync.running = false;
     }
   }
 
@@ -1731,6 +1789,25 @@ export function createApp({ log = console.log } = {}) {
           note: '这些是从**收到的微信消息**里学到的。没收到过消息的对象不会出现在这里 —— '
             + '而白名单没放行的话消息进不来 ⇒ 第一次放行需要先发一条消息进来（或手填 id）。'
         });
+      }
+
+      // 🆕 手动「同步名字」（2026-09-27 第二十七对话）：去桥现问一次微信侧的名字表。
+      //    为什么要有这条路由：自动同步只发生在"通道刚在线"那一刻；用户在微信里改了备注之后
+      //    想立刻看到，就得有个按钮 —— 否则界面上那个旧名字会让人以为同步没做。
+      //    ⚠️ 与自动那条**共用同一个函数**（⛔ 不另写一份），只是这里**绕过 30 分钟的限流**。
+      if (pathname === '/api/wechat-contacts/sync' && method === 'POST') {
+        try {
+          const r = await syncWechatContactsFromBridge('手动');
+          if (r.ok) wechatContactSync.at = Date.now();
+          return json(res, 200, {
+            ...r,
+            note: r.ok
+              ? '同步完成。名字只影响显示（白名单/发送目标/记忆都按数字 id），改名不会动任何配置。'
+              : '这一轮没同步成，**旧名字原样保留**（没有做任何覆盖）。'
+          });
+        } catch (error) {
+          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+        }
       }
 
       // 一键把某个微信联系人加进白名单（或移出）。
