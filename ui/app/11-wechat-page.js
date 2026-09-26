@@ -76,22 +76,33 @@ async function loadWechatContacts() {
  *      而且 LogPanel 的容器 id 不能变。改成 data-logbody 之后由面板负责渲染。
  */
 function wechatPageShell() {
+  // 🆕 2026-09-26（第二十二对话）：用户要求「微信页也做成和 SnowLuma 页一样居中的、被框起来的样式」。
+  // 做法就是把整页包进**同一个**卡片容器（`.snowluma-page-card`）—— 与原型的写法一致
+  // （`ui/index.prototype.html:809` 就是 `<div class="snowluma-page-card" style="gap:0">`），
+  // 当时只是没落到真 UI。⛔ 不要在这里另写一套"卡片"样式：两个通道页共用同一条规则，
+  //    复刻第二份必然与 SnowLuma 页漂移（而漂移的表现就是"两页看着差不多、其实不一样"）。
+  // ⚠️ `gap:0`：本页各块**自己带外边距**（页头/分步器/折叠区/日志各有各的间距），
+  //    再叠一层卡片 gap 会与 SnowLuma 页的观感不一致（原型也是 gap:0）。
+  // ⚠️ 外层 div 只是容器：**里面所有 id 一个都没动**（`#wx-status` / `#wx-log-wrap` / `#wx-autostart`
+  //    这几个是 loadWechatPage、LogPanel、SSE 与判据的锚点）。
   return `
-    <div id="wx-head"></div>
-    <div id="wx-status"></div>
-    <!-- 「一键自检」的结论区：只在点了之后填，**不参与 15 秒轮询** ——
-         自检是"用户主动要一份完整体检"，每次轮询都重跑它既没必要也会冲掉用户正在看的结论。 -->
-    <div id="wx-check"></div>
-    <!-- 开机自动启动的两个开关。为什么要放在这个页签而不是「设置」：
-         它们管的就是这一页在管的那条链，放一起用户才找得到（SnowLuma 那个开关在设置里，
-         是因为 SnowLuma 页签早于设置页；这次不重复那个割裂）。
-         ⚠️ 条目 3 起收进**偏好折叠区**（方案："自动拉起复选框与操作混排"），
-            但 DOM 位置仍在常驻区 —— 复选框不该每 15 秒被重建。 -->
-    <details class="devnotes" id="wx-prefs-wrap">
-      <summary>偏好设置</summary>
-      <div class="devnotes-body" id="wx-autostart"></div>
-    </details>
-    <div id="wx-log-wrap"></div>`;
+    <div class="snowluma-page-card" style="gap:0">
+      <div id="wx-head"></div>
+      <div id="wx-status"></div>
+      <!-- 「一键自检」的结论区：只在点了之后填，**不参与 15 秒轮询** ——
+           自检是"用户主动要一份完整体检"，每次轮询都重跑它既没必要也会冲掉用户正在看的结论。 -->
+      <div id="wx-check"></div>
+      <!-- 开机自动启动的两个开关。为什么要放在这个页签而不是「设置」：
+           它们管的就是这一页在管的那条链，放一起用户才找得到（SnowLuma 那个开关在设置里，
+           是因为 SnowLuma 页签早于设置页；这次不重复那个割裂）。
+           ⚠️ 条目 3 起收进**偏好折叠区**（方案："自动拉起复选框与操作混排"），
+              但 DOM 位置仍在常驻区 —— 复选框不该每 15 秒被重建。 -->
+      <details class="devnotes" id="wx-prefs-wrap">
+        <summary>偏好设置</summary>
+        <div class="devnotes-body" id="wx-autostart"></div>
+      </details>
+      <div id="wx-log-wrap"></div>
+    </div>`;
 }
 
 
