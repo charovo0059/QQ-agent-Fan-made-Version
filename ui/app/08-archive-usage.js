@@ -357,6 +357,44 @@ function renderUsageSkeleton() {
     </div>`;
 }
 
+// ── 「用量与成本」页的两个手动开关（2026-09-26 第二十四对话，提案 f789b40e）──────────
+// 写法与梦境页那个开关一致：**勾了立即 POST /api/config**（后端是 deepMerge，不会冲掉
+// usage 下的其它字段），保存失败就把勾**回滚**并出声 —— 界面不能显示成"成功了"。
+// ⚠️ 初始值按需自己拉一次配置：这一页可能在"从没打开过设置页"的情况下被打开
+//    （那时 state.config 还是 null），只读 state.config 会把开关显示成关着。
+async function bindUsageSelfcheckToggles() {
+  const cbUsage = $('#usage-selfcheck-enabled');
+  const cbBalance = $('#usage-balance-enabled');
+  if (!cbUsage && !cbBalance) return;
+
+  const onSave = async (input, key, value) => {
+    const note = $('#usage-toggle-note');
+    input.disabled = true;
+    if (note) note.textContent = '保存中…';
+    try {
+      await api('/api/config', { method: 'POST', body: JSON.stringify({ usage: { [key]: value } }) });
+      // 刷新失败不影响"已经保存成功"这件事，沿用旧缓存即可
+      try { state.config = await api('/api/config'); } catch { /* 下次渲染再校正 */ }
+      if (note) note.textContent = '已保存（下一轮生效）';
+    } catch (error) {
+      input.checked = !input.checked;
+      if (note) note.textContent = `保存失败：${error?.message || error}`;
+    } finally {
+      input.disabled = false;
+    }
+  };
+
+  if (cbUsage) cbUsage.addEventListener('change', () => onSave(cbUsage, 'enabled', cbUsage.checked === true));
+  if (cbBalance) cbBalance.addEventListener('change', () => onSave(cbBalance, 'balance', cbBalance.checked ? 'deepseek' : 'off'));
+
+  let cfg = state.config;
+  if (!cfg || !cfg.usage) {
+    try { cfg = await api('/api/config'); state.config = cfg; } catch { cfg = null; }
+  }
+  if (cbUsage) cbUsage.checked = cfg?.usage?.enabled === true;
+  if (cbBalance) cbBalance.checked = String(cfg?.usage?.balance || 'off') === 'deepseek';
+}
+
 /** 建骨架（只建一次，轮询走 updateUsagePage 以免滚动位置丢失）。 */
 function renderUsagePage(stats, st, prices) {
   const box = $('#usage-page');
@@ -370,6 +408,21 @@ function renderUsagePage(stats, st, prices) {
           ${USAGE_RANGES.map(([v, label]) => `<button class="btn btn-small" data-range="${v}">${label}</button>`).join('')}
           <button class="btn btn-small" id="usage-refresh-btn" title="立即刷新">刷新</button>
         </div>
+      </div>
+
+      <!-- 她自己的「用量 / 花费」自检开关（2026-09-26 第二十四对话，提案 f789b40e）。
+           🔴 勾了**立即生效**（不用点"保存设置"），照梦境页那个开关的写法。
+           ⚠️ 这两个开关只决定"给不给她这个能力"，与"她要不要看、要不要在群里说"无关 ——
+              后者完全由她自己在提示词里判断（用户 2026-09-26 拍板）。
+           样式复用设置页既有的 .checkbox-row（不新增 CSS，也就不用动 style.css）。 -->
+      <div class="checkbox-row">
+        <input type="checkbox" id="usage-selfcheck-enabled" />
+        <label for="usage-selfcheck-enabled">让她能查自己的用量与花费（只读：今天的 token、估算花费、跑的哪个渠道）</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="usage-balance-enabled" />
+        <label for="usage-balance-enabled">允许查 DeepSeek 余额（只对 api.deepseek.com 生效，60 秒缓存；其它渠道一律如实说查不到）</label>
+        <span class="muted" id="usage-toggle-note" style="font-size:12px"></span>
       </div>
 
       <!-- 估算成本放第一张：它是这张页的主指标（accent 描边/底色突出）。
@@ -433,6 +486,8 @@ function renderUsagePage(stats, st, prices) {
   // 「调用次数」卡片可点开明细（骨架重建后重新绑定，所以放在 renderUsagePage 里）
   const runsCard = $('#usage-page #runs-card');
   if (runsCard) runsCard.addEventListener('click', () => openToolBreakdown());
+
+  bindUsageSelfcheckToggles();
 
   $$('#usage-page [data-range]').forEach((el) => {
     el.addEventListener('click', () => {

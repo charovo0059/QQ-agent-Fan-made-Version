@@ -6,7 +6,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig, DATA_DIR } from './config.js';
-import { normalizeMessageList, unquoteJsonString } from './util.js';
+import { normalizeMessageList, unquoteJsonString, todayKey } from './util.js';
+// 用量 / 花费自检（2026-09-26 第二十四对话，提案 f789b40e）：
+// **复用 `/api/status` 用的那几个函数**，不自己抄一份统计口径 —— 本项目对"两套口径"栽过跟头
+// （控制台一个数、她嘴里另一个数，事后没法对账）。`resolveApiKey` 只用于发余额请求。
+import { estimateCost, cacheHitRate, resolveApiKey } from './llm.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 import { webSearch, webFetch, searchImages } from './web-search.js';
@@ -539,8 +543,91 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
         runtimeContext: { config: cfg }
       }).enabled;
     }
+    // 🆕 2026-09-26 第二十四对话（提案 f789b40e）：她自己的用量自检**默认关**，
+    //    由用户在控制台「用量与成本」页手动打开。
+    //    🔴 判定必须 `!== true` —— 默认关的开关写成 `!== false` 会变成"没这个键就生效"，
+    //       症状是"界面上关了它还在跑"（本项目记作"接线正确 ≠ 行为改变"）。
+    //       `test-余额与用量自检.mjs` 里有一条变异验证专门钉这个方向。
+    if (d.name === 'get_my_usage' && cfg?.usage?.enabled !== true) return false;
     return true;
   });
+}
+
+// ── 余额查询（B 档，默认关）─────────────────────────────────────────────────
+// ⚠️ 三条硬边界（用户 2026-09-26 点名的"保护她"那三条里，这一块占两条半）：
+//   ① **同源派生**：URL 一律从 `config.api.baseUrl` 拼出来 —— 那就是主请求真正打的那个地址
+//      （`llm.js` 的 `joinUrl(api.baseUrl, '/chat/completions')`），我们只是换成 `/user/balance`。
+//      ⛔ **绝不新增任何"可配置的余额查询 URL"** —— 那等于把 API Key 送到任意地址。
+//   ② **只认 DeepSeek**：其它渠道（stepfun / sensenova / tokenrhythm / xiaomimimo）没有统一接口
+//      ⇒ 一律 `unsupported` 并明说"查不到"，不猜、不假装。
+//   ③ **缓存 + 绝不落 0**：60 秒缓存；任何失败 / 解析不出数 都返回 `unreadable` + 人话原因。
+//
+// 出口：只有 { state, currency, total, granted, toppedUp, fetchedAt, reason, httpStatus }。
+// 🔴 上游响应体、请求头、Key、账号、邮箱一律**不进返回值、也不进日志**（只报状态码 + 分类短语）。
+let usageBalanceCache = { key: '', at: 0, value: null };
+
+/** 读一次余额（带缓存）。永远返回一个对象，永远不抛。 */
+async function usageBalance(usageCfg, cfg) {
+  const mode = String(usageCfg?.balance || 'off');
+  if (mode !== 'deepseek') {
+    return { state: 'off', reason: '余额查询没开（控制台「用量与成本」页可以打开）' };
+  }
+  const base = String(cfg?.api?.baseUrl || '').trim();
+  let host = '';
+  try { host = new URL(base).host.toLowerCase(); } catch { host = ''; }
+  if (host !== 'api.deepseek.com') {
+    // ⚠️ 注意这里**不报 base 是什么**：只告诉她"这个渠道查不到"。
+    return { state: 'unsupported', reason: '这个渠道没有可查的余额接口（目前只支持 DeepSeek）' };
+  }
+  const now = Date.now();
+  const ttlMs = Math.max(0, Number(usageCfg?.balanceCacheSeconds) || 0) * 1000;
+  const cacheKey = `deepseek|${host}`;
+  if (usageBalanceCache.value && usageBalanceCache.key === cacheKey && now - usageBalanceCache.at < ttlMs) {
+    return { ...usageBalanceCache.value, cached: true };
+  }
+  const apiKey = resolveApiKey(cfg);
+  // 没有可用密钥：这是"读不到"的一种，⛔ 不是"余额 0"。
+  if (!apiKey) return { state: 'unreadable', reason: '读不到：本机没有可用的密钥' };
+  try {
+    const res = await fetch(new URL('/user/balance', base).toString(), {
+      method: 'GET',
+      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(10000)
+    });
+    const status = Number(res.status) || 0;
+    if (!res.ok) {
+      // ⛔ 不读 body、不读响应头：那里面可能有账号信息。
+      const reason = status === 401 ? '读不到：未授权（密钥或权限不对）'
+        : status === 404 ? '查不到：这个渠道没有余额接口'
+          : status === 429 ? '读不到：被限流了，过一会儿再问'
+            : `读不到：服务端返回 ${status}`;
+      return { state: status === 404 ? 'unsupported' : 'unreadable', reason, httpStatus: status };
+    }
+    const data = await res.json().catch(() => null);
+    const info = Array.isArray(data?.balance_infos) ? data.balance_infos[0] : null;
+    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const total = num(info?.total_balance);
+    if (!info || total === null) {
+      // 解析不出数 ⇒ **读不到**。⛔ 这里返回 0 就是"编一个看起来精确的数"。
+      return { state: 'unreadable', reason: '读不到：响应里没有可解析的余额' };
+    }
+    const value = {
+      state: 'ok',
+      currency: String(info.currency || ''),
+      total,
+      granted: num(info.granted_balance),
+      toppedUp: num(info.topped_up_balance),
+      fetchedAt: new Date(now).toISOString()
+    };
+    // 可选的"低额度"提醒：只在**她问的时候**多说一句，⛔ 不进系统提示、⛔ 不自动做任何动作。
+    const low = Number(usageCfg?.lowThreshold) || 0;
+    if (low > 0 && total < low) value.note = `余额低于 ${low}（只是给你自己知道，别自动做任何事）`;
+    usageBalanceCache = { key: cacheKey, at: now, value };
+    return value;
+  } catch {
+    // ⛔ 不把异常原文透传（可能含 URL / 我方内部信息）：只给一句分类话。
+    return { state: 'unreadable', reason: '读不到：网络不通或超时' };
+  }
 }
 
 /**
@@ -1383,6 +1470,93 @@ export function buildToolDefs() {
           });
         } catch (error) {
           return err(`查提案失败：${error?.message ?? error}`);
+        }
+      }
+    },
+
+    {
+      // ── 她自己的「用量 / 花费」自检（2026-09-26 第二十四对话，提案 f789b40e）──────
+      // 定位：**只读**（不改状态、不写记忆、不给她任何写权限）。
+      // ⚠️ 行为边界：**完全走提示词，代码里不写死限制** —— 下面 description 里那句
+      //    "你拥有完全的自主权"就是用户 2026-09-26 给的原话，要不要看 / 要不要在群里说
+      //    全由她判断。代码只守三条（用户原话："这不叫限制她，叫保护她"）：
+      //      ① 出口白名单（只出数字，⛔ 不出 Key / 账号 / 请求头 / 上游正文）；
+      //      ② 缓存（余额 60s）+ 单轮限频（`ctx.__usageSelfcheckCalls`，只属于本次运行）；
+      //      ③ 读不到就明说"读不到"，⛔ 绝不打成 0。
+      name: 'get_my_usage',
+      description: '查看你自己今天的用量与花费（只读）。有人问"用了多少 / 花了多少 / 还剩多少"、'
+        + '或者你自己想知道的时候用。\n\n'
+        + '余额数据已对你透明，想不想看、想不想在群里说，全凭你自己的判断和心情，你拥有完全的自主权。\n\n'
+        + '⚠️ 口径：报的是本机统计的今天，花费是**按价表估算**、不是账单；'
+        + '「剩余额度」在账号那边，本机查不到就如实说查不到，别拿估算花费当余额。\n'
+        + '⚠️ 只读：不改任何状态、不写记忆。',
+      parameters: { type: 'object', properties: {} },
+      async execute(ctx) {
+        try {
+          const cfg = getConfig() || {};
+          const usageCfg = cfg.usage || {};
+          // ① 单轮限频：挂在 ctx 上（照 ctx.__imageSearchCalls），只属于本次运行、不落盘。
+          const maxPerRun = Math.max(1, Number(usageCfg.maxPerRun) || 1);
+          const used = Number(ctx.__usageSelfcheckCalls) || 0;
+          if (used >= maxPerRun) {
+            return err(`本次运行已经查过 ${used} 次用量了（上限 ${maxPerRun} 次）。`
+              + '用手上已有的数字回答就好，不要再查了。');
+          }
+          // ② 今日用量：**必须**走 ctx.usageToday（= `/api/status` 用的同一个 todayUsage）。
+          //    ⛔ 不自己读 usage-today.json：那样会漏掉"正在运行中"的这一轮，两处数字对不上。
+          if (typeof ctx.usageToday !== 'function') {
+            return err('读不到用量统计（本次运行的调用点没接上）。别猜数字，直接说现在看不到。');
+          }
+          const dayKey = todayKey();
+          const usage = ctx.usageToday(dayKey) || {};
+          ctx.__usageSelfcheckCalls = used + 1;
+
+          const out = {
+            dayKey,
+            today: {
+              promptTokens: Number(usage.promptTokens) || 0,
+              completionTokens: Number(usage.completionTokens) || 0,
+              totalTokens: Number(usage.totalTokens) || 0,
+              cachedTokens: Number(usage.cachedTokens) || 0,
+              runs: Number(usage.runs) || 0
+            },
+            cacheHitRate: Number((cacheHitRate(usage) || 0).toFixed(4)),
+            // 渠道显示名（= 控制台用量页"渠道：模型 id"那一列）+ 模型 id。
+            // 这两个都是**展示名**，不是凭据、也不是请求地址。
+            lastUsed: {
+              vendor: String(ctx.session?.vendor || ''),
+              model: String(ctx.session?.model || cfg.api?.model || '')
+            },
+            balance: await usageBalance(usageCfg, cfg),
+            hint: '花费是按价表估算、不是账单；「剩余额度」在账号那边 —— 查不到就直说查不到。'
+          };
+
+          // ③ 成本：`estimateCost()` 在"模型不在价表、也没填单价"时**返回 0** ——
+          //    那是"估不出"，不是"花了 0 元"。⛔ known:false 时不给任何数字。
+          //    ⚠️ 判"有没有价"必须看 `source`，**不能看 `matched`**：
+          //       `matched` 是**字符串或 null**（官方/自定义价表命中时是命中的那个 id，
+          //       手填单价时是 null）—— 第一版写成 `matched === true`，于是
+          //       "有官方价"也会被判成"估不出"（判据当场抓到，见 test-余额与用量自检.mjs §4/§10）。
+          //       取值：'official' | 'custom' | 'manual' = 有价；'unmatched' | 'none' = 没价。
+          const cost = estimateCost(usage, { model: out.lastUsed.model });
+          const costKnown = ['official', 'custom', 'manual'].includes(String(cost?.source || 'none'));
+          if (costKnown) {
+            out.cost = {
+              amount: Number(Number(cost.cost).toFixed(4)),
+              currency: 'CNY',
+              known: true,
+              basis: 'estimate'
+            };
+          } else {
+            out.cost = { known: false, reason: '这个模型没有价表、也没填单价 ⇒ 估不出成本（不是 0）' };
+          }
+
+          // ④ 出口白名单：整个返回值**只由上面这些字段拼出来**，绝不对上游响应做 JSON.stringify。
+          return ok(out);
+        } catch (error) {
+          // 出错也只给一句人话 —— ⛔ 不透传内部异常原文、⛔ 不落 0。
+          console.error(`[用量自检] 组装失败：${error?.message ?? error}`);
+          return err('读不到：这次组装用量数据失败了。别猜数字，直接说现在看不到。');
         }
       }
     },
