@@ -580,11 +580,40 @@ export function buildToolDefs() {
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
           });
-          ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
+          // ── 🔴 这里有两个"条数"，它们**故意不同**，别"顺手改一致"（决策记录 §82.1、交接坑 59）──
+          //   · `real` = **真敲键盘发出去的条数** ⇒ 只用于**工具回执**（回答模型"我这次发了几条"）；
+          //   · `ctx.session.sent` = **"这句话在对面了没有"** ⇒ 由 `orchestrator.js` 消费：
+          //     `status`（`sent>0 ⇒ done`）/ 追问兜底 / `nudgeRecovered` / 出错重试的
+          //     `sentCount === 0` / 群禁言识别（`mutes.js`）—— 五处问的都是同一个问题。
+          //   被去重的那条**确实已经在对面了**（`send.dedupeWindowMs` 内刚成功发过逐字相同的
+          //   文本 ⇒ 用户手上真有这句话）⇒ 存档**照记**，只打 `deduped:true` 标记，
+          //   让界面与事后排查看得出"这条是跳过的那一条"。
+          //   ⛔ **别把那行 push 删掉**：那会**静默**改掉上面五处行为，还会在用户刚收到消息时
+          //      把界面显示成「未回复」（比起现在这个，是更刺眼的新谎）。
+          //   ⚠️ 与 `send_image` 的处理**有意不同**（图片那条**不记** `session.sent`、回执 `sent:false`）
+          //      —— 两者别互相"对齐"掉；理由各自写在注释里并互相指路（见下面 send_image 的同名注释）。
+          const real = result.sent.filter((s) => !s.deduped);
+          const dedupedCount = result.sent.length - real.length;
+          ctx.session.sent.push(...result.sent.map((s) => ({
+            type: 'text',
+            text: s.text,
+            at: s.at,
+            ...(s.deduped ? { deduped: true } : {})
+          })));
           ctx.emit('session-update', ctx.session.id);
-          const note = ['已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
+          // 一条都没真发出去时（只可能是"全被去重"，因为全失败会在 sender 里抛错）
+          // **不能**再说"已发送" —— 那正是本待办要修的那句谎。
+          const note = [real.length > 0
+            ? '已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'
+            : '本轮**没有新发出**任何消息（内容与刚发过的完全相同，已被去重跳过）。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
+          if (dedupedCount > 0) {
+            const win = Number(getConfig()?.send?.dedupeWindowMs) || 0;
+            const winText = win > 0 ? `${Math.round(win / 1000)} 秒内` : '刚刚';
+            // 措辞对齐 `send_image` 已有的那句（见下面 send_image 的 `result?.deduped` 分支）。
+            note.push(`（其中 ${dedupedCount} 条与${winText}刚发过的内容完全相同，已跳过 —— **本轮没有重复发**；不要再发一遍，也不要向用户提这件事。）`);
+          }
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
-          return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
+          return ok({ sent: real.length, deduped: dedupedCount, messageIds: real.map((s) => s.messageId), note: note.join('') });
         } catch (error) {
           return err(error?.message ?? error);
         }
@@ -1116,6 +1145,12 @@ export function buildToolDefs() {
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
           });
+          // ⚠️ 图与**文字**对"被去重"的处理**有意不同**，别互相"对齐"掉（决策记录 §82.1）：
+          //   · 文字那条：`session.sent` **照记**（带 `deduped:true`），因为"这句话确实在对面"
+          //     —— `orchestrator.js` 的 `status`/追问/`nudgeRecovered`/出错重试/群禁言都靠它判"说过话没有"；
+          //   · 图片这条：**不记** `session.sent` 且回执 `sent:false` —— 图不是"回话"，
+          //     少一张图不影响"她这一轮回复过没有"的判定，而多记一条会把"只发了图"当成说过话。
+          //   理由写在两处（`send_message.execute` 上方那段同名注释）。
           if (result?.deduped) {
             return ok({ sent: false, deduped: true, note: '这张图刚刚已经发过了，这次**没有重复发**。别当成失败，也不用重试。' });
           }

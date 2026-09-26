@@ -437,6 +437,32 @@ export function createApp({ log = console.log } = {}) {
     }
   }
 
+  /**
+   * 从 SnowLuma 的 `config/runtime.json` 读 `hookAutoLoad`（= "发现 QQ 进程就自动注入"）。
+   *
+   * 返回 `true` / `false` / **`null`**（文件读不到、或字段不是布尔 ⇒ **null，不猜**）。
+   *
+   * 🔴 为什么要把它报出来（2026-09-26 第二十三对话 · 交接 §3 待办 27 / 决策记录 §82.3）：
+   *    这个开关**不随我们的仓库走**（`snowluma/config/` 在 `.gitignore` 里）⇒ 换机器/重装之后
+   *    它可能变回默认，而症状是"**应用起来了、WebUI 也在、就是连不上**"
+   *    （`/api/status` 给 `snowluma.lastError = ECONNREFUSED 127.0.0.1:3001` + `injected=false`；
+   *     3001 是**注入成功之后**才开的网关）。这件事以前只写在文档里，现在界面能自己说出来。
+   * ⚠️ 读不到就是 `null`，⛔ **不要回落成 `false`**：那会把"读不到配置文件"和"用户明确关掉了"
+   *    混成同一句话，界面就只能编一个看起来精确的状态（本项目最忌这个）。
+   * ⚠️ 只看**这一处**的键；SnowLuma 升级后若改名/换默认，先看它自己的
+   *    `resolveAutoLoad(runtimeConfig.hookAutoLoad)`（`snowluma/index.mjs`）再改这里。
+   */
+  function snowlumaHookAutoLoad() {
+    try {
+      const dir = snowlumaDir();
+      if (!dir) return null;
+      const rtPath = path.join(dir, 'config', 'runtime.json');
+      if (!fs.existsSync(rtPath)) return null;
+      const rt = JSON.parse(fs.readFileSync(rtPath, 'utf8'));
+      return typeof rt.hookAutoLoad === 'boolean' ? rt.hookAutoLoad : null;
+    } catch { return null; }
+  }
+
   function snowlumaStatus() {
     return { embedded: !!snowlumaProc, pid: snowlumaProc?.pid ?? null };
   }
@@ -1605,6 +1631,9 @@ export function createApp({ log = console.log } = {}) {
             webuiUp: await isPortOpen('127.0.0.1', snowlumaWebuiPort()),
             injected: !!onebot.connected,
             everInjected: !!onebot.everConnected,
+            // 🆕 待办 27：这个开关不随仓库走（gitignore），换机器就得重设 ⇒ 让界面能说出当前值。
+            //    true / false / **null（读不到，不猜）**，见 snowlumaHookAutoLoad 的注释。
+            hookAutoLoad: snowlumaHookAutoLoad(),
             lastError: onebot.lastConnectError || '',            ...snowlumaStatus()
           },
           orchestrator: orchestrator.statusSummary(),
