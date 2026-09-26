@@ -622,13 +622,15 @@ function openModelAddModal(baseUrl, apiKey, remoteModels) {
 
 /** 删除模型：左提供商 / 右模型（带删除按钮），暗红色调。 */
 function openModelDeleteModal() {
-  const providers = state.providers || [];
+  // ⚠️ 用 `let` + 可变数组：这个弹窗现在既删模型、也删**整个供应商**（2026-09-26 第二十四对话），
+  //    删完必须把列表刷新成本地最新的一份，否则左栏还挂着刚删掉的条目（看着像没删掉）。
+  let providers = state.providers || [];
   if (!providers.length) {
     $('#provider-action-hint').textContent = '模型目录为空，没有可删除的模型。';
     return;
   }
   const overlay = modelModalShell({
-    head: '删除模型',
+    head: '删除模型 / 供应商',
     body: `
       <div class="model-modal-left" id="md-left"></div>
       <div class="model-modal-right" id="md-right"></div>`,
@@ -639,10 +641,47 @@ function openModelDeleteModal() {
   const right = overlay.querySelector('#md-right');
   let activePid = providers[0].id;
   function renderLeft() {
-    left.innerHTML = providers.map((p) =>
-      `<div class="mm-prov ${p.id === activePid ? 'active' : ''}" data-pid="${esc(p.id)}">${esc(p.displayName || p.id)}</div>`).join('');
+    // 每行右侧挂一个"删掉这个供应商"的按钮：左边点行=选中，点 ×=删（stopPropagation，
+    // 否则会先选中再删，误删风险高）。
+    left.innerHTML = providers.map((p) => {
+      const n = (p.models || []).length;
+      const isCurrent = String(state.config?.api?.provider || '') === p.id;
+      return `<div class="mm-prov ${p.id === activePid ? 'active' : ''}" data-pid="${esc(p.id)}">
+        <span class="mm-prov-name">${esc(p.displayName || p.id)}</span>
+        <span class="muted" style="font-size:11px">${n} 个模型${isCurrent ? ' · 当前' : ''}</span>
+        <button class="mm-prov-del" data-del="${esc(p.id)}" title="删掉这个供应商（连同它的 Key）">删除</button>
+      </div>`;
+    }).join('');
     left.querySelectorAll('.mm-prov').forEach((el) => {
       el.addEventListener('click', () => { activePid = el.dataset.pid; renderLeft(); renderRight(); });
+    });
+    left.querySelectorAll('.mm-prov-del').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const pid = btn.dataset.del;
+        const p = providers.find((x) => x.id === pid);
+        if (!p) return;
+        const n = (p.models || []).length;
+        const isCurrent = String(state.config?.api?.provider || '') === p.id;
+        const warn = `确定删掉供应商「${p.displayName || p.id}」？\n\n`
+          + `· 它下面的 ${n} 个模型条目会一起消失\n`
+          + '· 它保存的 API Key 会一起删掉（要再用得重新填）'
+          + (isCurrent ? '\n· ⚠️ 它现在是**当前选中的**供应商 —— 删完「模型 API」里的提供商选择会被清空，需要重新选一个' : '');
+        if (!confirm(warn)) return;
+        btn.disabled = true;
+        try {
+          const r = await api('/api/providers', { method: 'DELETE', body: JSON.stringify({ providerId: pid }) });
+          providers = (r.providers || []);
+          if (!providers.length) { closeModelModal(overlay); loadSettings(); return; }
+          if (!providers.some((x) => x.id === activePid)) activePid = providers[0].id;
+          renderLeft();
+          renderRight();
+          loadSettings();
+        } catch (err) {
+          alert(`删除供应商失败：${err.message}`);
+          btn.disabled = false;
+        }
+      });
     });
   }
   function renderRight() {

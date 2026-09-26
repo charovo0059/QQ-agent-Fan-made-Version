@@ -326,6 +326,43 @@ export function removeModelFromProvider(providerId, modelId) {
   return p;
 }
 
+/**
+ * 删掉一个提供商（2026-09-26 第二十四对话，用户截图反馈：
+ * "删除模型功能有，但是供应商删不掉，会在那占位"）。
+ *
+ * 语义（三件事都要做，少一件就出问题）：
+ *   ① 从 `providers[]` 里移除它 —— 这才是"不占位"；
+ *   ② 顺手删掉它那份 Key（`dshProviderKeys[id]`）—— 留着就是一份**没有主人的密钥**；
+ *   ③ 如果它正是**当前选中的** `api.provider` ⇒ 清空 `api.provider`（否则配置指向一个不存在的目录项，
+ *      表现为"选中的提供商没了、下拉框显示空白"）。
+ * ⚠️ 刻意**不动** `api.model` / `api.baseUrl`：删提供商不等于"现在不能说话"，
+ *    主模型的端点与模型名是另一套字段（清掉它们会把机器人当场说哑）。
+ * 返回被删掉的那个 provider（路由再脱敏输出）；id 不存在 ⇒ null（调用方回 404）。
+ */
+export function removeProvider(providerId) {
+  const id = String(providerId || '').trim();
+  if (!id) return null;
+  const providers = currentProviders();
+  const hit = providers.find((p) => p.id === id);
+  if (!hit) return null;
+  const rest = providers
+    .filter((p) => p.id !== id)
+    .map((p) => { const { apiKey, ...keep } = p; return keep; });   // 与兄弟函数同一写法：明文 Key 不进 providers[]
+  const keys = { ...(getConfig().dshProviderKeys || {}) };
+  delete keys[id];
+  // 🔴 `updateConfig` 走的是 `deepMerge(getConfig(), patch)` —— **它只加不删**：
+  //    直接把"少了一把 Key 的对象"当 patch 传进去，被删的那把会从旧配置里**活下来**
+  //    （判据当场抓到：删完提供商，它的 Key 还在配置里）。删字段必须走本项目既有的
+  //    整体替换约定 `{ __replace__: X }`（见 config.js 的 deepMerge 注释）。
+  //    ⚠️ 数组（providers）不受影响：deepMerge 对数组是整体替换，不需要 __replace__。
+  const patch = { providers: rest, dshProviderKeys: { __replace__: keys } };
+  if (String(getConfig().api?.provider || '') === id) {
+    patch.api = { ...getConfig().api, provider: '' };
+  }
+  updateConfig(patch);
+  return hit;
+}
+
 // ── 连通性测试：GET {baseURL}/models（OpenAI 兼容探测） ────────────────────
 
 /**

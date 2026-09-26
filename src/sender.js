@@ -154,7 +154,10 @@ export class SendQueue {
 
   /**
    * 发送一批文本消息（一条或多条）。
-   * options: { replyToMessageId, atUserId }
+   * options: { replyToMessageId, atUserId, origin }
+   *   `origin`（2026-09-26 第二十四对话，提案 57e7ab37）：`'self'`（默认，她自己说的）
+   *   或 `'admin'`（**管理端代发**，如群发通知 / 测试发送）。它只影响**记账**：
+   *   成功那条会带上 `origin:'admin'`，她看上下文时就能分清"这句不是我说的"。
    * 返回 { sent: [{text, messageId}], failed: [{text, error}] }；全部失败时抛错。
    */
   async sendTextBatch(chatKey, messages, options = {}) {
@@ -210,7 +213,7 @@ export class SendQueue {
         // ⚠️ 顺序要紧：**只有** OneBot 成功返回之后才记入去重窗口。
         this.#markSent(chatKey, text);
         const ts = Date.now();
-        this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null });
+        this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null, origin: options.origin || 'self' });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
         return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
       }));

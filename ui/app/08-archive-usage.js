@@ -87,11 +87,77 @@ async function loadChatMessages(key, { keepView = false } = {}) {
       state.chatMsgLimit = CHAT_MSG_PAGE;
       renderChatMessages();
     }
+    // 「没发出去的消息」横幅跟着一起刷（2026-09-26 第二十四对话）—— 它是旁路提示，
+    // 拉不到就自己保持原样，绝不因为它的失败把整页打成错误。
+    renderSendFailures(key);
   } catch (e) {
     if (state.currentChatKey !== key) return;
     const box = $('#chat-detail');
     if (box) box.innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
   }
+}
+
+/**
+ * 「没发出去的消息」（2026-09-26 第二十四对话，提案 26bb79c2 的剩余部分）。
+ *
+ * 为什么需要：`sender` **只在成功之后**才把消息写进存档 ⇒ 失败那条在管理端**根本看不见**，
+ * 而她那边以为已经说了（微信侧「读不回」就是这一类"静默漏发"）。
+ * 这里把失败摆出来：原文 + 错因 + 时间，两个人工动作 —— 重发 / 忽略。
+ *
+ * ⚠️ 只做"看得见 + 人工点一下"，**没有自动重发**：微信侧「读不回」可能是落库慢造成的
+ *    **假阴性**（那条其实已经到了），自动重发会把同一句话说两遍。
+ * ⚠️ 这是**旁路提示**：它自己拉不到数据时只保持原样，绝不把整页打成错误态。
+ */
+async function renderSendFailures(key) {
+  const box = $('#chat-send-failures');
+  if (!box || !key) return;
+  let items = [];
+  try {
+    const r = await api(`/api/send-failures?chatKey=${encodeURIComponent(key)}`);
+    items = r.items || [];
+  } catch { return; }
+  if (!items.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `
+    <div class="send-fail-card">
+      <div class="send-fail-head">⚠️ 有 ${items.length} 条消息没发出去（对面没收到）</div>
+      ${items.map((x) => `
+        <div class="send-fail-row" data-id="${esc(x.id)}">
+          <div class="send-fail-text">${esc(x.text)}</div>
+          <div class="send-fail-meta">${esc(new Date(x.at).toLocaleString('zh-CN', { hour12: false }))} · ${esc(x.error)}</div>
+          <div class="send-fail-acts">
+            <button class="btn btn-small btn-primary" data-fail-retry="${esc(x.id)}" title="照原样再发一次（请先自己确认对面真的没收到）">重发</button>
+            <button class="btn btn-small" data-fail-dismiss="${esc(x.id)}">忽略</button>
+          </div>
+        </div>`).join('')}
+      <div class="hint" style="margin:6px 0 0">微信侧「读不回」有可能是落库慢造成的假阴性（其实已经发到了）——
+        重发前先看一眼对方那边，别把同一句话说两遍。</div>
+    </div>`;
+  // 按钮每次重绘都要重绑（容器内容会被整体替换）
+  box.querySelectorAll('[data-fail-retry]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      const r = await api('/api/send-failures/retry', {
+        method: 'POST', body: JSON.stringify({ id: b.dataset.failRetry })
+      });
+      if (!r.ok) alert(`还是没发出去：${r.error}`);
+      loadChatMessages(key, { keepView: true });
+    } catch (e) {
+      alert(`重发失败：${e.message}`);
+      b.disabled = false;
+    }
+  }));
+  box.querySelectorAll('[data-fail-dismiss]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await api('/api/send-failures/dismiss', {
+        method: 'POST', body: JSON.stringify({ id: b.dataset.failDismiss })
+      });
+      renderSendFailures(key);
+    } catch (e) {
+      alert(`忽略失败：${e.message}`);
+      b.disabled = false;
+    }
+  }));
 }
 
 /**
@@ -130,6 +196,7 @@ function renderChatMessages() {
       <button class="btn btn-small btn-danger" id="chat-clear-btn" title="删除本会话的全部消息存档（不可撤销）">清空本会话存档</button>
     </div>
     <div class="hint" id="chat-wake-hint" style="margin:-4px 0 8px 0"></div>
+    <div id="chat-send-failures"></div>
     <table class="archive-table"><tbody id="chat-msg-body"></tbody></table>
     <div class="list-more muted" id="chat-msg-more"></div>`;
 
@@ -156,6 +223,8 @@ function renderChatMessages() {
   $('#chat-clear-btn').addEventListener('click', () => clearChatArchive(key));
 
   updateChatMessagesBody();
+  // 「没发出去的消息」横幅（2026-09-26 第二十四对话）：切会话时也要拉一次
+  renderSendFailures(key);
   // 滚动加载只挂一次（attachScrollLoader 内部有防重复）
   initChatScrollLoader();
   // 金句勾选：事件委托挂在容器上（tbody 会被轮询重建，委托不受影响的）。

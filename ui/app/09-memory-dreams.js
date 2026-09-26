@@ -9,6 +9,13 @@
  * 位置选在印象页顶部而不是新开页签：提案里最多的就是"想改记忆与印象的方式"，
  * 放在印象旁边最容易被看到；也不必再写一个页面的骨架。
  */
+// 已采纳那一栏的开合状态（2026-09-26 第二十四对话，用户截图反馈：
+// 「展开已采纳 → 点标记已实现 → 区块又自动折叠，想连着标几条得反复展开」）。
+// 成因：每次 renderProposalReview() 都用 innerHTML 重建 `<details>`，不写 `open` 就回到默认折叠。
+// 修法：把开合记在**文件级变量**里，渲染时按它写 `open`，用户开合时更新它。
+// ⚠️ 别改成"每次渲染都强制 open" —— 那样用户手动收起也无从保持（同样是个"界面不听话"的毛病）。
+let proposalAcceptedOpen = false;
+
 function renderProposalReview() {
   const box = $('#proposal-review');
   if (!box) return;
@@ -62,7 +69,7 @@ function renderProposalReview() {
   // 已采纳那一栏默认折叠：这是"工单存档"，平时不占地方，但要能查得到
   //（2026-09-19 修：原来只拉 pending ⇒ 一采纳就从列表消失，用户问"采纳之后在哪看"才发现）
   const acceptedHtml = accepted.length
-    ? `<details class="proposal-accepted"><summary>已采纳（${accepted.length}）—— 列在待办里，改动由人来做</summary>
+    ? `<details class="proposal-accepted"${proposalAcceptedOpen ? ' open' : ''}><summary>已采纳（${accepted.length}）—— 列在待办里，改动由人来做</summary>
          ${accepted.map((p) => card(p, true)).join('')}
        </details>`
     : '';
@@ -89,6 +96,10 @@ function renderProposalReview() {
     ${acceptedHtml}`;
 
   $('#proposal-refresh')?.addEventListener('click', () => loadProposals().then(() => renderProposalReview()));
+  // 记住用户手动开合的状态（下一个 renderProposalReview 会照着它写 open）。
+  // ⚠️ 只监听 `toggle` 这一个事件、只写变量：这里**不许**再调 renderProposalReview（会自激）。
+  const accDetails = $('#proposal-review details.proposal-accepted');
+  if (accDetails) accDetails.addEventListener('toggle', () => { proposalAcceptedOpen = accDetails.open; });
   $$('#proposal-review [data-proposal]').forEach((b) => {
     b.addEventListener('click', async () => {
       const status = b.dataset.proposal;

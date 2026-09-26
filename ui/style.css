@@ -842,9 +842,17 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
   border-bottom: 0;
   position: sticky;
   top: 0;
-  /* 透明悬浮（概念版形态）：滚动时条目从头下穿过。
-     ⚠️ 这是截图复核点 —— 原型已接受的形态，若观感不对再回退成玻璃底。 */
-  background: transparent;
+  /* 🔴 2026-09-26（第二十四对话，用户截图反馈）：这里原来是 `background: transparent`
+     （"概念版形态：滚动时条目从头下穿过"），实机观感是**文字直接压在滚上来的内容上**，
+     用户点名"没有背景直接浮在上面有点不美观"。
+     ⚠️ 第一版按注释里那句"回退成玻璃底"改成了 `--pt-glass-2` + `--pt-blur-2`，
+     结果**真机（CDP）当场量出 backdrop-filter 被算成 `none`**：`.list-head` 的父级
+     `.list-pane` 自己就是 `backdrop-filter` 元素 ⇒ **父级成了 backdrop root，子元素的
+     模糊没有可采样的背景，Chromium 直接忽略它**。于是那 66% 不透明度就成了"还是一层
+     半透明薄膜"，滚上来的字照样透出来。
+     ⇒ 定稿：**实底 `--bg-2` + 一条发丝下边线**（让"顶上这一条"看起来是刻意的，不是浮着）。 */
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--pt-hairline);
   z-index: 2;
 }
 
@@ -1294,9 +1302,17 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 }
 .model-modal .usage-table td:first-child,
 .model-modal .usage-table th:first-child { max-width: 22ch; }
-.mm-prov { padding: 7px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; color: var(--muted); }
+.mm-prov { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; color: var(--muted); }
 .mm-prov:hover { background: var(--bg-3); color: var(--text); }
 .mm-prov.active { background: var(--bg-3); color: var(--accent-strong); font-weight: 600; }
+/* 行内元素：名字占满、计数靠右、删除按钮最右（2026-09-26 第二十四对话加：供应商要能删） */
+.mm-prov .mm-prov-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-prov .mm-prov-del {
+  flex: none; border: 1px solid rgba(var(--red-rgb),.5); color: var(--red); background: none;
+  border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 11px; opacity: .85;
+}
+.mm-prov .mm-prov-del:hover { background: rgba(var(--red-rgb),.12); opacity: 1; }
+.mm-prov .mm-prov-del:disabled { opacity: .4; cursor: default; }
 .mm-model { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; }
 .mm-model:hover { background: var(--bg-3); }
 .mm-model .mm-check { color: var(--accent-strong); width: 16px; }
@@ -1989,6 +2005,27 @@ details.hint-more code {
 .ub-scroll thead th {
   position: sticky; top: 0; z-index: 1; background: var(--bg-2);
 }
+
+/* ── 「没发出去的消息」横幅（2026-09-26 第二十四对话，提案 26bb79c2 的剩余部分）──
+   位置：存档页聊天详情里、工具栏与消息表之间。颜色用危险色系的低饱和底，
+   与「清空存档」那种大红色按钮区分开 —— 它是一条**提示**，不是一次破坏性操作。 */
+.send-fail-card {
+  margin: 0 0 10px;
+  border: 1px solid rgba(var(--red-rgb), .45);
+  background: rgba(var(--red-rgb), .08);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.send-fail-head { font-size: 13px; font-weight: 600; color: var(--red); }
+.send-fail-row {
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px;
+}
+.send-fail-text { font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+.send-fail-meta { font-size: 11px; color: var(--muted); word-break: break-word; }
+.send-fail-acts { display: flex; gap: 8px; }
 
 /* ── 读取历史档位：长条按钮 + 参数区 ── */
 .tier-bar {
