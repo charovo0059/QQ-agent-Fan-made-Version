@@ -976,6 +976,28 @@ function foldFootHtml(label) {
     + `<span class="chev">▴</span>收起${esc(label)}</button>`;
 }
 
+/**
+ * 一条「已发出」输出卡的 HTML（阶段 C1 的 `.pt-out` 绿色输出卡形态）。
+ *
+ * 🔴 **被去重的那条不隐藏**（决策记录 §82.1）：那句话确实在对面
+ *    （`send.dedupeWindowMs` 内刚成功发过逐字相同的文本 ⇒ 用户手上真有这句话），
+ *    藏起来会让"她说过的话"少一条 ⇒ 如实显示 + 用一行灰字标注"这次是跳过的那一遍"。
+ *    ⛔ 别改成 `if (sent.deduped) continue`：本项目一贯是"如实显示"，不是"看起来干净"。
+ * 🔴 平台要从**这条会话的 chatKey** 查（列表接口不带 source）—— 这里原来写死「已发送到 QQ」，
+ *    微信的回复也显示成 QQ，用户一眼就发现"它不知道自己在微信"。
+ *
+ * 抽成纯函数是为了让判据能**抠进沙箱真跑**（正文必须转义 / 灰字只在被去重时出现），
+ * 理由同 `09-memory-dreams.js` 的 `recallPreviewHtml`；调用点在 `renderSessionDetail`。
+ */
+function sentOutCardHtml(sent, plat) {
+  const skipped = sent.deduped ? '<span class="muted">（与刚发过的内容相同，已跳过）</span>' : '';
+  return `
+        <div class="pt-out">
+          <div class="pt-out-head"><span class="who">已发送到 ${plat}</span>${sent.at ? `<span class="muted">${esc(sent.at)}</span>` : ''}${skipped}</div>
+          <p>${esc(sent.text)}</p>
+        </div>`;
+}
+
 function renderSessionDetail(s) {
   const detail = $('#session-detail');
   if (!detail) return;
@@ -1113,15 +1135,9 @@ function renderSessionDetail(s) {
     }
     // 发出的消息
     for (const sent of s.sent || []) {
-      // 🔴 这里原来写死「已发送到 QQ」—— 微信的回复也显示成 QQ，用户一眼就发现"它不知道自己在微信"。
-      //    平台要从**这条会话的 chatKey** 查（列表接口不带 source）。
+      // 平台从这条会话的 chatKey 查；被去重那条的标注在纯函数里（见 sentOutCardHtml）
       const plat = sessionPlatform({ chatKey: s.chatKey }) === 'wechat' ? '微信' : 'QQ';
-      // 阶段 C1：`.sent-badge` → `.pt-out` 绿色输出卡（概念版形态）
-      html.push(`
-        <div class="pt-out">
-          <div class="pt-out-head"><span class="who">已发送到 ${plat}</span>${sent.at ? `<span class="muted">${esc(sent.at)}</span>` : ''}</div>
-          <p>${esc(sent.text)}</p>
-        </div>`);
+      html.push(sentOutCardHtml(sent, plat));
     }
   }
   if (s.error) html.push(`<div class="session-error">${esc(s.error)}</div>`);

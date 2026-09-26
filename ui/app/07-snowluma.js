@@ -1,6 +1,32 @@
 'use strict';
 // 第 8/18 段：07-snowluma（拆自 ui/app.js，2026-09-25 第十七对话；加载顺序见 ui/index.html）
 
+/**
+ * 三步引导的**第一句**：按 `hookAutoLoad` 的**实际值**说人话；`''` = 不用提示。
+ *
+ * 🔴 为什么要说这一句（2026-09-26 第二十三对话 · 交接 §3 待办 27 / 决策记录 §82.3）：
+ *    `hookAutoLoad`（"发现 QQ 进程就自动注入"）**不随我们的仓库走** ——
+ *    `snowluma/config/` 在 `.gitignore` 里 ⇒ 换机器/重装后它可能变回默认，而症状是
+ *    "**应用起来了、WebUI 也在、就是连不上**"（`/api/status` 给
+ *    `snowluma.lastError = ECONNREFUSED 127.0.0.1:3001` + `injected=false`）。
+ *    以前这件事只写在文档里、靠人记；现在界面自己在"重启后不会自动注入"时说出来。
+ *
+ * ⚠️ **三种取值说三句不同的话**，⛔ 不许把 `null`（读不到）说成 `false`（明确关掉了）：
+ *    · `true`  → 不提（自动注入开着，提了只是吵）
+ *    · `false` → "重启后**不会**自动注入（hookAutoLoad=false）"
+ *    · `null`  → "**读不到** hookAutoLoad…无法确认重启后会不会自动注入"
+ *    `injected === true`（已经连通）时一律不提。
+ * 抽成纯函数是为了判据能**抠进沙箱真跑**（三种取值各说各的话、且不许混口径）。
+ */
+function hookAutoLoadHint(hookAutoLoad, injected) {
+  if (injected) return '';                 // 已经连通了，不用再提
+  if (hookAutoLoad === true) return '';    // 开着，不提
+  if (hookAutoLoad === false) {
+    return '⚠️ 重启后不会自动注入（hookAutoLoad=false）—— 跑一次 node 工具-运维\\开-SnowLuma自动注入.mjs 即可一劳永逸。';
+  }
+  return '⚠️ 读不到 hookAutoLoad（snowluma/config/runtime.json）—— 无法确认重启后会不会自动注入；跑一次 node 工具-运维\\开-SnowLuma自动注入.mjs 即可一劳永逸。';
+}
+
 // ── SnowLuma 独立页签 ──
 /**
  * 只刷新 SnowLuma 的日志区（不重建整个页面）。
@@ -130,6 +156,8 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     const slWebui = !!s.snowluma?.webuiUp;
     const slInjected = !!s.snowluma?.injected;
     const slEverInjected = !!s.snowluma?.everInjected;
+    // 🆕 待办 27：`true` / `false` / `null`（读不到）——**三态**，别把 null 当 false 用。
+    const slHookAutoLoad = s.snowluma?.hookAutoLoad;
     // 三步的状态：已注入 ⇒ 三步全绿；否则逐级判断"卡在哪一步"
     const stepState = (n) => {
       if (slInjected) return 'done';
@@ -168,7 +196,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
         </div>
 
         <div class="pt-sec">连接引导 <span class="muted" style="font-weight:400">按顺序完成三步即可连通</span></div>
-        ${hintLine('三步走完就能连通；第 3 步在 WebUI 的「进程」页里做。',
+        ${hintLine(hookAutoLoadHint(slHookAutoLoad, slInjected) || '三步走完就能连通；第 3 步在 WebUI 的「进程」页里做。',
           '第 1 步：启动本地 SnowLuma 网关进程，首次启动会生成初始访问密码（只出现一次，应用抓到后会显示在下面）。'
           + '第 2 步：用访问密码登录 WebUI —— 登录发生在浏览器里，应用看不到，所以这一步是否完成要靠你自己确认。'
           + '第 3 步：在 WebUI 的「进程」页选中那个已经登录好的 QQ 进程并点注入；注入成功后本节自动变绿，不用重启。'
