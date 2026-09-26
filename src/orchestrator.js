@@ -765,6 +765,12 @@ export class Orchestrator {
       stickers: this.stickers,
       sender: this.sender,
       session,
+      // 她自己的「用量 / 花费」自检（2026-09-26 第二十四对话，提案 f789b40e）用。
+      // ⚠️ 这里传的是**绑定的函数**，不是整个 SessionRegistry：
+      //    ① 暴露面最小 —— 工具只能读"今天用了多少"，碰不到会话/存档的任何写入口；
+      //    ② `/api/status` 用的是同一个 `todayUsage` ⇒ **口径只有一份**，
+      //       不会出现"控制台一个数、她嘴里另一个数"（本项目对"两套口径"栽过跟头）。
+      usageToday: (dayKey) => this.sessions.todayUsage(dayKey),
       triggerEntries,                   // 提示词要用它排除重复（【过去状态】不该再带这几条）
       sameTurnContext,                  // 同一轮的上文（见 wake() 里的说明）
       emit: (type, payload) => this.emit(type, payload)

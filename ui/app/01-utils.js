@@ -41,6 +41,8 @@ const TOOL_META = {
   get_message_detail:  { name: '看消息详情', cat: '查看', icon: '🔍' },
   get_message_images:  { name: '看图片',     cat: '查看', icon: '🖼️' },
   get_active_members:  { name: '看活跃群友', cat: '查看', icon: '👥' },
+  // 🆕 2026-09-26 第二十四对话（提案 f789b40e）：她自己的用量/花费自检（默认关，开关在用量页）
+  get_my_usage:        { name: '查自己用量', cat: '查看', icon: '📊' },
   // 表情包
   list_stickers:     { name: '列表情库',   cat: '表情',   icon: '📚' },
   get_sticker_image: { name: '看表情图',   cat: '表情',   icon: '🖼️' },
