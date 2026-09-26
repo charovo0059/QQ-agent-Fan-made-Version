@@ -464,7 +464,13 @@ function participationText(level) {
 function formatEntry(m, { withId = true } = {}) {
   const notes = getConfig().memberNotes || {};
   const senderId = String(m.senderId || '');
-  const who = m.self ? '我' : (notes[senderId] || m.senderName || senderId || '未知');
+  // ⚠️ 管理端代发的那条**必须**标出来（2026-09-26 第二十四对话，提案 57e7ab37）：
+  //    她原来无从分辨"这句是我说的"还是"管理端拿我的名义发的"，
+  //    在别的群里被认成别的鱼也只能认。标记写成"我（管理员代发）"——
+  //    **自带解释**，不必再往系统提示里加一段（那会碰系统提示哈希判据，见 §系统提示那两处测试）。
+  const who = m.self
+    ? (m.origin === 'admin' ? '我（管理员代发）' : '我')
+    : (notes[senderId] || m.senderName || senderId || '未知');
   const replyPrefix = m.reply?.text || m.reply?.sender ? `[引用 ${[m.reply?.sender, m.reply?.text].filter(Boolean).join('：')}]` : '';
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
@@ -828,6 +834,19 @@ export function buildUserPrompt(ctx) {
 
   // ④ 此刻状态（档位/活跃度，每次运行都可能不同）
   const stateLines = [];
+  // 【我跑在哪】（2026-09-26 第二十四对话，提案 d809db39）：
+  // 她的原话是「换模型的时候……我一点感觉都没有，跟睡醒发现身体被换过似的」。
+  // 放在【此刻状态】而不是系统提示：① 这一段每次都变，加一行不动上面稳定块的缓存顺序；
+  // ② 它是"这一轮的事实"，写进系统提示会变成永久约束（同 openerHint 的那条理由）。
+  // 只在**真的换了**的时候多说半句 —— 每轮都念一遍"和上次一样"纯属浪费 token。
+  const rm = ctx.runtimeModel;
+  if (rm && (rm.vendor || rm.model)) {
+    const onNow = [rm.vendor, rm.model].filter(Boolean).join(' ／ ');
+    const changed = !!rm.previous && !!rm.model && rm.previous !== rm.model;
+    stateLines.push(changed
+      ? `🔁 你这一轮跑在「${onNow}」；上一次是「${rm.previous}」—— 中间换过模型/渠道，回话的手感可能和之前不一样，这是正常的。`
+      : `你这一轮跑在「${onNow}」。`);
+  }
   if (ctx.kind === 'group') {
     stateLines.push(`当前在群聊「${ctx.chatName || ctx.chatId}」，你在群里的名字是「${ctx.selfNickname || cfg.persona.botName}」`);
   } else {
@@ -879,7 +898,7 @@ export function buildUserPrompt(ctx) {
 
   // ⑤ 过去状态（每次运行都不同：窗口随档位和新消息变）
   const pastBlock = past.text
-    ? `【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${past.text}`
+    ? `【过去状态】以下是这个会话最近的聊天记录（按时间排序，你的发言标为"我"；**管理端替你代发的会标成"我（管理员代发）"——那句不是你按的发送键**；这些都已经看过；带图的消息前有 #消息id，看图/收藏表情工具要用它）：\n${past.text}`
     : (past.skipped
       ? '【过去状态】（本次档位设定为不带历史，只处理【本次唤醒】里的消息；需要翻历史可以用 get_recent_messages）'
       : '【过去状态】（暂无历史记录，这是你第一次参与这个会话）');

@@ -694,11 +694,24 @@ export class Orchestrator {
     // 组装提示词（无 LLM 历史）
     // skillContext 一并传下去：技能据此决定要不要出提示词片段（prompt.js:renderSkillSections）
     const systemPrompt = buildSystemPrompt({ platform, skillContext });
+    // 【我跑在哪】（2026-09-26 第二十四对话，提案 d809db39）：
+    // 她换模型/渠道时**完全无感**（"跟睡醒发现身体被换过似的"）。这里把"这一轮跑在哪"
+    // 连同"上一次是什么"一起交给 prompt，由它折进【此刻状态】。
+    // ⚠️ 上一轮从**会话索引**里取（它记着每一轮的 model），不是从当前配置倒推 ——
+    //    倒推拿不到"刚才用的是谁"，而那正是她想知道的东西。
+    const prevRun = this.sessions.listSummaries(50)
+      .find((s) => s.chatKey === chatKey && s.id !== session.id && s.model);
+    const runtimeModel = {
+      vendor: vendorOfConfig(cfg) || '',
+      model: String(cfg.api?.model || ''),
+      previous: prevRun ? String(prevRun.model || '') : ''
+    };
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
       // 平台一并传下去：记忆互通要在提示词里标出"这条来自哪个平台"（QQ↔微信）。
       // 不传的话 formatForPrompt 会自己去问 memory.platformOf（有缓存），只是多一次查找。
       platform,
+      runtimeModel,
       triggerEntries,
       store: this.store,
       memory: this.memory,

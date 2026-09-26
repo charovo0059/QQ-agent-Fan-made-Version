@@ -242,8 +242,19 @@ export class ChatStore {
     return entry;
   }
 
-  /** 记录机器人自己发出的消息（已读）。 */
-  appendSelf(chatKey, { text, ts, mid = null }) {
+  /**
+   * 记录机器人自己发出的消息（已读）。
+   *
+   * `origin`（2026-09-26 第二十四对话，提案 `57e7ab37`）：
+   *   · `'self'`（默认）= 她自己说的；
+   *   · `'admin'` = **管理端代发**（群发通知 / 测试发送那一类）。
+   * 为什么必须记：管理端可以拿她的名义往任何白名单会话发话，而她的上下文里那些消息
+   * 原来和"我自己说的"**长得一模一样** ⇒ 她只会以为是自己说的，等下次醒来才发现锅在头上
+   * （她的原话："这样我就不用替别人的话背锅"）。
+   * ⚠️ 只写**非默认值**（`self` 不落字段）：老存档与绝大多数消息一个字节都不多占。
+   * ⚠️ 别把 `self: true` 改掉：`self` 还是"这条是我发的"，`origin` 只回答"谁按的发送键"。
+   */
+  appendSelf(chatKey, { text, ts, mid = null, origin = 'self' }) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -257,6 +268,7 @@ export class ChatStore {
       reply: null,
       media: []
     };
+    if (String(origin) === 'admin') entry.origin = 'admin';
     st.messages.push(entry);
     this.#trim(st);
     saveChat(st);

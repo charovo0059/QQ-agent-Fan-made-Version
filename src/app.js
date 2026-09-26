@@ -44,7 +44,10 @@ import { skillManager } from './skills/manager.js';
 import { setSkillEnabled, setSkillConfig, listConfiguredSkillIds } from './skills/config.js';
 // 改进提案队列（2026-09-19 第七对话）：只读 + 标记，**没有执行路径**，见 proposals.js 顶部。
 import { listProposals, reviewProposal } from './proposals.js';
-import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider } from './providers.js';
+import { importFromDsh, currentProviders, setProviderKey, testAllProviders, testOneProvider, testModelChat, fetchModelsFrom, upsertProvider, addModelsToProvider, removeModelFromProvider, removeProvider } from './providers.js';
+// 「没发出去的消息」登记表（2026-09-26 第二十四对话，提案 26bb79c2 的剩余部分）：
+// 失败的那条**不进存档**（sender 只在成功后 appendSelf）⇒ 管理端原来根本看不到。
+import { recordFailure, listFailures, getFailure, removeFailure, clearFailures } from './send-failures.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey } from './util.js';
@@ -741,8 +744,19 @@ export function createApp({ log = console.log } = {}) {
     registry: platformClients,
     sourceOf: (chatKey) => store.chatSource(chatKey),
     onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
-    // 发送被拒 ⇒ 若像是"群发言被拒"，先按禁言记下来（兜底，不依赖任何事件转发）
-    onSendError: ({ chatKey, error }) => {
+    // 发送被拒 ⇒ ① 若像是"群发言被拒"，先按禁言记下来（兜底，不依赖任何事件转发）；
+    //            ② 🆕 2026-09-26（第二十四对话，提案 26bb79c2 的剩余部分）**把这条没发出去的话记下来**，
+    //               让管理端看得见、能人工重发。
+    //               为什么必须记：`sender` 只在**成功之后**才 appendSelf ⇒ 失败那条在存档里
+    //               根本没有记录，管理端只会看到"她说完了、对面没收到"（微信侧"读不回"正是这一类）。
+    //               ⚠️ 只记事、**不自动重发**（"读不回"可能是落库慢的假阴性，自动重发会把话说两遍）。
+    onSendError: ({ chatKey, text, error }) => {
+      try {
+        recordFailure({ chatKey, text, error, at: Date.now() });
+        emit('status', { sendFailuresUpdated: true });
+      } catch (e) {
+        log(`[发送失败登记] 记不下来（不影响发送本身）：${e?.message ?? e}`);
+      }
       if (!String(chatKey).startsWith('group:')) return;
       if (mutes.recordFromSendError(chatKey, error)) {
         log(`[禁言] ${chatKey} 发送被拒，按禁言处理：${mutes.describe(chatKey)}`);
@@ -2117,7 +2131,9 @@ export function createApp({ log = console.log } = {}) {
           // 每个会话各自的发送链是独立的，所以并行发；会话内仍然是串行 + 真人化间隔
           const results = await Promise.all(keys.map(async (chatKey) => {
             try {
-              const r = await sender.sendTextBatch(chatKey, text);
+              // origin:'admin' ⇒ 她看上下文时这条会标成「我（管理员代发）」，不必替这句话背锅
+              // （2026-09-26 第二十四对话，提案 57e7ab37）
+              const r = await sender.sendTextBatch(chatKey, text, { origin: 'admin' });
               return { chatKey, ok: true, messageId: r?.sent?.[0]?.messageId ?? null };
             } catch (error) {
               return { chatKey, ok: false, error: String(error?.message ?? error) };
@@ -2136,6 +2152,48 @@ export function createApp({ log = console.log } = {}) {
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
         }
+      }
+
+      // ── 没发出去的消息（2026-09-26 第二十四对话，提案 26bb79c2 的剩余部分）──────────
+      // 她的原提案：「投递失败时在管理端给出可见的失败标记，最好支持重发。」
+      // 为什么原来做不到：`sender` **只在发送成功之后**才 appendSelf ⇒ 失败那条在存档里
+      // 根本没有记录，管理端只会看到"她说完了、对面没收到"。
+      // 这里只给"看得见 + 人工点一下"：⛔ **没有任何自动重发**（见下面 retry 的注释）。
+      if (pathname === '/api/send-failures' && method === 'GET') {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        return json(res, 200, { ok: true, items: listFailures(String(u.searchParams.get('chatKey') || '')) });
+      }
+      if (pathname === '/api/send-failures/retry' && method === 'POST') {
+        const body = await readBody(req);
+        const item = getFailure(String(body?.id ?? ''));
+        if (!item) return json(res, 404, { ok: false, error: '这条失败记录已经不在了（可能已经被重发或忽略）' });
+        try {
+          // 🔴 重发是**人点的那一下**，所以不做"自动判断要不要重发"：
+          //    微信侧「读不回」有可能是落库慢造成的**假阴性**（那条其实已经到了），
+          //    自动重发会把同一句话说两遍 —— 21 棒当初就是为这个才选了"只报不重发"。
+          //    控制台会把原文与错因摆出来，由人判断；这条路径只负责"照原样再发一次"。
+          const r = await sender.sendTextBatch(item.chatKey, item.text, { origin: 'admin' });
+          removeFailure(item.id);
+          emit('status', { sendFailuresUpdated: true });
+          emit('chat-update', item.chatKey);
+          return json(res, 200, { ok: true, messageId: r?.sent?.[0]?.messageId ?? null, deduped: !!r?.sent?.[0]?.deduped });
+        } catch (error) {
+          // 还是发不出去：**保留**记录（⛔ 别删，那等于把证据丢了），只把最新的错因回给界面
+          const again = recordFailure({ chatKey: item.chatKey, text: item.text, error: String(error?.message ?? error), at: Date.now() });
+          return json(res, 200, { ok: false, error: String(error?.message ?? error), item: again });
+        }
+      }
+      if (pathname === '/api/send-failures/dismiss' && method === 'POST') {
+        const body = await readBody(req);
+        const removed = removeFailure(String(body?.id ?? ''));
+        emit('status', { sendFailuresUpdated: true });
+        return json(res, 200, { ok: true, removed: removed ? 1 : 0 });
+      }
+      if (pathname === '/api/send-failures/clear' && method === 'POST') {
+        const body = await readBody(req);
+        const removed = clearFailures(String(body?.chatKey ?? ''));
+        emit('status', { sendFailuresUpdated: true });
+        return json(res, 200, { ok: true, removed });
       }
 
       if (pathname === '/api/persona-templates' && method === 'GET') {
@@ -2522,6 +2580,18 @@ export function createApp({ log = console.log } = {}) {
             models: body.models || []
           });
           return json(res, 200, { ok: true, ...r, provider: sanitizeProvider(r.provider) });
+        } catch (error) {
+          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+        }
+      }
+
+      // 删掉整个提供商（2026-09-26 第二十四对话，用户截图反馈：模型删得掉、供应商删不掉会一直占位）
+      if (pathname === '/api/providers' && method === 'DELETE') {
+        try {
+          const body = await readBody(req);
+          const p = removeProvider(String(body.providerId ?? ''));
+          if (!p) return json(res, 404, { ok: false, error: '提供商不存在' });
+          return json(res, 200, { ok: true, removed: sanitizeProvider(p), providers: currentProviders().map(sanitizeProvider) });
         } catch (error) {
           return json(res, 400, { ok: false, error: String(error?.message ?? error) });
         }
@@ -3706,7 +3776,8 @@ export function createApp({ log = console.log } = {}) {
         try {
           const chatKey = `${chatTestSendMatch[1]}:${chatTestSendMatch[2]}`;
           const data = await onebot.sendText(chatTestSendMatch[1], chatTestSendMatch[2], text);
-          store.appendSelf(chatKey, { text, ts: Date.now() });
+          // 管理端手动发的测试消息同样是"管理端代发"（2026-09-26 第二十四对话，提案 57e7ab37）
+          store.appendSelf(chatKey, { text, ts: Date.now(), origin: 'admin' });
           emit('chat-update', chatKey);
           return json(res, 200, { ok: true, messageId: data?.message_id ?? null });
         } catch (error) {
