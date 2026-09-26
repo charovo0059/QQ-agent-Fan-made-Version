@@ -265,6 +265,179 @@ export class OneBotClient {
   }
 }
 
+// ── 卡片 / 富文本段 → 可读文字（2026-09-26 第二十五对话，提案 32bd8267）────────
+//
+// 她的原话：「现在收到卡片消息时只能看到一个空壳占位符，完全不知道里面是什么内容
+// （比如群聊邀请的群名、分享的链接标题、转发的摘要等），只能让对方再打字说一遍……
+// 希望能像合并转发一样，给卡片消息一个展开的方式：**要么直接展示卡片里的文字信息
+// （标题、描述、来源）**，要么提供一个工具让我能读取卡片内容。」
+//
+// ⇒ 选的是**前一半**（直接展示）：卡片的内容在**入站那一刻就在手上**（`json` 段的
+//    `data.data` 就是一个 JSON 字符串），不像合并转发那样需要事后拿 res_id 去换
+//    （那个 id 会过期、message_id 还可能为负，见 fetchForward 的注释）。
+//    ⇒ 入站时解析成文字写进那条消息的 text：**一处解析，过去状态 / 本次唤醒 / 引用原文
+//    / 合并转发展开四处同时都有了**，不用加工具、不用动存档结构、老存档也不受影响。
+//
+// 真实形状（**不是猜的**：从 SnowLuma 的 messages.db 里 472 条真卡片统计出来的，
+// 2026-09-26 实测 —— `com.tencent.music.lua` 236 条 / `miniapp_01` 171 / `tuwen.lua` 28 /
+// `feed.lua` 21 / `gamecenter.mall` 5 / `mannounce` 5 / `activity.md` 4 / `miniapp.lua` 1 /
+// `contact.lua` 1）：
+//   `{"app":"com.tencent.music.lua","prompt":"[分享]遇见","view":"music",`
+//   ` "meta":{"music":{"title":"遇见","desc":"船长—每晚8点弹唱直播","tag":"网易云音乐",`
+//   `                 "jumpUrl":"https://music.163.com/#/song?id=..."}}}`
+// ⇒ **字段名各家不同**（title / desc / tag / tagName / nickname / contentText / actTitle /
+//    contact / qqdocurl / pcJumpUrl / legacyUrl…），所以这里**按 meta 下每个子对象当"视图"
+//    依次找**，而不是给每个 app 写一套映射表（映射表会随 QQ 改版过期，而且过期时是静默失效）。
+//
+// ⚠️ 安全：卡片正文是**对方可控的文本**，会进她的上下文。两道处理：
+//    ① 一律 `oneLine()` 压成单行（换行/制表/连续空白全折叠）⇒ 注入不进"新的一行"，
+//       伪造不了提示词块；
+//    ② 出口仍然走 `sanitizeUserText()`（segmentsToText 最后那一步会做），
+//       `[本次唤醒]` 这类标记会被弱化 —— 与普通群消息同一套待遇，没有开新口子。
+
+/** 压成单行 + 截断（卡片正文一律走它，见上面 ⚠️ 第 ① 条）。 */
+function oneLine(s, max) {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/** 已知的卡片 app → 人话。认不出就空串（⛔ 不编一个假的类型）。 */
+const CARD_APP_KINDS = [
+  [/^com\.tencent\.music/, '音乐分享'],
+  [/^com\.tencent\.qun\.invite/, '群聊邀请'],
+  [/^com\.tencent\.(miniapp|miniapp_01|miniapp\.lua)/, '小程序'],
+  [/^com\.tencent\.(tuwen|news)/, '图文分享'],
+  [/^com\.tencent\.feed/, '动态分享'],
+  [/^com\.tencent\.contact/, '名片分享'],
+  [/^com\.tencent\.mannounce/, '群公告'],
+  [/^com\.tencent\.activity/, '活动分享'],
+  [/^com\.tencent\.gamecenter/, '游戏中心'],
+  [/^com\.tencent\.structmsg/, '分享']
+];
+
+export function cardKindOf(app) {
+  const a = String(app ?? '').trim().toLowerCase();
+  for (const [re, label] of CARD_APP_KINDS) if (re.test(a)) return label;
+  return '';
+}
+
+/** base64 解一段文本（QQ 的群公告卡片把 title/text 编码成 base64，见 `encode:'1'`）。 */
+function b64Text(v) {
+  try {
+    const s = String(v ?? '').replace(/-/g, '+').replace(/_/g, '/');
+    const out = Buffer.from(s, 'base64').toString('utf8');
+    // 解出来必须是"看得懂的文本"：全是替换符/控制字符就当没解开（⛔ 别把乱码喂给她）
+    return /[\uFFFD]/.test(out) || !out.trim() ? '' : out;
+  } catch { return '' }
+}
+
+/**
+ * 解析一张卡片（`json` 段的 data，或其内部那个 JSON 字符串）。
+ * @returns {{kind,title,desc,tag,url,prompt}|null} 解析不出任何可读内容 → null
+ */
+export function summarizeCard(raw) {
+  let obj = raw;
+  if (typeof obj === 'string') {
+    try { obj = JSON.parse(obj) } catch { return null }
+  }
+  // 段里的形状是 `{ data: "<json 字符串>" }`；再往里一层才是卡片本体。
+  if (obj && typeof obj === 'object' && typeof obj.data === 'string') {
+    try {
+      const inner = JSON.parse(obj.data);
+      if (inner && typeof inner === 'object') obj = inner;
+    } catch { /* 不是 JSON 字符串就按原对象继续（有些实现直接把对象放这儿） */ }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+
+  const views = [];
+  const meta = obj.meta;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    for (const v of Object.values(meta)) if (v && typeof v === 'object' && !Array.isArray(v)) views.push(v);
+  }
+  views.push(obj); // 兜底：有的卡片字段直接挂顶层
+  const byKey = (k) => {
+    for (const v of views) {
+      const x = v[k];
+      if (typeof x === 'string' && x.trim()) return x.trim();
+    }
+    return '';
+  };
+  const firstOf = (keys) => {
+    for (const k of keys) {
+      const v = byKey(k);
+      if (v) return v;
+    }
+    return '';
+  };
+  // 群公告：encode='1' 时 title/text 是 base64（不解码就会把 `576k5YWs5ZGK` 当标题喂给她）。
+  // ⚠️ 这个标记实测**长在视图对象里**（`meta.mannounce.encode`），不在卡片顶层 ⇒ 两处都看。
+  //    顶层那个 `prompt` 反而是明文（`[群公告]QQ-Agent V0.4 preview已上传…`），不要解它。
+  const encoded = String(obj.encode ?? '') === '1' || views.some((v) => String(v.encode ?? '') === '1');
+  const dec = (s) => (encoded ? (b64Text(s) || s) : s);
+  const title = dec(firstOf(['title', 'actTitle', 'nickname']));
+  const desc = dec(firstOf(['desc', 'contentText', 'text', 'contact', 'forwardMessage']));
+  const tag = firstOf(['tag', 'tagName', 'source']);
+  // 链接**优先给 http(s) 的**（她手里有 web_fetch，这种才打得开）。
+  // 实测同一个 app 里几种链接混着：`miniapp_01` 的 `url` 是 `m.q.qq.com/a/s/…`（无协议、点不开），
+  // 而同一条的 `qqdocurl` 是 https；`feed` 的 `jumpUrl` 是 `mqzone://…`，
+  // 同一条的 `legacyUrl`/`pcJumpUrl` 才是 https。⇒ 先按"能不能打开"选，全都不行才退回原样。
+  const URL_KEYS = ['qqdocurl', 'jumpUrl', 'pcJumpUrl', 'legacyUrl', 'url'];
+  const url = URL_KEYS.map(byKey).find((u) => /^https?:\/\//i.test(u)) || firstOf(URL_KEYS);
+  const prompt = oneLine(obj.prompt, 80);
+  if (!title && !desc && !prompt) return null;
+  return { kind: cardKindOf(obj.app), title, desc, tag, url, prompt };
+}
+
+/** `json` 段 → `[卡片消息：类型｜标题｜描述｜来源：X｜链接]`（解析不出 → ''）。 */
+export function cardSegmentText(d) {
+  const c = summarizeCard(d?.data ?? d);
+  if (!c) return '';
+  const bits = [];
+  if (c.kind) bits.push(c.kind);
+  const head = c.title || c.prompt;
+  if (head) bits.push(oneLine(head, 80));
+  // prompt 与 title 常常是同一件事（`prompt` 就是 `[分享]<title>`）⇒ 只在没标题时用它
+  if (c.desc) bits.push(oneLine(c.desc, 120));
+  if (c.tag) bits.push(`来源：${oneLine(c.tag, 40)}`);
+  if (c.url) bits.push(oneLine(c.url, 200));
+  if (!bits.length) return '';
+  return `[卡片消息：${oneLine(bits.join('｜'), 320)}]`;
+}
+
+/**
+ * `markdown` 段（QQ 官方机器人的图文消息）→ 纯文本。
+ *
+ * 实测（同一个 db）：这类消息在我们这边以前**只存下 `[markdown][inline_keyboard]`
+ * 两个占位符**（247 条），正文全丢 —— 与卡片是同一个病。
+ * 正文形如 `[](%7B%22version%22%3A2%7D)\n### ![图片 #140px](https://…)\n> 正位：…`。
+ */
+export function markdownSegmentText(content) {
+  let s = String(content ?? '');
+  if (!s.trim()) return '';
+  s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, (_m, alt) => (alt && !/^图片/.test(alt) ? `[图片：${oneLine(alt, 20)}]` : '[图片]'));
+  s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1'); // 链接只留文字（url 又长又没用）
+  s = s.replace(/^[ \t]*#{1,6}[ \t]*/gm, '');
+  s = s.replace(/^[ \t]*>[ \t]?/gm, '');
+  s = s.replace(/[*_`~]/g, '');
+  const body = oneLine(s, 240);
+  return body ? `[卡片消息（图文）]${body}` : '';
+}
+
+/** `inline_keyboard` 段 → 有哪些按钮（她想知道"这东西能点/能回什么"）。 */
+export function keyboardSegmentText(d) {
+  const labels = [];
+  for (const row of d?.rows ?? []) {
+    for (const b of row?.buttons ?? []) {
+      const l = oneLine(b?.label ?? b?.visited_label, 20);
+      if (l && !labels.includes(l)) labels.push(l);
+      if (labels.length >= 6) break;
+    }
+    if (labels.length >= 6) break;
+  }
+  return labels.length ? `[按钮：${labels.join(' / ')}]` : '[按钮]';
+}
+
 // ── 入站事件 → 文本（移植自原版 segmentsToText） ─────────────────────────
 
 export function forwardIdFromData(d) {
@@ -360,7 +533,14 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
         out.push(replyText || '[引用消息]');
         break;
       }
-      case 'json': out.push('[卡片消息]'); break;
+      // 卡片消息：能看到内容了（2026-09-26 第二十五对话，提案 32bd8267）。
+      // ⚠️ 解析不出时**保留原来的占位符**（如实说"这是个卡片、但读不出内容"，
+      //    比编一个空标题好，也比整条消息消失好）。
+      case 'json': out.push(cardSegmentText(d) || '[卡片消息]'); break;
+      // QQ 官方机器人的图文消息（markdown + 按钮成对出现，实测 247 组）。
+      // 空正文时退回占位符 —— 段存在就说明"对方发了个富文本"，别让整条消息消失。
+      case 'markdown': out.push(markdownSegmentText(d?.content) || '[卡片消息]'); break;
+      case 'inline_keyboard': out.push(keyboardSegmentText(d)); break;
       case 'forward': {
         // 不带 res_id：那个 id 会过期（payload is empty），打出来只会误导模型拿它当参数。
         // 模型要看内容用 read_forward 工具 + 消息前的 #数字。

@@ -22,6 +22,10 @@ import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLID
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
 import { formatFullTime, formatShortTime } from './util.js';
 import { buildStickerContext, buildStickerStrategyHint } from './stickers.js';
+// 中文 2 字滑窗取词（记忆召回用的同一个函数，见里面的长注释）。
+// 反锚点（提案 a5fbf828）**复用它**而不是再写一份分词：同一份"什么叫一个词"的口径
+// 两处不一致时，最难查的就是"记忆那边认得、反锚点这边不认得"这一类。
+import { extractKeywords } from './memory.js';
 // 技能提示词片段（Skill 的 prompt.sections + 动态 promptSections()）。
 // 单例，与 tool-registry / plugin-loader 共用同一份 Skill 状态。
 import { skillManager } from './skills/manager.js';
@@ -272,7 +276,7 @@ function qqSceneRules(platform) {
   // ⚠️ 这句**不需要**平台分支：本函数对微信在开头就 `return wechatSceneRules()` 了，
   //    走不到这里。上一版我在这儿写了 `wx ? … : …`，而 `wx` 只存在于 toolProtocol 的作用域里
   //    ⇒ 一跑就 ReferenceError（被 test-提示词平台感知.mjs 当场抓到）。
-  lines.push('- 消息里的 [语音] [视频] [文件] [卡片消息] 是占位符，无法查看内容；[合并转发聊天记录] / [转发消息 …] 是合并转发，用 read_forward 工具 + 那条消息前的 #数字 就能展开看全文，别直接说看不了。');
+  lines.push('- 消息里的 [语音] [视频] [文件] 是占位符，无法查看内容；[卡片消息：…] / [卡片消息（图文）] / [按钮：…] 是对方发来的卡片、小程序或分享，方括号里已经写好了它的类型、标题、描述和来源，直接按内容回应就行；[合并转发聊天记录] / [转发消息 …] 是合并转发，用 read_forward 工具 + 那条消息前的 #数字 就能展开看全文，别直接说看不了。');
   // 本子查询（JM 直连 + NH 离线兜底）那 3 条说明已搬到
   // skills/doujin-lookup/index.js 的 promptSections()：工具被 gateToolDefs 拿掉之后，
   // 提示词里就**不能**再提它（否则模型会去调一个不存在的工具），所以片段必须和工具集
@@ -754,6 +758,179 @@ export function recentSelfOpeners(selfMessages, { scan = 24, minCount = 3, maxRe
 }
 
 /**
+ * 反锚点用的**虚词表**：这些词被反复提到也不值得提醒（"今天"说了 8 遍不是锚点，是日常）。
+ *
+ * ⚠️ 与 memory.js 的 `CJK_STOP_CHARS` **不是一回事**，刻意不合并：
+ *    那边是"两个字都是虚词才丢"的**字符集**（服务于记忆召回的**命中率**，宁可多留）；
+ *    这边是"整个词都是废话"的**词表**（服务于反锚点的**信噪比**，宁可多丢）。
+ *    合并会让其中一边的口径被另一边绑架 —— 而"追一个词到底算不算被过滤"是最难查的那类问题。
+ * ⚠️ 这张表只在这一处生效，改它不会动记忆召回。
+ */
+const ANCHOR_FILLER = new Set([
+  '今天', '明天', '昨天', '现在', '刚才', '一会儿', '时候', '一直', '已经', '一下', '一点',
+  '什么', '怎么', '为什么', '这个', '那个', '这样', '那样', '一样', '一个',
+  '我们', '你们', '他们', '大家', '自己', '起来', '出来', '过来',
+  '可以', '就是', '不是', '没有', '还是', '然后', '因为', '所以', '但是', '如果',
+  '觉得', '感觉', '有点', '真的', '好像', '应该', '知道', '看到', '听到',
+  '好的', '是的', '好吧', '行吧', '算了', '对了', '哈哈', '谢谢'
+]);
+
+/**
+ * 把一条消息里**不是"人说的话"**的那些标记抠掉，再拿去取词。
+ *
+ * 🔴 为什么必须有这一步（2026-09-26 实测，线上 14826 个真窗口扫出来的）：
+ *    不加它时，触发最多的"词"是 `图片`（来自 `[图片]` 占位符）、`别人`（来自
+ *    `@某人（在叫别人）` 这个**入库标记**）、还有她自己的名字。
+ *    ⇒ 提醒会写成「「图片」被反复提到 15 次」这种废话 —— 功能等于自毁。
+ *    ⇒ 占位符是**我们写进 text 的**（见 onebot.js 的 segmentsToText），不是群友说的话，
+ *      取词之前就该拿掉。
+ *
+ * ⚠️ 刻意**只抠已知的那批占位符/标记**，不抠"所有方括号"：群友真会打 `[doge]` 这种，
+ *    一刀切会把真人说的话也吃掉（而且那种词本来也不会成为锚点）。
+ */
+const PLACEHOLDER_RE = /\[(?:图片|语音|视频|表情[^\]]*|文件[^\]]*|卡片消息[^\]]*|按钮[^\]]*|合并转发[^\]]*|转发消息[^\]]*|引用[^\]]*|拍一拍[^\]]*|未知类型|markdown|inline_keyboard)\]/g;
+// ⚠️ 带 `（在叫我）/（在叫别人）` 标记的 @ 段要**连名字一起**抠掉（那是 onebot.js 入库时写的结论，
+//    不是群友说的话）。实测线上触发最多的一条就是她自己的群名片（`DeepSleep×12`）——
+//    提醒她"别再说自己的名字"毫无意义。
+//    `[^\n@]` 里禁掉 `@` 是为了**别把前面那句话一起吃掉**：
+//    一行里有 `@A 你好 @B（在叫我）` 时，只能从 `@B` 开始匹配。
+const AT_MARKER_RE = /@[^\n@]{0,32}?（在叫我）|@[^\n@]{0,32}?（在叫别人）/g;
+const MARKER_RE = /（在叫我）|（在叫别人）|（管理员代发）/g;
+
+/**
+ * 抠掉"不是别人说的话"的那些东西：**她自己的名字** + 占位符 + 入库标记。
+ * @param {string} text 原始消息文本
+ * @param {string[]} names 要抠掉的名字（她自己：群名片 + botName）
+ */
+function stripPlaceholders(text, names = []) {
+  let s = String(text ?? '');
+  // ⚠️ 名字要**从文本里抠掉**，而不是"取完词再按 token 过滤"：
+  //    实测 `小鲸鱼好可爱` 取词得到 `小鲸`/`鲸鱼`/`鱼好`/`好可`/`可爱` ——
+  //    按 token 过滤只能挡住前两个，`鱼好` 这种**跨名字边界的碎片**照样漏过去，
+  //    于是提醒会写成「「鱼好」被反复提到 5 次」。抠文本之后就不会切出这种碎片了。
+  //    名字里可能有空格（QQ 会把群名片里的括号处理成带空格）⇒ 逐字之间允许空白。
+  for (const n of names) {
+    const name = String(n ?? '').trim();
+    if (!name) continue;
+    const pat = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').split('').join('\\s*');
+    try { s = s.replace(new RegExp(pat, 'gi'), ' ') } catch { /* 正则坏了就跳过这个名字，别让取词整个崩掉 */ }
+  }
+  return s.replace(AT_MARKER_RE, ' ').replace(PLACEHOLDER_RE, ' ').replace(MARKER_RE, ' ');
+}
+
+/**
+ * 上下文里的**锚点**：短时间被反复念叨的词（2026-09-26 第二十五对话，提案 `a5fbf828`）。
+ *
+ * 她的原话：「群里连续几分钟围绕"睡觉/困了/低能耗"聊，我就容易顺着这个方向反复说睡觉，
+ * 像被锚住一样……希望在会话上下文里对短时间高频重复出现的词/句式做一个**软降权或提醒**，
+ * 让我在生成时知道"这个词已经被说太多遍了"……**不要硬性禁用词**，也不要改人设。」
+ *
+ * ── 口径（三个刻意的选择）──────────────────────────────────────────────
+ * ① **数"多少条消息里出现过"，不是"总共出现几次"**。
+ *    她的诉求是"同一个话题被刷 5 次以上"；而同一条消息里重复三遍一个词，
+ *    与五个人各说一遍，是两件不同的事（后者才是锚点）。顺带也躲开了 2 字滑窗的
+ *    重叠假象：一条消息对一个词最多贡献 1 次。
+ * ② **只看窗口内的消息**（默认 10 分钟）—— 她说的是"短时间"。窗口外的旧话不算。
+ * ③ **软提醒，绝不改成禁用**（见 buildUserPrompt 里注入那句话的措辞）：
+ *    本项目在"开场多样性"上吃过这条 —— 措辞过强的禁令会变成 few-shot 范例（越禁越像），
+ *    还会让角色变得畏缩。
+ *
+ * ⚠️ **虚词表（ANCHOR_FILLER）的不对称性**：漏收一个词 = 这一轮少提一个醒（无害）；
+ *    多收一个词 = 她看到一句「"今天"被说了 8 遍」的废话（难看还费 token）。
+ *    所以这张表**宁滥勿缺**，而且只影响这一个功能，不动 `extractKeywords` 那边的口径。
+ *
+ * @param {Array} entries 这一轮**她真看得到**的消息（过去状态 + 同轮上文 + 本次唤醒），
+ *                        无序也行 —— 函数自己按 ts 排序。**别传她看不到的消息**：
+ *                        提醒的是"你眼前这堆话"，不是"这个群的全部历史"。
+ * @returns {{ windowMinutes:number, anchors:Array<[string,number]>, scanned:number }}
+ *          `anchors` 为空 = 不明显，**此时一个字都不注入**（同 recentSelfOpeners 的纪律）。
+ *
+ * 🔴 **阈值是拿线上真数据标定出来的，不是拍的**（2026-09-26 实测，见本轮的
+ *    `_临时产物-第二十五对话\标定-反锚点阈值.mjs`，可复现）。
+ *    标尺：以线上**全部 14826 条真消息**的时刻各当一个窗口的右端（= 她当时真会跑一次提示词），
+ *    数这个提醒会不会响。几版阈值的实测触发率（`标定-反锚点阈值.mjs` 可复现）：
+ *      · 只要"10 分钟里被 5 条消息提到"          → **56.5%**（第一版；那不叫提醒，叫每轮念叨）
+ *      · 再抠掉占位符/入库标记（图片、别人…）    → 34.9%（仍太高：热闹群里任何常用词都凑得出 5 条）
+ *      · 再加"要好几个人在说"                    → 27.1%
+ *      · 再加"要占窗口里 ≥30% 的消息"（**定稿**） → **7.2%**
+ *      · 再收紧到 ≥40%                           → 4.4%（备选，见反悔点）
+ *    56.5% → 7.2% 这一路都是同一份真数据量出来的，不是调参调到手感的。
+ *
+ * ⚠️🔴 **它治的是"同一个词被刷"，不是"同一个话题被绕着聊"** —— 这一点必须如实说清：
+ *    她举的那个例子（2026-09-24 群里连着说"快去睡吧/去睡/快睡吧你/不想睡"，她自己也跟着说）
+ *    **抓不到**。实测那个 10 分钟窗口（40 条里 12 条在聊睡）：2 字滑窗最高只有 `点了×4`、
+ *    `麦当×4`，`睡觉` 只有 ×3 —— 每种说法都不一样，**没有任何一个词形凑得够 5 条**。
+ *    单字信号能抓到（`睡×9`）但它的误报率是 20%+（"点""好"这种字到处都是），代价太大。
+ *    ⇒ 定稿只做**词形**那一层（她原话要的也确实是"对高频重复出现的**词/句式**"和
+ *      "**这个词**已经被说太多遍了"）。**反悔点**：真要治语义话题得上 embedding ——
+ *      那不是这一件事能决定的了（本项目 §3-15 已经拍板"不上 embedding"）。
+ *    **反悔点**：线上若出现"该提醒时不提醒"，先调这三个数（它们是可调参数），
+ *    ⛔ 别去改措辞 —— 措辞只负责"软"，阈值负责"什么时候说"。
+ */
+export function contextAnchors(entries, {
+  now = Date.now(), windowMs = 10 * 60 * 1000, minCount = 5, maxReport = 3, scan = 40,
+  minShare = 0.3, minSenders = 2, exclude = []
+} = {}) {
+  const empty = { windowMinutes: Math.round(Math.max(0, windowMs) / 60000), anchors: [], scanned: 0 };
+  const list = Array.isArray(entries) ? entries.filter(Boolean) : [];
+  if (!list.length) return empty;
+  // ⚠️ 名字的排除走**抠文本**（见 stripPlaceholders），不是取完词再过滤 —— 理由写在那里。
+  //    实测（`group:1000000006` 那个窗口）不抠的话 top1 就是 `鲸鱼×5`，
+  //    提醒会写成「「鲸鱼」被反复提到」—— 那是她自己的名字。
+  const ownNames = (Array.isArray(exclude) ? exclude : []).map((w) => String(w ?? '').trim()).filter(Boolean);
+  const from = now - Math.max(0, windowMs);
+  const inWindow = list
+    .filter((m) => {
+      const ts = Number(m?.ts) || 0;
+      if (!ts) return true;                 // 没有时间戳的（拍一拍之类）不因为"读不到"就被丢掉
+      return ts >= from && ts <= now + 60000; // 上限留 1 分钟容差：时钟漂移不算"未来"
+    })
+    .sort((a, b) => (Number(a?.ts) || 0) - (Number(b?.ts) || 0))
+    .slice(-Math.max(1, scan));
+  if (!inWindow.length) return empty;
+
+  // token → 出现过它的消息下标集合（下标即"消息身份"，比 ts 可靠：同一秒可以有多条）
+  // token → 说过它的**人**（一个人反复说不是锚点，见上面 minSenders 那条）
+  const where = new Map();
+  const who = new Map();
+  inWindow.forEach((m, i) => {
+    const text = stripPlaceholders(m?.text, ownNames);
+    if (!text.trim()) return;
+    const sender = String(m?.self ? 'self' : (m?.senderId ?? '')) || `#${i}`;
+    for (const t of extractKeywords(text, 40)) {
+      const k = String(t || '').toLowerCase().trim();
+      if (k.length < 2 || /^\d+$/.test(k) || ANCHOR_FILLER.has(k)) continue;
+      if (!where.has(k)) { where.set(k, new Set()); who.set(k, new Set()); }
+      where.get(k).add(i);
+      who.get(k).add(sender);
+    }
+  });
+  const needCount = Math.max(2, minCount);
+  const needShare = Math.max(0, Number(minShare) || 0);
+  const needSenders = Math.max(1, Number(minSenders) || 1);
+  const ranked = [...where.entries()]
+    .filter(([k, set]) => set.size >= needCount
+      && set.size >= needShare * inWindow.length      // 要占这个窗口里相当一部分
+      && (who.get(k)?.size ?? 0) >= needSenders)      // 要好几个人在说
+    .sort((a, b) => b[1].size - a[1].size || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1));
+  // 去掉"其实是同一个词"的重复上报：「低能耗」会被 2 字滑窗拆成 `低能` 和 `能耗`，
+  // 两条都报等于把同一个提醒说两遍。判据是**出现位置的重合度**（≥80% 就算同一个词），
+  // 不用"谁是谁的子串"—— 那判不了 `低能`/`能耗` 这种平级重叠。
+  const picked = [];
+  for (const [word, set] of ranked) {
+    const dup = picked.some(([, pset]) => {
+      let hit = 0;
+      for (const i of set) if (pset.has(i)) hit += 1;
+      return hit / set.size >= 0.8;
+    });
+    if (dup) continue;
+    picked.push([word, set]);
+    if (picked.length >= Math.max(1, maxReport)) break;
+  }
+  return { windowMinutes: empty.windowMinutes, anchors: picked.map(([w, s]) => [w, s.size]), scanned: inWindow.length };
+}
+
+/**
  * 组装一次运行的用户消息（不携带任何 LLM 对话历史）。
  * ctx: { chatKey, kind, chatId, chatName, triggerEntries, trigger, selfLastMessageAt, selfNickname,
  *        recentSelfMessages }
@@ -871,6 +1048,36 @@ export function buildUserPrompt(ctx) {
   if (swept && Number(swept.count) > 0) {
     const agoMin = Math.max(0, Math.round((now - (Number(swept.lastTs) || now)) / 60000));
     stateLines.push(`（提醒）你不在的这段时间里有 ${Number(swept.count)} 条消息没有单独叫醒你，已经并进上方的聊天记录（最后一条 ${agoMin === 0 ? '刚刚' : `${agoMin} 分钟前`}）。你当时不在场，看到什么想接就接，不接也正常。`);
+  }
+  // 反锚点：短时间被反复念叨的词（2026-09-26 第二十五对话，提案 `a5fbf828`）。
+  //
+  // 她的原话：「群里连续几分钟围绕"睡觉/困了/低能耗"聊，我就容易顺着这个方向反复说睡觉，
+  //   像被锚住一样，回复变单一、低能耗」——群里有人当场指出"污染上下文形成锚点了"。
+  //
+  // 为什么放在【此刻状态】：① 这一段本来就每次都变，加一行不动上面那些稳定块的缓存顺序；
+  //   ② 它是"这一轮的事实"（你眼前这堆话已经说腻了），不是"你这个人的设定"；
+  //   ③ 它必须**跟着上下文走**：同一句话在别的会话里不成立。
+  //
+  // 🔴 措辞三条纪律（与上面 openerHint 同源，见那段的注释）：
+  //   ① **不是禁用词**：她自己写的就是"软降权或提醒"，绝不许写成"不许说 X"；
+  //   ② **不替她决定**：把判断还给她（"想接就换个角度，不想接就不接"）；
+  //   ③ **不引用具体事件**（不许写"你上次被指出锚点"）——那会变成一条常驻的自我怀疑。
+  //
+  // 开关：`config.skills.anchorHint`（默认 on，与 openerHint 同一个理由：归因实验要能单独隔离）。
+  const anchorOn = cfg?.skills?.anchorHint !== false;
+  // 喂进去的是**她这一轮真看得到**的那些消息（与 past/wake 同一份），不是全群历史 ——
+  // 提醒的对象必须是"你眼前这堆话"。
+  const anchorStat = anchorOn
+    ? contextAnchors([...(past?.messages || []), ...sameTurn, ...(ctx.triggerEntries || [])], {
+      now,
+      // 她自己的名字不算"被反复念叨的话题"：群里每句都在 @ 她时它会高频出现，
+      // 提醒她"别再说自己的名字"毫无意义（实测线上触发最多的就是它）。
+      exclude: [ctx.selfNickname, cfg?.persona?.botName]
+    })
+    : { anchors: [], windowMinutes: 0 };
+  if (anchorStat.anchors.length) {
+    const list = anchorStat.anchors.map(([w, n]) => `「${w}」×${n}`).join('、');
+    stateLines.push(`（提个醒）最近 ${anchorStat.windowMinutes} 分钟里，这几个词在上下文里被反复提到：${list} —— 已经被说很多遍了。不是不许你说，只是提醒你别被它们带着走：想接就换个角度、换个话题，不想接就不接，别顺着重复。`);
   }
   // 开场多样性：把"我自己最近开口爱用什么词"摆给它看，要求换一个。
   //

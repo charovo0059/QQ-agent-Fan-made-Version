@@ -769,6 +769,9 @@ export class Orchestrator {
 
     const ctx = {
       chatKey, kind, chatId,
+      // 🆕 2026-09-26 第二十五对话：核心记忆要记"她是从哪个会话存下来的"（控制台要显示给人看）。
+      //    它就在本函数上面第 637 行算好了，传下去比让工具自己再查一次群名便宜也更一致。
+      chatName,
       selfId: this.onebot.selfId,
       selfNickname,
       botName: cfg.persona.botName,

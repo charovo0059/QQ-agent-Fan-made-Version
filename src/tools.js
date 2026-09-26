@@ -46,6 +46,14 @@ const PROPOSAL_STATUS_LABEL = {
   done: '已实现'
 };
 import { splitDreamText } from './dream.js';
+// 「核心记忆」（提案 c7486672）：她自己的相册，独立于会话存档。
+import { saveCoreMemory, listCoreMemories, getCoreMemory, removeCoreMemory, coreMemoryLoadError } from './core-memory.js';
+import { formatShortTime } from './util.js';
+
+// 一次最多能存多少条（她挑的那一段的上限）。与 core-memory.js 的 MAX_MESSAGES 有意分开：
+// 那边是"文件里最多留多少"，这边是"一次调用最多取多少" —— 前者防止文件膨胀，
+// 后者是**给她的一句人话提示**（超了直接说"太长了，分开存"），不是静默截断。
+const CORE_MEMORY_MAX_SPAN = 300;
 
 /**
  * 读 `data/dreams.json` 并做筛选/裁剪 —— 供 `dream_recall` 工具用（2026-09-19 加）。
@@ -517,6 +525,9 @@ function rememberImageUrls(ctx, urls) {
  * @param {object} cfg 当前配置
  * @param {{visionEnabled?: boolean}} opts 视觉是否可用（由 orchestrator 结合模型探测结果算出来）
  */
+/** 核心记忆那一组工具（开关一次管四个，别漏）。 */
+const CORE_MEMORY_TOOLS = new Set(['save_core_memory', 'list_core_memories', 'read_core_memory', 'delete_core_memory']);
+
 export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
   const searchEnabled = cfg?.webSearch?.enabled !== false;
   const imageSearchEnabled = cfg?.imageSearch?.enabled !== false;
@@ -549,6 +560,9 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
     //       症状是"界面上关了它还在跑"（本项目记作"接线正确 ≠ 行为改变"）。
     //       `test-余额与用量自检.mjs` 里有一条变异验证专门钉这个方向。
     if (d.name === 'get_my_usage' && cfg?.usage?.enabled !== true) return false;
+    // 🆕 2026-09-26 第二十五对话（提案 c7486672）：核心记忆是**默认开**的（她提的、已采纳），
+    //    所以判定是 `!== false` —— 与上面那条默认关的写法**有意相反**，两边都别改错方向。
+    if (CORE_MEMORY_TOOLS.has(d.name) && cfg?.coreMemory?.enabled === false) return false;
     return true;
   });
 }
@@ -1326,6 +1340,129 @@ export function buildToolDefs() {
           content: String(args.content ?? '').trim()
         });
         return ok({ removed });
+      }
+    },
+    {
+      name: 'save_core_memory',
+      description: '把**当前会话**里的一段聊天记录**原文**存成「核心记忆」——你自己挑、原样存下来，'
+        + '不压缩、不改写，以后随时能翻回来重读（像翻相册，而不是只记得"那天聊得很好"）。'
+        + '和 memory_append 的分工：那是"把一个人压成一句印象"，这是"把舍不得删的那几段话整个留下来"。'
+        + 'fromId / toId 填消息前面的 `#数字`（在【过去状态】或【本次唤醒】里能看到）。'
+        + '⚠️ 只存**你真心舍不得删**的那一段：不是"重要就存"，什么都存就不叫相册了（最多留 30 段，满了会挤掉最老的）。'
+        + '⚠️ 只能存**当前会话**里的消息（别处的你本来也看不到）。存过之后上下文记忆被删掉，这段也还在。',
+      parameters: {
+        type: 'object',
+        properties: {
+          fromId: { type: 'integer', description: '起始消息的 #数字' },
+          toId: { type: 'integer', description: '结束消息的 #数字（含这一条；比 fromId 小也行）' },
+          name: { type: 'string', description: '给这一段起个名字（≤40字；以后翻的时候靠它认）' },
+          note: { type: 'string', description: '可选：一句"为什么留着它"（≤200字）' }
+        },
+        required: ['fromId', 'toId']
+      },
+      async execute(ctx, args) {
+        const a = Number(args.fromId);
+        const b = Number(args.toId);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) {
+          return err('fromId / toId 必须是消息前面的 #数字（整数）。');
+        }
+        const from = Math.min(a, b);
+        const to = Math.max(a, b);
+        const span = to - from + 1;
+        if (span > CORE_MEMORY_MAX_SPAN) {
+          return err(`这一段跨了 ${span} 条，太长了（一次最多 ${CORE_MEMORY_MAX_SPAN} 条）。挑真正舍不得删的那几段，分开存。`);
+        }
+        // ⚠️ 只从**当前会话**的存档里取（她看不到别的会话，也就不该能存别的会话）
+        const all = ctx.store.recent(ctx.chatKey, { limit: 2000 });
+        const picked = all.filter((m) => Number(m.id) >= from && Number(m.id) <= to);
+        if (!picked.length) {
+          return err(`这个会话的存档里没有 #${from}~#${to} 这一段（消息 id 可能记错了，或者那几条已经被删掉了）。`
+            + `现在能用的范围是 #${all[0]?.id ?? '?'}~#${all[all.length - 1]?.id ?? '?'}。`);
+        }
+        const res = saveCoreMemory({
+          chatKey: ctx.chatKey,
+          chatLabel: String(ctx.chatName || ctx.chatId || ''),
+          name: String(args.name ?? '').trim(),
+          note: String(args.note ?? '').trim(),
+          // 逐字复制（⛔ 一个字的转述都没有）；`who` 记**当时的名字**，不按现在的备注名改写历史
+          messages: picked.map((m) => ({ ts: m.ts, who: m.self ? '我' : String(m.senderName || m.senderId || ''), self: !!m.self, text: m.text }))
+        });
+        if (!res.ok) return err(res.error || '没存下来');
+        return ok({
+          saved: true,
+          id: res.item.id,
+          name: res.item.name,
+          messages: res.item.messages.length,
+          // 如实报"存全了没有、有没有挤掉更老的"——记忆无声消失是最坏的一种
+          ...(res.dropped ? { dropped: res.dropped } : {}),
+          ...(res.truncatedByChars ? { truncated: '这一段太长，后面几条没进（到字数上限了）' } : {}),
+          ...(res.evicted ? { evicted: `已经有 ${res.evicted} 段更老的被挤掉了（最多留 30 段）` } : {})
+        });
+      }
+    },
+    {
+      name: 'list_core_memories',
+      description: '看看你攒下的「核心记忆」有哪些（只给目录：名字 / 时间 / 会话 / 几条 / 开头一句）。'
+        + '要看全文就用 read_core_memory 带上它的 id。',
+      parameters: { type: 'object', properties: {} },
+      async execute() {
+        const items = listCoreMemories();
+        const loadErr = coreMemoryLoadError();
+        return ok({
+          count: items.length,
+          items,
+          ...(loadErr ? { warning: `核心记忆文件有问题：${loadErr}` } : {}),
+          note: items.length ? undefined : '还没存过。看到舍不得删的那一段，就用 save_core_memory 把它留下来。'
+        });
+      }
+    },
+    {
+      name: 'read_core_memory',
+      description: '把某一段「核心记忆」**原文**翻出来重读（逐字，就是你当年存下来的那些话）。'
+        + 'id 从 list_core_memories 里拿。默认最多给 60 条，要接着往下看就传 offset。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '那一段的 id（list_core_memories 里有）' },
+          limit: { type: 'integer', description: '最多返回几条（默认 60，上限 300）' },
+          offset: { type: 'integer', description: '跳过最前面几条（默认 0，用来接着读）' }
+        },
+        required: ['id']
+      },
+      async execute(ctx, args) {
+        const item = getCoreMemory(String(args.id ?? ''));
+        if (!item) return err(`找不到这一段（id=${JSON.stringify(args.id)}）。先用 list_core_memories 看看有哪些。`);
+        const limit = Math.min(300, Math.max(1, Number(args.limit) || 60));
+        const offset = Math.max(0, Number(args.offset) || 0);
+        const slice = item.messages.slice(offset, offset + limit);
+        return ok({
+          id: item.id,
+          name: item.name,
+          note: item.note,
+          at: new Date(item.at).toISOString(),
+          chat: item.chatLabel || item.chatKey,
+          total: item.messages.length,
+          from: offset,
+          lines: slice.map((m) => `[${formatShortTime(m.ts)}] ${m.who}：${m.text}`),
+          ...(offset + slice.length < item.messages.length ? { more: `还有 ${item.messages.length - offset - slice.length} 条，接着读传 offset=${offset + slice.length}` } : {})
+        });
+      }
+    },
+    {
+      name: 'delete_core_memory',
+      description: '删掉一段「核心记忆」（只要是你自己存的，随时可以删；删掉就真没了，别再想不起来）。'
+        + 'id 从 list_core_memories 里拿。',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: '要删的那一段的 id' } },
+        required: ['id']
+      },
+      async execute(ctx, args) {
+        const id = String(args.id ?? '');
+        const item = getCoreMemory(id);
+        if (!item) return err(`找不到这一段（id=${JSON.stringify(id)}），可能已经删过了。`);
+        const removed = removeCoreMemory(id);
+        return ok({ removed, id, name: item.name, messages: item.messages.length });
       }
     },
     {

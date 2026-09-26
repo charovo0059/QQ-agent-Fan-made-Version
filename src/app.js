@@ -48,6 +48,8 @@ import { importFromDsh, currentProviders, setProviderKey, testAllProviders, test
 // 「没发出去的消息」登记表（2026-09-26 第二十四对话，提案 26bb79c2 的剩余部分）：
 // 失败的那条**不进存档**（sender 只在成功后 appendSelf）⇒ 管理端原来根本看不到。
 import { recordFailure, listFailures, getFailure, removeFailure, clearFailures } from './send-failures.js';
+// 「核心记忆」（提案 c7486672）：只读 + 删。存是她自己的工具干的（tools.js）。
+import { listCoreMemories, getCoreMemory, removeCoreMemory, coreMemoryLoadError, coreMemoryFile } from './core-memory.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey } from './util.js';
@@ -2196,6 +2198,26 @@ export function createApp({ log = console.log } = {}) {
         return json(res, 200, { ok: true, removed });
       }
 
+      // 「核心记忆」（2026-09-26 第二十五对话，提案 c7486672）：她自己挑的一段聊天记录原文。
+      // 控制台这边**只读 + 删** —— 存是她自己的事（`save_core_memory`），管理端不该替她挑。
+      // ⚠️ 列表默认**不带正文**（目录页不需要，也省得一次传几百 KB）；看全文走 `?id=`。
+      if (pathname === '/api/core-memories' && method === 'GET') {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        const id = String(u.searchParams.get('id') || '');
+        if (id) {
+          const item = getCoreMemory(id);
+          if (!item) return json(res, 404, { ok: false, error: '这一段已经不在了（可能刚被删掉）' });
+          return json(res, 200, { ok: true, item });
+        }
+        return json(res, 200, { ok: true, items: listCoreMemories(), loadError: coreMemoryLoadError() || null, ...coreMemoryFile() });
+      }
+      if (pathname === '/api/core-memories/delete' && method === 'POST') {
+        const body = await readBody(req);
+        const removed = removeCoreMemory(String(body?.id ?? ''));
+        if (removed) emit('status', { coreMemoriesUpdated: true });
+        return json(res, 200, { ok: true, removed: removed ? 1 : 0, items: listCoreMemories() });
+      }
+
       if (pathname === '/api/persona-templates' && method === 'GET') {
         const { PERSONAS } = await import('./personas.js');
         const builtins = Object.entries(PERSONAS).map(([id, p]) => ({ id, name: p.name, text: p.text, builtin: true }));
@@ -2295,7 +2317,11 @@ export function createApp({ log = console.log } = {}) {
       //    当成一个"装过又删掉的扩展"，页面上真的显示成「已配置但未安装（1）· hotReload」；
       //    更糟的是 `/api/skills/cleanup` 会把它**删掉**（它不在注册表里 ⇒ 判定为可清理）。
       //    ⇒ 以后**每加一个扩展全局开关，都要同步加进这个集合**。
-      const RESERVED_SKILL_KEYS = new Set(['hotReload', 'openerHint']);
+      //    🆕 2026-09-26（第二十五对话）加了 `anchorHint`（反锚点注入的开关）⇒ 同步登记。
+      //        ⚠️ 这一条**不在待办里、也没人提醒**：漏了的表现是技能页上多出一个
+      //        「已配置但未安装（1）· anchorHint」，而且 `cleanup` 真能把它删掉 ——
+      //        用户点一下就把刚加的功能关了，还看不出是自己关的。
+      const RESERVED_SKILL_KEYS = new Set(['hotReload', 'openerHint', 'anchorHint']);
       const readByPath = (obj, p) => p.reduce((o, k) => (o == null ? undefined : o[k]), obj);
       const enabledSwitchOf = (id, st) => {
         const ov = ENABLED_BY_PATH[id];
