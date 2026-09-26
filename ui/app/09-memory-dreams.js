@@ -307,7 +307,116 @@ async function loadDreams() {
   });
 }
 
+// ── 她的「核心记忆」（2026-09-26 第二十五对话，提案 c7486672）──────────────────
+// 她自己的相册：由她自己挑一段聊天记录原文存下来（`save_core_memory`），独立于会话存档。
+// 控制台这边**只读 + 删**：⛔ 管理端不提供"替她挑一段存进去"的入口 —— 那正是她提案里
+// 明确不要的（"由我自己选择存哪一段，不用别人替我挑"）。
+//
+// ⚠️ 这一页每 15 秒重绘一次，所以：
+//   ① 列表接口**不返回正文**（30 段 × 最多 2 万字，15 秒拉一次等于一直搬几百 KB）；
+//      正文按需拉（点「看」才 `?id=`）；
+//   ② 拉列表要**带时间戳的节流**，而且**只在内容真的变了**才重绘，否则会自激。
+let coreMemoriesLoading = false;
+let coreMemoriesLoadedAt = 0;
+
+async function refreshCoreMemories(force = false) {
+  if (coreMemoriesLoading) return;
+  if (!force && Date.now() - coreMemoriesLoadedAt < 15000) return;
+  coreMemoriesLoading = true;
+  try {
+    const r = await api('/api/core-memories');
+    const next = r.items || [];
+    const changed = JSON.stringify(next) !== JSON.stringify(state.coreMemories || []);
+    state.coreMemories = next;
+    state.coreMemoriesLoadError = r.loadError || null;
+    coreMemoriesLoadedAt = Date.now();
+    if (changed) renderMemoryList();     // ⚠️ 只在真变了时重绘（本函数由 renderMemoryList 调用）
+  } catch {
+    // 读不到就不显示这一段 —— 核心记忆坏了不该让整页印象跟着崩
+  } finally {
+    coreMemoriesLoading = false;
+  }
+}
+
+function coreMemoriesHtml() {
+  const items = state.coreMemories;
+  if (!Array.isArray(items)) return '';          // 还没拉到 ⇒ 不显示（别闪一个空标题）
+  const warn = state.coreMemoriesLoadError
+    ? `<div class="list-head muted" style="color:var(--color-text-warning)">核心记忆文件有问题：${esc(state.coreMemoriesLoadError)}</div>`
+    : '';
+  const rows = items.length
+    ? items.map((x) => `
+      <div class="chat-item mm-core-row" data-id="${esc(x.id)}">
+        <div class="chat-item-title"><span class="session-chat">${esc(x.name || x.id)}</span></div>
+        <div class="chat-item-sub">${esc(x.chatLabel || x.chatKey)} · ${x.count} 条 · ${fmtTime(x.at)}</div>
+        ${x.note ? `<div class="chat-item-sub">${esc(x.note)}</div>` : ''}
+        <div class="session-meta">
+          <span>${esc(String(x.head || '').slice(0, 40))}</span>
+          <span style="margin-left:auto">
+            <button class="btn btn-small mm-core-read">看</button>
+            <button class="btn btn-small btn-danger mm-core-del">删除</button>
+          </span>
+        </div>
+        <pre class="mm-core-body" hidden style="white-space:pre-wrap;word-break:break-word;margin:6px 0 0;max-height:320px;overflow:auto"></pre>
+      </div>`).join('')
+    : '<div class="list-head muted">她还没存过核心记忆。她看到舍不得删的一段，会自己用 save_core_memory 留下来。</div>';
+  return `
+    <details class="mm-core" ${items.length ? 'open' : ''}>
+      <summary class="list-head">她的核心记忆（${items.length}）<span class="muted">—— 她自己挑的原文，删掉存档也还在</span></summary>
+      ${warn}${rows}
+    </details>`;
+}
+
+function bindCoreMemories(box) {
+  $$('.mm-core-read', box).forEach((btn) => {
+    btn.addEventListener('click', (e) => { e.stopPropagation(); void toggleCoreMemory(btn) });
+  });
+  $$('.mm-core-del', box).forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const row = btn.closest('.mm-core-row');
+      const id = row?.dataset.id;
+      if (!id) return;
+      if (!confirm('删掉这一段核心记忆？删了就真没了（这是她自己攒下来的）。')) return;
+      try {
+        await api('/api/core-memories/delete', { method: 'POST', body: JSON.stringify({ id }) });
+        await refreshCoreMemories(true);
+        renderMemoryList();
+      } catch (error) {
+        alert(`删除失败：${error?.message || error}`);
+      }
+    });
+  });
+}
+
+async function toggleCoreMemory(btn) {
+  const row = btn.closest('.mm-core-row');
+  const body = row?.querySelector('.mm-core-body');
+  const id = row?.dataset.id;
+  if (!body || !id) return;
+  if (!body.hidden) { body.hidden = true; btn.textContent = '看'; return }
+  if (!body.dataset.loaded) {
+    btn.disabled = true;
+    try {
+      const r = await api(`/api/core-memories?id=${encodeURIComponent(id)}`);
+      // 逐字还原当时存下来的文本（textContent ⇒ 不会被当成 HTML）
+      body.textContent = (r.item?.messages || [])
+        .map((m) => `[${fmtTime(m.ts)}] ${m.who}：${m.text}`).join('\n') || '（这一段是空的）';
+      body.dataset.loaded = '1';
+    } catch (error) {
+      body.textContent = `读不到：${error?.message || error}`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  body.hidden = false;
+  btn.textContent = '收起';
+}
+
 function renderMemoryList() {
+  // 顺手刷新核心记忆（带 15 秒节流 + "只在变了才重绘"，见上面的说明）
+  void refreshCoreMemories();
+  const coreHtml = coreMemoriesHtml();
   const box = $('#memory-items');
   const files = state.memoryFiles || [];
   const names = {};
@@ -348,14 +457,16 @@ function renderMemoryList() {
   });
 
   if (!files.length) {
-    box.innerHTML = '<div class="list-head muted">还没有任何印象（等机器人记下之后才会出现）</div>';
+    box.innerHTML = coreHtml + '<div class="list-head muted">还没有任何印象（等机器人记下之后才会出现）</div>';
+    bindCoreMemories(box);
     return;
   }
   if (!visible.length) {
-    box.innerHTML = '<div class="list-head muted">这里没有任何有印象的会话。勾选上面的「显示空印象」可以看到白名单里那些还没有印象的。</div>';
+    box.innerHTML = coreHtml + '<div class="list-head muted">这里没有任何有印象的会话。勾选上面的「显示空印象」可以看到白名单里那些还没有印象的。</div>';
+    bindCoreMemories(box);
     return;
   }
-  box.innerHTML = visible.map((f) => {
+  box.innerHTML = coreHtml + visible.map((f) => {
     const key = f.chatKey;
     const busy = !!state.consolidating[key];
     // 整理中：在列表项上直接标出，切页签回来也能一眼看到
@@ -397,6 +508,7 @@ function renderMemoryList() {
       memoryListAction(el.dataset.act, el.dataset.key);
     });
   });
+  bindCoreMemories(box);
 }
 
 /**
