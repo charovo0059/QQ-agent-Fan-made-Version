@@ -72,6 +72,33 @@ export function reengageWaitMs(cfg, unanswered) {
 // 一个不存在的群会按"每条消息 × 每次渲染"刷屏，反而把真正的那条淹掉。
 // 形状照 `store.js`（落盘失败）与 `memory.js`（读失败）同款：**各自实现，本仓库没有共用件可复用**
 // （那两处的注释里也写了"没有共用件"），所以这里同样只做到"同款"而不是"抽公共件"。
+/**
+ * 「写了稿子却没寄出去」的**唯一定义**（2026-09-28 第二十八对话）。
+ *
+ * 为什么不写两遍：这个条件原来在**两个地方各算一次**（主循环 `assistantEntry`、
+ * 追问重试 `rEntry`），而 2026-09-27 那批真机数据证明**算完还会被改**：
+ *   `orchestrator.js` 抓到"模型把工具调用写成了文本"时，会把该条 assistant 的
+ *   `content` 清成 `null`、并回填真正的 `tool_calls`（见 `parseInlineToolCalls` 那一段
+ *   —— 不清的话后续请求会报错）。⇒ 那条记录的 `draftWithoutSend` 留在回填**之前**算出的值上，
+ *   变成 `true`；于是它既"没调工具、正文非空"（记录说的）又"调了 send_message、正文为空"
+ *   （实际发生的），**两条不可能同时为真的形状被写进同一份记录**。
+ *   真机实测：261 条草稿里 **77 条**是这样，全部落在 2026-09-27 17:49~18:52
+ *   （回归 `check-fields.mjs` 报红，值 118/119）。
+ *
+ * 危害不是"少了一个字段"：`mutes.js` 拿 `draftWithoutSend` 区分
+ * 「刻意不说」（noreply）与「回复丢失」（故障），而这 77 条是**假阳性** ——
+ * 它明明把 send_message 发出去了。⇒ 排查"她写了却没发"时会被这 77 条淹掉。
+ *
+ * ⛔ 别把这个判断只留给"算的那一刻是对的"：**凡是在算完之后还改这条记录的字段，
+ *    都必须回头重算它**（本文件里有两处：内联回填、以及将来任何新的回填）。
+ */
+function isDraftWithoutSend(message) {
+  const content = message?.content;
+  const calls = message?.tool_calls;
+  return !(Array.isArray(calls) && calls.length)
+    && typeof content === 'string' && content.trim().length > 0;
+}
+
 const CHAT_NAME_FAIL_LOG_COOLDOWN_MS = 60 * 1000;
 /** groupId -> 上次出声时刻。群多了可能上千个键 ⇒ 到顶整体清空（只会让某个群多报一次，不会漏报）。 */
 const chatNameFailLogAt = new Map();
@@ -852,8 +879,7 @@ export class Orchestrator {
         //                    需要时用 tool_calls + content 自行推导。）
         round: round + 1,
         hadToolResult,
-        draftWithoutSend: !(Array.isArray(msg.tool_calls) && msg.tool_calls.length)
-          && typeof msg.content === 'string' && msg.content.trim().length > 0
+        draftWithoutSend: isDraftWithoutSend(msg)
       };
       messages.push(assistantEntry);
       session.messages.push(structuredClone(assistantEntry));
@@ -886,6 +912,14 @@ export class Orchestrator {
           uiLast.content = null;
           uiLast.tool_calls = structuredClone(toolCalls);
           uiLast.inlineParsed = true;
+          // 🔴 2026-09-28：**回填之后必须重算那个标记**。
+          //    上面这两行把 content 清空、把 tool_calls 填上 —— 也就是说这一轮**其实调了工具**
+          //    （send_message 就在里面），"写了稿子却没寄出去"已经不成立了。
+          //    不重算的话这条记录会自相矛盾，并在"回复丢失"统计里变成**假阳性**
+          //    （真机实测 77 条，见 `isDraftWithoutSend` 的注释）。
+          //    ⚠️ 这**只是修正记录**，不改变任何行为：循环后面用的是局部变量 `toolCalls`，
+          //      它在本段之前就已经赋成 inlineCalls 了 ⇒ 该跑的工具照样跑，与改前逐字节同行为。
+          uiLast.draftWithoutSend = isDraftWithoutSend(uiLast);
         }
         this.sessions.update(session.id);
         this.emit('session-update', session.id);
@@ -1028,7 +1062,7 @@ export class Orchestrator {
           //    第一版写成 +1，导致重试条目拿到 `round=1` —— 而它明明是第 2 次说话，
           //    于是"首轮必为 false"的不变式被破坏（真实数据里抓出来 2 例，回归 check-fields.mjs 报红）。
           round: roundsUsed + 2, hadToolResult: true, nudgeRetry: true,
-          draftWithoutSend: !rToolCalls.length && rContent.trim().length > 0
+          draftWithoutSend: isDraftWithoutSend(rmsg)
         };
         messages.push(rEntry);
         session.messages.push(structuredClone(rEntry));
