@@ -74,7 +74,11 @@ async function openAboutModal() {
     <div style="margin:0 0 14px">
       <div style="font-size:17px;font-weight:600">${esc(info.name)} <span class="mono">${esc(info.version)}</span></div>
       <div class="hint" style="margin-top:3px">
-        基于 <a href="${esc(info.homepage || info.repository)}" target="_blank" rel="noreferrer">Kondius/qq-agent</a>
+        <!-- ⚠️ 署名链接**写死指向上游原版**：这段文字是 MIT 署名（"基于 K0nd1us/QQ-agent"），
+             链接就该指向被署名的那个项目。⛔ 别改回 info.homepage / info.repository
+             —— 那是**本改版自己**的地址，指过去会让署名变成自指。
+             （注意：本段在模板字符串里，注释里**不能写美元加大括号**，否则会被插值进来。） -->
+        基于 <a href="https://github.com/K0nd1us/QQ-agent" target="_blank" rel="noreferrer">K0nd1us/QQ-agent</a>
         · ${esc(info.license)} 许可 · 作者 ${esc(info.author)}
       </div>
     </div>
@@ -142,7 +146,7 @@ async function openAboutModal() {
   // ── 复制信息（贴到群里问人时用，比截图好）──
   overlay.querySelector('#about-copy')?.addEventListener('click', async (e) => {
     const text = [
-      `${info.name} ${info.version}（${info.license}，基于 Kondius/qq-agent）`,
+      `${info.name} ${info.version}（${info.license}，基于 K0nd1us/QQ-agent）`,
       `系统：${rt.os}（${rt.platform} ${rt.arch}）`,
       `Electron ${rt.electron || '-'} / Node ${rt.node}`,
       `数据目录：${paths.data}`,

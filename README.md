@@ -1,9 +1,72 @@
 # QQ Agent（独立版 · 桌面端）
 
-![测试](https://img.shields.io/badge/tests-83%20passed-brightgreen)
-![规模](https://img.shields.io/badge/code-14.4k%20lines-blue)
+**⚠️ 非官方修改版（Fan-made Version）**
+
+![性质](https://img.shields.io/badge/性质-非官方修改版-orange)
+![规模](https://img.shields.io/badge/code-32.4k%20lines-blue)
 ![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Electron-lightgrey)
 ![技术栈](https://img.shields.io/badge/stack-Node.js%20%7C%20原生前端-orange)
+
+## 关于本仓库
+
+> 本项目是 **[K0nd1us/QQ-agent](https://github.com/K0nd1us/QQ-agent)** 的**非官方修改版**，
+> 由 [@charovo0059](https://github.com/charovo0059) 在原版 **v0.3.0** 基础上自行改造。
+>
+> 原版作者是 **Kondius**，原项目以 **MIT 许可**开源。**没有原版就没有这个仓库 —— 特此致谢。**
+>
+> | | |
+> |---|---|
+> | 上游原版 | <https://github.com/K0nd1us/QQ-agent> |
+> | 本仓库 | <https://github.com/charovo0059/QQ-agent-Fan-made-Version> |
+>
+> 本仓库**不是**上游的官方分支，改动按个人自用需求推进，**不保证与上游同步**，
+> 也不代表原作者的立场或质量背书。有问题请提到**本仓库**的 issue，不要去打扰原作者。
+
+### 这一版改了什么
+
+与上游 **v0.3.0** 逐字节比对的结果：
+
+| 类别 | 数量 | 备注 |
+|---|---|---|
+| 新增文件 | **50** | 见下 |
+| 内容有改动 | **38** | 含 `src/app.js`、`orchestrator.js`、`prompt.js`、`memory.js`、`tools.js`、`personas.js`、`ui/landing.html` 等 |
+| 逐字节相同 | **6** | 两个图标、群二维码、`build/installer.nsh`、两个 `scripts/` |
+| 未收录 | **9** | 见下 |
+
+**新增的功能块：**
+
+- **技能 / 插件系统** —— `src/skills/` 六个模块 + `plugin-loader.js` + `tool-registry.js` + `plugins/`
+- **微信通道** —— `wechat-channel.js`（通道生命周期）、`wechat-contacts.js`（联系人名字主动同步）+ 对应前端页
+- **图片与视频** —— 图搜、图片压缩与类型判定、GIF 与视频读取、`ffmpeg-path.js`、`cf-fetch.js`、`zip.js`
+- **记忆增强** —— `core-memory.js`（核心记忆）、`dream.js`（「做梦」整理）、`memory-preview.js`（召回预览）
+- **群管理三件** —— `mutes.js`（禁言表）、`proposals.js`（提案）、`send-failures.js`（发送失败可见 / 可重发）
+- **随包技能** —— `skills/doujin-lookup/`、`skills/合并转发发送/`
+- **前端重构** —— 原本单文件 `ui/app.js`（约 1 万行）拆成 `ui/app/00-core.js` … `17-init.js` 共 18 个模块，`ui/app.js` 只留作路标
+- `electron/preload.js`
+
+代码规模从原版的约 14.4k 行长到约 **32.4k 行**（`src/` 19.8k + `ui/` JS 9.1k + CSS 3.5k）。
+架构取向与原版一致：**无状态会话、按次计费、零框架前端**，这些仍然是原版的设计。
+
+**未收录的 9 个上游文件：** `test/` 下 5 个测试、`docs/model-prices.md`，以及 `scripts/` 里的
+`apply-vision-docs.mjs` / `gen-icon.mjs` / `link-runtime-junctions.ps1`。
+其中前端那 3 个测试（`render-test` / `scroll-test` / `usage-e2e`）依赖**单文件** `ui/app.js`，
+而本版已把它拆成 18 段 —— 直接放进来会**一跑就失败**，所以不收。本版的回归测试另行单独维护。
+
+**关于依赖文件：** 上游 v0.3.0 里的 `.gitignore`、`package-lock.json`、`build/installer.nsh`、
+`scripts/export-prices.mjs`、`scripts/sanitize-release.mjs` 在本版中一度缺失，现已补回；
+其中 `package-lock.json` 是按本版 `package.json` **重新生成**的（上游那份的版本号停在 0.2.1，已过期）。
+
+### 许可与署名
+
+沿用原版的 **MIT 许可**（见 [LICENSE](LICENSE)），版权归原作者 **Kondius** 所有。
+本版的改动部分同样以 MIT 许可提供；再分发时请保留原版署名。
+
+---
+
+## 以下为上游 README 原文
+
+> ℹ️ **以下内容由原版作者 Kondius 撰写**，描述的是原版 v0.3.0 的功能与设计。
+> 本版在其基础上做了上述改造，因此个别细节可能与本版实际实现有出入 —— **以代码为准**。
 
 > 一个跑在桌面上的 QQ 群聊 Agent：无状态会话架构，让每次处理的 token 成本恒定可控。
 
