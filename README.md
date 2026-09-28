@@ -10,7 +10,8 @@
 ## 关于本仓库
 
 > 本项目是 **[K0nd1us/QQ-agent](https://github.com/K0nd1us/QQ-agent)** 的**非官方修改版**，
-> 由 [@charovo0059](https://github.com/charovo0059) 在原版 **v0.3.0** 基础上自行改造。
+> 由 [@charovo0059](https://github.com/charovo0059) 在原版 **v0.3.0** 基础上自行改造，
+> 并**合并过上游 0.4 系列的一部分**（详见下文「这一版改了什么」）。
 >
 > 原版作者是 **Kondius**，原项目以 **MIT 许可**开源。**没有原版就没有这个仓库 —— 特此致谢。**
 >
@@ -24,37 +25,63 @@
 
 ### 这一版改了什么
 
-与上游 **v0.3.0** 逐字节比对的结果：
+与**上游当前版本 0.4.0** 逐字节比对的结果（上游 `main` 分支的 `11577ba`，2026-09-26；
+上游**没有给 0.4.0 打 tag**，版本号取自它的 `package.json`）：
+
+> ⚠️ **基线为什么用 0.4.0 而不是 v0.3.0**：本版**最初基于上游 v0.3.0**，但之后
+> **合并过上游 0.4 系列的一部分**（0.4 preview 的若干增量 + 一次 85 项逐条审计）。
+> 拿当年的 v0.3.0 当基线，会把"两边各自都做了的同一件事"算成本版的功劳，
+> 也会把上游后来补的东西误算成"本版没有"。
 
 | 类别 | 数量 | 备注 |
 |---|---|---|
-| 新增文件 | **50** | 见下 |
-| 内容有改动 | **38** | 含 `src/app.js`、`orchestrator.js`、`prompt.js`、`memory.js`、`tools.js`、`personas.js`、`ui/landing.html` 等 |
-| 逐字节相同 | **6** | 两个图标、群二维码、`build/installer.nsh`、两个 `scripts/` |
-| 未收录 | **9** | 见下 |
+| 逐字节相同 | **3** | 两个图标 + `scripts/export-prices.mjs` |
+| 本版独有（上游 0.4.0 里没有） | **38** | 见下 |
+| 双方都有、内容不同 | **53** | 见下 |
+| 上游 0.4.0 有、本版没有 | **92** | 见下 |
 
-**新增的功能块：**
+**本版独有（上游 0.4.0 里没有）：**
 
-- **技能 / 插件系统** —— `src/skills/` 六个模块 + `plugin-loader.js` + `tool-registry.js` + `plugins/`
-- **微信通道** —— `wechat-channel.js`（通道生命周期）、`wechat-contacts.js`（联系人名字主动同步）+ 对应前端页
-- **图片与视频** —— 图搜、图片压缩与类型判定、GIF 与视频读取、`ffmpeg-path.js`、`cf-fetch.js`、`zip.js`
-- **记忆增强** —— `core-memory.js`（核心记忆）、`dream.js`（「做梦」整理）、`memory-preview.js`（召回预览）
-- **群管理三件** —— `mutes.js`（禁言表）、`proposals.js`（提案）、`send-failures.js`（发送失败可见 / 可重发）
-- **随包技能** —— `skills/doujin-lookup/`、`skills/合并转发发送/`
-- **前端重构** —— 原本单文件 `ui/app.js`（约 1 万行）拆成 `ui/app/00-core.js` … `17-init.js` 共 18 个模块，`ui/app.js` 只留作路标
-- `electron/preload.js`
+- **微信通道** —— `src/wechat-channel.js`（通道生命周期）、`wechat-contacts.js`（联系人名字主动同步）+ 前端页
+- **记忆增强** —— `src/core-memory.js`（核心记忆，与会话存档解耦）、`dream.js`（「做梦」整理）、`memory-preview.js`（召回预览）
+- **群管理三件** —— `src/mutes.js`（禁言表）、`proposals.js`（提案）、`send-failures.js`（发送失败可见 / 可重发）
+- **图片与视频** —— `src/image-search.js`（图搜）、`ffmpeg-path.js`、`cf-fetch.js`、`zip.js`、`gif.js`
+- **JM 桥** —— `src/jm-bridge.js` + 随包技能 `skills/doujin-lookup/`、`skills/合并转发发送/`
+- **前端拆分** —— ⚠️ 上游 0.4.0 **也把前端拆了**，但拆法不同（`00-core` + `01-boot` … `12-concept2-ui` 共 13 段）；
+  本版是**另外一套**：`ui/app/00-core.js` … `17-init.js` 共 **18 段**，`ui/app.js` 只留作路标
+- 另有 `electron/preload.js`（上游用的是 `preload.cjs`）、`plugins/README.md`、`prices.json`（上游 0.4.0 已删掉它，改用远程价格源）
 
-代码规模从原版的约 14.4k 行长到约 **32.4k 行**（`src/` 19.8k + `ui/` JS 9.1k + CSS 3.5k）。
-架构取向与原版一致：**无状态会话、按次计费、零框架前端**，这些仍然是原版的设计。
+**双方都有、内容不同（53 个）—— 这才是"分叉"的主体：**
 
-**未收录的 9 个上游文件：** `test/` 下 5 个测试、`docs/model-prices.md`，以及 `scripts/` 里的
-`apply-vision-docs.mjs` / `gen-icon.mjs` / `link-runtime-junctions.ps1`。
-其中前端那 3 个测试（`render-test` / `scroll-test` / `usage-e2e`）依赖**单文件** `ui/app.js`，
-而本版已把它拆成 18 段 —— 直接放进来会**一跑就失败**，所以不收。本版的回归测试另行单独维护。
+`src/skills/` 六个模块 + `plugin-loader.js` + `tool-registry.js`（⚠️ **技能 / 插件系统上游 0.4.0 也有**，
+两边是**各自实现的同名子系统**，不是本版独有的发明）、`image-compress.js` / `image-type.js` /
+`gif-to-video.js` / `video-reader.js`（同样两边都有），以及 `app.js`、`orchestrator.js`、`prompt.js`、
+`memory.js`、`tools.js`、`personas.js`、`llm.js`、`server.js`、`ui/landing.html`、`ui/style.css`、
+`ui/index.html`、`.gitignore`、`package.json`、`package-lock.json`、`build/installer.nsh` 等。
+
+**上游 0.4.0 有、本版没有（92 个）—— 有意未收录：**
+
+| 类别 | 数量 | 内容 |
+|---|---|---|
+| `test/` | 34 | 上游的测试套件（含 `_harness.mjs` / `_ui-load.mjs` / 5 个 `coverage-*` / `selftest.mjs` 等） |
+| `ui/` | 18 | `ui/app/01-boot.js` … `12-concept2-ui.js`（上游那套拆分）、`captcha-sw.js`、`persona-plaza/`、`plugin-market/`、`skill-market/`、`vendor/` |
+| `scripts/` | 14 | 4 个 `setup*.mjs`、`pack-qq-portable.mjs`、`new-skill.mjs`、`export-prices-md.mjs`、`gen-icon.mjs`、`apply-vision-docs.mjs`、`judge-check.mjs`、`preload-check.mjs`、`protocol-check.mjs`、`lib/`（2 个）、`link-runtime-junctions.ps1` |
+| `src/` | 12 | `community.js`、`market.js`、`profile.js`、`reminders.js`、`routes.js`、`thinking.js`、`reply-rescue.js`、`instance-lock.js`、`logger.js`、`holidays.js`、`media-links.js`、`zip-install.js` |
+| `doc/` | 9 | 扩展开发文档（skill / plugin / prompt-pipeline / video-modes 等） |
+| 其它 | 5 | `server/`（2，社区后端）、`.zcodeignore`、`community.key.example`、`electron/preload.cjs` |
+
+未收录的理由分三类：① **依赖单文件 `ui/app.js`** —— 上游那 3 个测试（`render-test` / `scroll-test` /
+`usage-e2e`）直接读它，而本版已拆成 18 段 ⇒ 收进来**一跑就红**（补一堆失败的测试比没有测试更糟）；
+② **属于上游 0.4.0 的新功能面**（社区 / 市场 / 人设广场 / 插件市场）—— 本版**有意不跟**；
+③ `link-runtime-junctions.ps1` 里硬编码的是**上游作者的本机路径**，不适合收进别人的仓库。
 
 **关于依赖文件：** 上游 v0.3.0 里的 `.gitignore`、`package-lock.json`、`build/installer.nsh`、
-`scripts/export-prices.mjs`、`scripts/sanitize-release.mjs` 在本版中一度缺失，现已补回；
-其中 `package-lock.json` 是按本版 `package.json` **重新生成**的（上游那份的版本号停在 0.2.1，已过期）。
+`scripts/export-prices.mjs`、`scripts/sanitize-release.mjs` 在本版中一度缺失，现已补回 ——
+这几个是**与 v0.3.0 对齐**；它们与 0.4.0 的同名文件仍有差异，所以上表把它们算作"内容不同"。
+其中 `package-lock.json` 是按本版 `package.json` 重新生成的。
+
+代码规模约 **32.4k 行**（`src/` 19.8k + `ui/` JS 9.1k + CSS 3.5k）。
+架构取向与原版一致：**无状态会话、按次计费、零框架前端**，这些仍然是原版的设计。
 
 ### 许可与署名
 
@@ -65,7 +92,8 @@
 
 ## 以下为上游 README 原文
 
-> ℹ️ **以下内容由原版作者 Kondius 撰写**，描述的是原版 v0.3.0 的功能与设计。
+> ℹ️ **以下内容由原版作者 Kondius 撰写**，描述的是**本版所基于的那个版本**（v0.3.0）的功能与设计。
+> ⚠️ 上游现在的 **0.4.0 已经把自己的 README 重写过**，所以本段与上游当前那份**不一样**。
 > 本版在其基础上做了上述改造，因此个别细节可能与本版实际实现有出入 —— **以代码为准**。
 
 > 一个跑在桌面上的 QQ 群聊 Agent：无状态会话架构，让每次处理的 token 成本恒定可控。
