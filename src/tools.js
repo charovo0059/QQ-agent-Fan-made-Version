@@ -859,7 +859,11 @@ export function buildToolDefs() {
               + '要收藏第一张就省略 index（或用 index=1）。');
           }
 
-          const saved = ctx.stickers.collect(args.messageId, {
+          // 🆕 2026-09-29（第三十一对话）§3-26：`collect()` 现在是 async —— 它在新增条目落盘后
+          // 会**顺手把原图字节缓存到本地**（收藏那一刻 URL 还活着，那才是唯一能保住每一张的时机）。
+          // ⚠️ 这一步**带 12 秒超时**（见 sticker-manager 的 COLLECT_FILL_TIMEOUT_MS）：
+          //    它挂在工具调用这一环，服务器不响应不能把模型的任务一直挂着。
+          const saved = await ctx.stickers.collect(args.messageId, {
             url: images[index - 1].url,
             file: images[index - 1].file,
             note: String(args.note ?? ''),
