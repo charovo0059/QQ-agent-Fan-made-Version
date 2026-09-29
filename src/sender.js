@@ -10,13 +10,36 @@ import { resolveFreshImageUrl } from './onebot.js';
 import { pathToFileURL } from 'node:url';
 // ⚠️ 只为拿本地表情缓存的路径（cachedStickerFilePath）。tools.js 不 import sender.js
 //    ⇒ 不构成循环依赖（本轮实测确认过）。
-import { cachedStickerFilePath } from './tools.js';
+// 🆕 2026-09-29（第三十对话）再加 `ensureStickerImage`：发送侧**自己补缓存**（见 sendSticker 的注释）。
+//    同一次 import 里取两个，仍然没有循环依赖。
+import { cachedStickerFilePath, ensureStickerImage } from './tools.js';
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
 const DEFAULT_MAX_PER_HOUR = DEFAULT_CONFIG.send.maxPerHour;
 // 去重窗口的回退值也必须与 DEFAULT_CONFIG 一致（两处一致由 `测试-现行\test-发送去重.mjs` 钉住）。
 const DEFAULT_DEDUPE_WINDOW_MS = DEFAULT_CONFIG.send.dedupeWindowMs;
+// 🆕 2026-09-29（第三十对话）：发表情时"补本地缓存"那一步的超时上限。
+// 为什么需要：本机表情缓存里单个 GIF 有 2~8MB，而这一步挂在**每会话串行**的发送链上
+// ⇒ 服务器不响应就会把该会话后面所有出站都堵住。超时后放弃补缓存、走原远程链接那条路。
+// 12 秒的依据：实测同一批图在本地缓存写入时"下载 + 落盘"是秒级，留一个数量级的余量。
+export const STICKER_FILL_TIMEOUT_MS = 12000;
+
+/**
+ * 读"补缓存超时"的当前值。
+ *
+ * 为什么留一个可以改的钩子（而不是把常量写死在调用处）：那条超时路是
+ * "**服务器不响应**"才走到的，而它的失效形态正是本项目最忌的**静默卡死**
+ * （没人报错，整条会话的出站排在那里）。要给它写判据，就不能让判据真等 12 秒 ——
+ * 判据跑一次要 12 秒，很快就会被后人从回归里摘掉，那时这条防线就名存实亡。
+ * 所以：**生产路径读的就是这个函数**（默认值不变），判据临时改成一个小值来跑。
+ */
+let stickerFillTimeoutMs = STICKER_FILL_TIMEOUT_MS;
+export function stickerFillTimeout() { return stickerFillTimeoutMs; }
+/** 只给判据用：改这个值。生产路径不会调它。 */
+export function __setStickerFillTimeoutForTest(ms) {
+  stickerFillTimeoutMs = Math.max(1, Number(ms) || STICKER_FILL_TIMEOUT_MS);
+}
 
 export class SendQueue {
   /**
@@ -317,6 +340,56 @@ export class SendQueue {
           console.error(`[sender] 发表情：走本地缓存失败（${error?.message ?? error}），改用远程链接重试`);
         }
       }
+      // ── 🆕 2026-09-29（第三十对话）：**缓存没命中时，发送侧自己补一次缓存** ──────────
+      // 🔴 为什么必须补（线上实测，不是推测）：原实现只在"缓存**已经**存在"时走本地那条路，
+      //    而**缓存从来不会在发送路径上被填充** —— 它只由控制台缩略图（`/api/stickers/<id>/image`）
+      //    与 `get_sticker_image`（模型看图）顺手写下来。于是"模型选中一张**从没被看过**的表情"
+      //    ⇒ 无缓存 + `get_image` 换不到新链（ai 收藏那批靠的是 QQ 侧临时缓存，会过期）
+      //    ⇒ 把存下来的死链接交给 OneBot 去下载 ⇒ `retcode=100 HTTP download failed: 404`。
+      //
+      // 数据（扫全部会话存档 + `data/stickers.json`，2026-09-29）：
+      //    · **成功发出 34 次，全部是"有本地缓存"的（含 2 次 ai 来源）**；
+      //    · **失败 27 次，全部是"没有本地缓存"的**（22 张 ai 收藏 + 早期几次）；
+      //    · 库 43 条里只有 21 条有缓存 ⇒ 剩下 22 条**每次发都注定失败**。
+      //   ⇒ 结论很硬：**本地缓存那条路是好的，坏的是"没人去填它"**。
+      //
+      // 做法：复用既有的 `ensureStickerImage`（它内部 = 先读缓存 → 换新链 → `safeFetchBinary`
+      //   下载 → **顺手写进 data/stickers/**）⇒ 补完之后**再取一次路径**，就落进上面那条
+      //   "已经证明能用"的分支。
+      // ⚠️ 四条分寸（都别改）：
+      //   ① `ensureStickerImage` **自己会先读缓存** ⇒ 真命中时它是纯本地、零网络，不会白下；
+      //   ② 它**失败不能中断发送** ⇒ 整个包在 try/catch 里，原样落到下面的远程链接那条路
+      //      （退化成改动前的行为，不会更糟）；
+      //   ③ `cachedStickerFilePath` 是**真去 existsSync** 的 ⇒ 下载没落盘也不会拿到空路径；
+      //   ④ 🆕 **必须带超时**：这一步是"发消息之前先下载 2~8MB"，而它挂在**每会话串行**的发送链上
+      //      ⇒ 服务器不响应时会把这条会话后面**所有**的出站都堵住。超时就放弃补缓存、
+      //      走原来的远程那条路（宁可这一次发不出去，也不能把会话卡死）。
+      let fillErr = null;
+      if (!data && !cached) {
+        try {
+          await Promise.race([
+            ensureStickerImage(this.onebot, sticker),
+            new Promise((_, rej) => {
+              // ⚠️ 定时器**保持 ref**（不许 unref）：unref 过的定时器在事件循环没别的活时不会触发，
+              //    那会让这条 race 永不 settle（本项目 2026-09-29 刚踩过，见经验库 promise-unref-13-fail）。
+              const limit = stickerFillTimeout();
+              const t = setTimeout(() => rej(new Error(`补缓存超时（${limit}ms）`)), limit);
+              if (typeof t.ref === 'function') t.ref();
+            })
+          ]);
+          const filled = cachedStickerFilePath(sticker);
+          if (filled) {
+            try {
+              data = await this.onebot.sendSticker(kind, id, pathToFileURL(filled).href, pickOpts);
+            } catch (error) {
+              lastErr = error;
+              console.error(`[sender] 发表情：补完缓存后仍然发送失败（${error?.message ?? error}），改用远程链接重试`);
+            }
+          }
+        } catch (error) {
+          fillErr = error;   // 补缓存失败：只记原因，不打断（下面还有远程那条路）
+        }
+      }
       if (!data) {
         const { url: sendUrl } = await resolveFreshImageUrl(this.onebot, { url: sticker.url, file: sticker.file });
         if (!sendUrl) throw lastErr || new Error('发表情失败：本地缓存与远程链接都没有可用的图片');
@@ -327,8 +400,11 @@ export class SendQueue {
         }
       }
       if (!data) {
-        // 两条都失败 ⇒ 把**两条路各自的失败原因**都说出来，别只报最后一条（否则永远查不出是哪条坏）
-        throw new Error(`发表情失败（本地缓存${cached ? '' : '不存在'}、远程链接也不可用）：${lastErr?.message ?? lastErr}`);
+        // 两条都失败 ⇒ 把**每条路各自的失败原因**都说出来，别只报最后一条
+        // （否则永远查不出是哪条坏）。补缓存那一环的失败原因单独带上。
+        throw new Error(`发表情失败（本地缓存${cached ? '有但发送失败' : '不存在'}`
+          + `、远程链接也不可用${fillErr ? `；补缓存也失败：${fillErr?.message ?? fillErr}` : ''}）：`
+          + `${lastErr?.message ?? lastErr}`);
       }
       const ts = Date.now();
       this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: data?.message_id ?? null });
