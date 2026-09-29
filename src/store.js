@@ -139,6 +139,8 @@ export class ChatStore {
   constructor(maxPerChat = 0) {
     this.maxPerChat = Math.max(0, Number(maxPerChat) || 0);
     this.chats = new Map(); // chatKey -> state
+    // chatKey -> { n, name }：`chatDisplayName` 的缓存（见那个方法的注释）
+    this.nameCache = new Map();
   }
 
   setMaxPerChat(cap) {
@@ -189,6 +191,45 @@ export class ChatStore {
   chatSource(chatKey) {
     const st = this.#state(chatKey);
     return st.source || 'qq';
+  }
+
+  /**
+   * 从**存档里见过的人名**取一个显示名（2026-09-29 第三十对话加）。
+   *
+   * 守的是什么（用户报的 §3-7 缺口①）：会话列表里 QQ 私聊只显示「私聊 2229596136」，
+   * 而"这个人叫什么"其实**就写在我们自己的存档里** —— 每条入站消息都带 `senderName`
+   * （`appendIncoming` 写进去的群名片/昵称）。原来这份信息只被用来渲染消息行，
+   * 从没被用来给会话起名 ⇒ 界面明明有名字却显示数字。
+   *
+   * 语义：**最近一条不是她自己的消息**里那个人的名字。
+   *   · 从后往前扫，**遇到第一条非 self 且带名字的就返回** —— 为什么不是"第一条"：
+   *     群里发言的人一直在换，取最近说话的那个人比取最早的那个更接近"这个会话现在是谁"。
+   *   · 群聊里那可能是"最后一次发言的人"而不是群名 ⇒ 调用方**只许在私聊上用**
+   *     （群名的权威来源是 OneBot 的 `get_group_info`，见 `/api/chats`）。
+   *   · 全是自己发的消息 / 存档为空 ⇒ 返回空串（调用方退回数字 id）。
+   *
+   * 为什么要有缓存：这是**热路径**（`/api/chats` 每 4 秒被前端拉一次），
+   * 而 5689 条的群存档每轮全扫是白烧 CPU。缓存按"消息条数"失效 —— 条数是单调增的
+   * （`nextLocalId` 不回退），条数没变就说明没有新消息，名字不可能变。
+   * ⚠️ 但**删消息**（`deleteMessage` / `clearMessages`）会让条数减少 ⇒ 那时必须失效，
+   *    所以比较用的是 `!==` 而不是 `<`。
+   */
+  chatDisplayName(chatKey) {
+    const st = this.#state(chatKey);
+    const list = Array.isArray(st.messages) ? st.messages : [];
+    const n = list.length;
+    const hit = this.nameCache.get(chatKey);
+    if (hit && hit.n === n) return hit.name;
+    let name = '';
+    for (let i = n - 1; i >= 0; i--) {
+      const m = list[i];
+      if (!m || m.self) continue;
+      const s = String(m.senderName || '').trim();
+      if (s) { name = s; break; }
+    }
+    if (this.nameCache.size >= 512) this.nameCache.clear();   // 清空只会让下一轮多扫一次，不会算错
+    this.nameCache.set(chatKey, { n, name });
+    return name;
   }
 
   /** 所有指定平台的会话（前端切换视图要用）。 */

@@ -263,6 +263,25 @@ export class OneBotClient {
   async getGroupMemberInfo(groupId, userId) {
     return this.call('get_group_member_info', { group_id: Number(groupId), user_id: Number(userId) });
   }
+
+  /**
+   * 好友列表（2026-09-29 第三十对话加）。
+   *
+   * 为什么要一个类型化方法而不是在调用方写 `call('get_friend_list')`：
+   * 现有那几个（`getGroupInfo` / `getGroupMemberInfo` / `getMsg`）都是这个形状 ——
+   * 动作名与参数**只在这一个文件里**出现，调用方读的是意图（"我要好友列表"），
+   * 以后某个实现要换动作名（或补协议差异）就只改这一处。
+   *
+   * 返回形状（实测 SnowLuma / OneBot v11）：`[{ user_id, nickname, remark, ... }]`。
+   * ⚠️ `call()` 已经把 OneBot 的 `{status,retcode,data}` 拆过了（返回 `data`），
+   *    所以这里的返回值**就是数组本身** —— 调用方不必再解一层。
+   * ⚠️ 机器人没登录时这个动作可能**永不返回** ⇒ 调用方必须自带超时
+   *    （见 `qq-contacts.js` 的 `syncQqFriendNames`）。
+   */
+  async getFriendList() {
+    const data = await this.call('get_friend_list', {});
+    return Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+  }
 }
 
 // ── 卡片 / 富文本段 → 可读文字（2026-09-26 第二十五对话，提案 32bd8267）────────

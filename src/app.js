@@ -29,6 +29,10 @@ import { WechatChannel } from './wechat-channel.js';
 // 微信联系人登记表（2026-09-20）：把桥派生的数字 id 与昵称对应起来，
 // 让白名单可以点选而不是手填数字。见该文件顶部注释（含"为什么必须有它"）。
 import { learnContact, listContacts, syncContacts } from './wechat-contacts.js';
+// QQ 联系人名字表（2026-09-29 第三十对话）：会话列表/记忆视图里"QQ 的人叫什么"。
+// 与上面那张微信表**刻意不同**：这份只在内存里（权威来源 OneBot 每次开机都在，不必落盘），
+// 且**不写回 config.memberNotes**（写进去会跟着进提示词）。理由见该文件文件头。
+import { syncQqFriendNames, qqNames, qqNameOf, qqSyncStatus } from './qq-contacts.js';
 import { listModels, chatCompletion, resolveApiKey, estimateCost, cacheHitRate } from './llm.js';
 import { jmRequest, jmPaths, jmPing, stopJm } from './jm-bridge.js';
 import { createZip } from './zip.js';
@@ -734,6 +738,57 @@ export function createApp({ log = console.log } = {}) {
       probeWechatUpstream().catch(() => {});
     }
     return wechatUpstream;
+  }
+
+  // ── QQ 侧的名字同步（2026-09-29 第三十对话，对应交接 §3-7 缺口①/②）────────────
+  //
+  // 与上面微信那套**同构但不同源**：微信问桥（`get_wechat_contacts`），QQ 问 OneBot
+  // （`get_friend_list`，一条查询拿到全量 `nickname`/`remark`）。
+  //
+  // 🔴 名字是**纯显示层**：白名单判定、发送目标、记忆文件全按数字 id ⇒ 这套整个坏掉
+  //    也不会放错人、不会发错人（只是界面显示旧名或退化成数字 id）。
+  //
+  // ⚠️ 与微信那套的一处**有意差异**（失败后的重试节奏）：
+  //    微信那套只在**成功**时更新 `at` ⇒ 失败后每次 `/api/status`（15 秒轮询）都会重问桥。
+  //    这里失败后给 **60 秒**地板，避免"机器人一整晚没登录 ⇒ 每 15 秒白敲一次 OneBot"
+  //    （本项目对"吵闹的浪费"与对"静默"一样敏感，见 `onebot.js` 退避那段）。
+  const qqNameSync = { at: 0, retryAt: 0, running: false, last: null };
+  const QQ_NAME_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+  const QQ_NAME_SYNC_RETRY_MS = 60 * 1000;
+
+  async function syncQqNamesNow(reason = '') {
+    const r = await syncQqFriendNames(onebot, { reason });
+    if (r.ok) {
+      log(`[qq-contacts] 同步名字（${reason || '未注明'}）：读到 ${r.raw} 条 ⇒ 入表 ${r.count}`
+        + `（跳过无 id/无名字 ${r.skipped}）`);
+      qqNameSync.at = Date.now();
+      qqNameSync.retryAt = 0;
+      qqNameSync.last = r;
+      try { emit('qq-contacts-update', { ...r }); } catch { /* ignore */ }
+      return r;
+    }
+    // 失败也记一次（界面/排障要能看到"为什么名字是旧的"），并设重试地板
+    qqNameSync.retryAt = Date.now() + QQ_NAME_SYNC_RETRY_MS;
+    qqNameSync.last = r;
+    log(`[qq-contacts] 同步名字失败（${reason || '未注明'}）：${r.error}`);
+    return r;
+  }
+
+  async function maybeSyncQqNames(reason) {
+    if (qqNameSync.running) return;
+    const now = Date.now();
+    if (now < qqNameSync.retryAt) return;                          // 失败后的地板
+    if (now - qqNameSync.at < QQ_NAME_SYNC_INTERVAL_MS) return;    // 成功后的 30 分钟闸
+    if (!onebot.connected) return;                                 // 没连上就别白问（发起前先判，省一次必失败的往返）
+    qqNameSync.running = true;
+    try {
+      await syncQqNamesNow(reason);
+    } catch (e) {
+      qqNameSync.retryAt = Date.now() + QQ_NAME_SYNC_RETRY_MS;
+      log('[qq-contacts] 自动同步异常：' + String(e?.message ?? e));
+    } finally {
+      qqNameSync.running = false;
+    }
   }
 
   // ── 微信通道（中继 + Bridge）的生命周期：与 SnowLuma 那套同构（用户要"统一类似的界面"）──
@@ -1651,6 +1706,12 @@ export function createApp({ log = console.log } = {}) {
         const dayKey = todayKey();
         const usage = sessions.todayUsage(dayKey);
         const cfgNow = getConfig();
+        // 🆕 2026-09-29（第三十对话）：QQ 侧名字的"开机/连上后自动同步一次"。
+        //   挂在这里的理由与微信那套**完全一样**（见 `probeWechatUpstream` 里那段注释）：
+        //   前端本来就在 15 秒轮询 `/api/status`，而"机器人连上了"恰好就是要同步的时机，
+        //   不必另起一个全局定时器（本项目对全局定时器很克制）。
+        //   fire-and-forget：绝不拖慢 /api/status（它被 15 秒轮询，慢一拍就全界面发卡）。
+        maybeSyncQqNames('连上/轮询').catch(() => {});
         // 成本估算：命中官方价走官方价，否则用手填单价
         const cost = estimateCost(usage, { model: cfgNow.api?.model });
         return json(res, 200, {
@@ -1658,7 +1719,12 @@ export function createApp({ log = console.log } = {}) {
             connected: onebot.connected,
             everConnected: onebot.everConnected,
             error: onebot.lastConnectError,
-            self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
+            self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null,
+            // 🆕 2026-09-29（第三十对话）：QQ 名字表的状态。为什么放进 /api/status ——
+            //   名字表是**内存态**，它的失败症状是"界面又只剩数字 id"，而那种症状
+            //   光看界面**分不出**"OneBot 没连上"与"连上了但没同步成功"。
+            //   这里把"表里几条 + 上次同步成没成"直接写在能查到的地方（与端口预检同一个道理）。
+            names: { count: Object.keys(qqNames()).length, last: qqSyncStatus() }
           },
           // 微信通道（第二平台）的状态。
           // 为什么必须暴露：它没接上时的症状是"给它发微信不回"，**原因完全看不出来** ——
@@ -3114,9 +3180,24 @@ export function createApp({ log = console.log } = {}) {
             if (hit?.name) c.chatName = hit.name;
             return;
           }
+          // 🆕 2026-09-29（第三十对话）：**QQ 私聊也要有名字**（交接 §3-7 缺口①）。
+          //    原来这里 `if (!m) return;` 直接把私聊放过去了 ⇒ 界面只能显示「私聊 2229596136」。
+          //    但"这个人叫什么"我们本来就有两处现成的来源，都不必问 OneBot 也不会超时：
+          //      ① OneBot 的 `get_friend_list`（`qq-contacts.js`，带 nickname/remark）；
+          //      ② **我们自己的存档** —— 每条入站消息都记了 `senderName`（`store.chatDisplayName`）。
+          //    优先级：好友表赢在"权威且不必等消息"，存档赢在"没连 OneBot 时也有"。
+          //    ⚠️ 两处都没有 ⇒ 空串 ⇒ 前端照旧显示「私聊 <号>」（绝不显示错人）。
+          const p = /^private:(\d+)$/.exec(String(c.key || ''));
+          if (p) {
+            c.chatName = qqNameOf(p[1]) || store.chatDisplayName(c.key) || '';
+            return;
+          }
           const m = /^group:(\d+)$/.exec(String(c.key || ''));
           if (!m) return;
           try {
+            // ⚠️ 群**只有这一条来源**：群名的权威来源就是 OneBot 的 `get_group_info`。
+            //    刻意**不**拿 `store.chatDisplayName` 兜底 —— 那对群聊返回的是"最后一个发言的人"，
+            //    拿它当群名是**显示错的东西**（比显示「群 123456789」更坏）。
             c.chatName = await Promise.race([
               orchestrator.getChatName(m[1]),
               new Promise((r) => setTimeout(() => r(''), 3000))   // 3s 超时保护
@@ -3198,7 +3279,16 @@ export function createApp({ log = console.log } = {}) {
           membersOf: (k) => memory.members(k),
           platformOf: (k) => memory.platformOf(k),
           contacts,
-          notes: getConfig().memberNotes || {},
+          // 🆕 2026-09-29（第三十对话 · 交接 §3-7 缺口②）：**QQ 侧的名字原来只剩一处来源**
+          //   —— `config.memberNotes`，而线上它是空的（实测 `{}`）⇒ 白名单里没有印象的人
+          //   在"同一个人"候选清单里就只剩一串数字，用户根本认不出要关联谁。
+          //   这里把手填备注与**自动学到的 QQ 名字**合并后再传进去：
+          //     `{ ...自动学到的, ...memberNotes }` ⇒ 手填的**永远赢**（那是用户明确表达的意图）。
+          //   ⚠️ 为什么在**调用点**合并而不是给 `buildIdentityCandidates` 加参数：
+          //     它是纯函数、有自己的判据（`test-同一个人关联候选与解除.mjs` 直接 import 它跑）。
+          //     加参数就得同时改签名、改判据、改那份文档注释 —— 而"合并两处名字来源"本来就是
+          //     **调用方的事**（它才知道去哪儿拿）。保持纯函数不变，风险最小。
+          notes: { ...qqNames(), ...(getConfig().memberNotes || {}) },
           allowPrivate: getConfig().allow?.private || []
         });
         return json(res, 200, { chats, identity: memory.identityMap() });

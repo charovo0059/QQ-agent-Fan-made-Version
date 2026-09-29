@@ -587,7 +587,9 @@ async function loadMemoryDetail(chatKey) {
       ? `<div class="field" style="margin:8px 0"><button class="btn btn-small" id="mem-load-members-btn">拉取群成员列表（编辑备注）</button><span id="mem-members-status" class="muted"></span></div><div id="mem-members"></div>`
       : '';
     const rows = members.map((m) => {
-      const who = notes[String(m.userId)] || m.name || m.userId || '某人';
+      // 名字：手填备注 > 后端合并过的名字（OneBot 好友表 ∪ 存档见过）> 记忆文件里的 name > 数字 id。
+      // ⚠️ 原来这里只查 memberNotes ⇒ 线上它是空的，于是这个人只剩一串数字（交接 §3-7 缺口②）。
+      const who = userNameOf(m.userId, m.name) || '某人';
       const qq = m.userId ? ` <span class="muted">(QQ ${esc(m.userId)})</span>` : '';
       const imps = m.impressions.map((e) => `- ${e.content}`).join('\n');
       // 没有 QQ 号的旧数据（早期按名字落文件的兜底条目）定位不到成员接口，
@@ -1359,8 +1361,10 @@ function openMemberImpressModal(chatKey, member) {
   const cfg = state.config || {};
   const notes = cfg.memberNotes || {};
   const note = notes[String(userId)] || '';
+  // 标题上的名字也走共用解析（同一口径，免得弹窗标题与列表里的名字对不上）
+  const displayName = userNameOf(userId, name);
   const overlay = modelModalShell({
-    head: isEdit ? `编辑群友印象：${note || name || userId}` : '添加群友印象',
+    head: isEdit ? `编辑群友印象：${note || displayName || userId}` : '添加群友印象',
     body: `
       ${isEdit ? `
       <div class="field-row">
