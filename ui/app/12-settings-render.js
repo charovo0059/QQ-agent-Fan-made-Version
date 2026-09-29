@@ -1006,6 +1006,38 @@ function chatNameOf(chatKey) {
 }
 
 /**
+ * 某个 QQ 号在界面上的名字（2026-09-29 第三十对话加）。
+ *
+ * 守的是什么（交接 §3-7 缺口②）：记忆页原来一律 `memberNotes[userId] || ... || userId`
+ * —— 而线上 `memberNotes` 是**空的**（实测 `{}`）⇒ 白名单里没印象的人、以及"同一个人"
+ * 候选清单里的人都只剩一串数字，用户认不出要关联谁。
+ *
+ * 优先级（**与后端 /api/memory-identity 的合并口径一致**）：
+ *   ① `config.memberNotes` —— 用户在界面里手填的备注，**永远是它赢**
+ *      （那是用户明确表达的意图，不能被自动学到的名字盖掉）；
+ *   ② `/api/memory-identity` 回给这个会话的成员名 —— 后端已经把
+ *      「OneBot 好友表（nickname/remark） ∪ 存档里见过的 senderName」并进去了；
+ *   ③ 传进来的兜底名（调用方手上现成的，比如记忆文件里的 `m.name`）；
+ *   ④ 最后才是数字 id —— UI 本来就这么兜的，**绝不显示空白**。
+ *
+ * ⚠️ 为什么这里要"再兜一层"而不是只信后端：`/api/memory-identity` 的成员名是按
+ *    `平台:id` 去重后的**一条**，而同一个 QQ 号在不同群里可能只有其中一个会话有名字；
+ *    而群成员表（`openMemberImpressModal`）是**现拉 OneBot** 的另一条路。两处各兜各的，
+ *    任一条断了都还有名字可显示（这正是本条待办当初说"现问 OneBot 就能做"的意思）。
+ */
+function userNameOf(userId, fallback = '') {
+  const id = String(userId ?? '').trim();
+  if (!id) return String(fallback || '') || '某人';
+  const note = (state.config?.memberNotes || {})[id];
+  if (note) return String(note);
+  for (const c of (state.identityChats || [])) {
+    const hit = (c.members || []).find((m) => String(m.userId) === id);
+    if (hit && hit.name) return String(hit.name);
+  }
+  return String(fallback || '') || id;
+}
+
+/**
  * 会话标题：群名（群号） / 群 群号 / 私聊 号  —— 微信来源的末尾再加「（微信）」
  *
  * 拿到群名时显示"群名（群号）"，既好认又能确认身份；拿不到就退回原来的"群 群号"。
