@@ -31,6 +31,55 @@ const log = (...a) => console.log(...a);
 const actions = [];
 
 /**
+ * 🔴 2026-09-29（第三十对话 · 交接 §3-21）：**说清"到底在清哪个目录"**。
+ *
+ * ── 为什么要加这一段（真机实测，不是推测）──────────────────────────────
+ * 原来这个脚本的报告最后一行是「完成。现在可以压缩分享了」，而它清的目录是
+ * `process.env.QQ_AGENT_DATA_DIR || <app>/data`。**直接 `node scripts/sanitize-release.mjs`
+ * 跑时没人设那个环境变量**，于是一台开发机上真正的线上数据
+ * （`%LOCALAPPDATA%\QQ Agent\data`，里面有 **API Key、真实聊天记录、记忆**）
+ * **一个字节都不会被动**，脚本却照样打印「完成」。
+ *
+ * 这是一种**比"误删"更坏的失败**：误删看得见（配置空了），而"以为清干净了、其实没有"
+ * 会把一份**带着真 Key 的工作区**发出去，全程没有任何提示。
+ * 与本项目一贯的口径（"宁可大声报，也不要静默失效"）一致 ⇒ 这里把三件事说清楚：
+ *   ① 本次**实际**会清哪个目录；
+ *   ② 这个目录是**从哪来的**（环境变量 or 默认值）—— 这决定了它是不是你以为的那个；
+ *   ③ 如果"标准线上位置"也存在且非空，而本次**不是**在清它 ⇒ **明确警告**那句。
+ *
+ * ⚠️ 只在**执行模式与演练模式**下报（`--scan` 什么都不删，说了反而像噪音）。
+ * ⚠️ 本段**不改变任何删除行为**：它只把已经存在的事实说出来（零行为改动）。
+ */
+function reportWhichDataDir() {
+  const appDataDir = path.join(ROOT, 'data');
+  const fromEnv = !!process.env.QQ_AGENT_DATA_DIR;
+  const external = path.join(process.env.LOCALAPPDATA || '', 'QQ Agent', 'data');
+  const hasCfg = (d) => { try { return fs.existsSync(path.join(d, 'config.json')) } catch { return false } };
+
+  log('本次要清的数据目录：', DATA_DIR);
+  log('  这个路径来自：', fromEnv
+    ? '环境变量 QQ_AGENT_DATA_DIR（**你显式指定的**）'
+    : `默认值 <项目目录>/data —— ⚠️ 因为环境变量 QQ_AGENT_DATA_DIR 没设（项目目录 = ${ROOT}）`);
+  if (path.resolve(DATA_DIR) === path.resolve(appDataDir)) {
+    log('  ⚠️ 注意：这是**项目目录内**的 data/（开发树/免安装版的数据位置），不是 %LOCALAPPDATA% 下那份。');
+  }
+  // ③ 线上位置也在、且本次没在清它 ⇒ 必须出声
+  const ext = process.env.LOCALAPPDATA ? external : '';
+  if (ext && path.resolve(DATA_DIR) !== path.resolve(ext) && hasCfg(ext)) {
+    log('');
+    log('  🔴🔴 **警告：%LOCALAPPDATA% 下那份数据没有被清理**');
+    log('       位置：', ext, '（存在且里面有 config.json）');
+    log('       它通常装着**真 API Key、聊天记录、记忆**（新默认位置，在安装目录之外）。');
+    log('       ⇒ 本次脱敏**只动了上面那个目录**。若你要发布的是这份数据，请改成：');
+    log('         PowerShell:  $env:QQ_AGENT_DATA_DIR = "' + ext + '"; node scripts/sanitize-release.mjs --dry-run');
+    log('       ⛔ 两个都清会**同时删掉开发树那份**，正式数据在外部时通常没必要。');
+  } else if (!hasCfg(DATA_DIR)) {
+    log('  ℹ️ 这个目录里现在没有 config.json（首次运行 / 已经清过）—— 本次可能什么都不会发生。');
+  }
+  log('');
+}
+
+/**
  * 删除一个 data 下的文件/目录。
  *
  * 直接 fs.rmSync 在某些环境会被外部钩子（回收站/安全软件）拦截而超时或失败，
@@ -198,10 +247,12 @@ log('═════════════════════════
 log(DRY ? '发布脱敏 —— 演练模式（不修改任何文件）' : (SCAN_ONLY ? '发布脱敏 —— 仅扫描' : '发布脱敏 —— 执行模式'));
 log('════════════════════════════════════════');
 log('项目目录：', ROOT);
-log('数据目录：', DATA_DIR);
+// ⚠️ 这里**不再**单印一行「数据目录」—— 下面 `reportWhichDataDir()` 会把同一个路径
+//    连同"它从哪来的 / 是不是你以为的那个"一起说清楚（印两遍只会让人以为在说两个目录）。
 log('');
 
 if (!SCAN_ONLY) {
+  reportWhichDataDir();
   resetConfig();
   rmrf('messages', '聊天存档');
   rmrf('sessions', '会话留档');
