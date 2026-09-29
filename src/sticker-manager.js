@@ -1,4 +1,4 @@
-// 运行期表情库管理：同步 QQ 收藏表情 + 本地认知层（备注/笔记/使用计数）。
+﻿// 运行期表情库管理：同步 QQ 收藏表情 + 本地认知层（备注/笔记/使用计数）。
 // 纯函数在 stickers.js；这里管缓存、TTL 和 OneBot 交互。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,6 +8,32 @@ import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary, removeSticker,
   findSticker, formatStickerList, applyStickerNote, markStickerUsed, contentHashOfUrl
 } from './stickers.js';
+// 🆕 2026-09-29（第三十一对话）§3-26：**收藏那一刻就把字节缓存下来** ⇒ 复用 tools.js 的
+// `ensureStickerImage`（内部 = 先读缓存 → 换新链 → 下载 → 顺手写进 `data/stickers/`）。
+// ⛔ 不新写第二份下载器/缓存器（那会变成两个口径，迟早分家）。
+// ⚠️ 循环依赖核查（与 `sender.js` import tools.js 同一个形状，那边已实测确认无环）：
+//    本仓库里 import `sticker-manager.js` 的**只有** `app.js`；`tools.js` 不 import 它。
+import { ensureStickerImage } from './tools.js';
+
+// 🆕 2026-09-29（第三十一对话）：收藏时"补本地缓存"那一步的超时上限。
+// 为什么需要：这一步是"收藏之后立刻去下 2~8MB 原图"，而它挂在**模型的工具调用**那一环
+// ⇒ 服务器不响应时那次工具调用会一直挂着（模型在等它回来）。
+// 12 秒的依据与 `sender.js` 的 `STICKER_FILL_TIMEOUT_MS` 同源：实测本地缓存"下载 + 落盘"是秒级，
+// 留一个数量级的余量。
+// ⚠️ 与 `sender.js` 那个**有意各留一份、不合并**：两者的爆炸半径不同（那个堵的是**每会话串行**的
+//    发送链，这个堵的是**一次工具调用**），值以后也可能分道扬镳；而合并要动 `sender.js`
+//    —— 它上一轮刚被 25 条断言 + 变异钉住，为省这 8 行不值得冒那个险。
+export const COLLECT_FILL_TIMEOUT_MS = 12000;
+let collectFillTimeoutMs = COLLECT_FILL_TIMEOUT_MS;
+/** 读"收藏时补缓存超时"的当前值（**生产路径读的就是它**）。 */
+export function collectFillTimeout() { return collectFillTimeoutMs; }
+/** 只给判据用：改这个值。生产路径不会调它。
+ *  为什么要有这个钩子：那条超时路是"服务器不响应"才走到的，而它的失效形态正是本项目最忌的
+ *  **静默卡死**。要给它写判据就**不能让判据真等 12 秒** —— 否则那 12 秒会被后人当成"太慢"
+ *  而从回归里摘掉，那时这条防线就名存实亡。（与 `sender.js` 的 `__setStickerFillTimeoutForTest` 同一理由。） */
+export function __setCollectFillTimeoutForTest(ms) {
+  collectFillTimeoutMs = Math.max(1, Number(ms) || COLLECT_FILL_TIMEOUT_MS);
+}
 
 export class StickerManager {
   constructor(onebot) {
@@ -102,7 +128,50 @@ export class StickerManager {
   }
 
   /**
+   * 🆕 2026-09-29（第三十一对话）§3-26：**收藏那一刻就把字节存到本地**（表情包真正的根治）。
+   *
+   * 🔴 为什么这是"根治"（前一轮只治了症状）：第三十对话修的是**发送路径**
+   *   （`sender.sendSticker` 缓存没命中时自己补一次），那让"以后发"能自愈，
+   *   但**救不了已经死掉的** —— 真机核对：22 条没缓存的表情里只有 2 条还能换到新链，
+   *   另外 20 条连 QQ 侧缓存都没了。那 20 张**在收藏那一刻就注定要丢**：
+   *   当时 URL 还活着，只是**没人把字节存下来**。
+   *   ⇒ 唯一能保住每一张的做法就是这一句：**收藏时 URL 还活着，就立刻落盘**。
+   *
+   * ⚠️ 四条分寸（都别改）：
+   *   ① **带超时**：这一步挂在模型的工具调用上，服务器不响应会让那次调用一直挂着；
+   *   ② 定时器**保持 ref**（⛔ 不许 unref：unref 过的定时器在事件循环没别的活时**不会触发**
+   *      ⇒ race 永不 settle。本项目 2026-09-29 踩过，见经验库 `promise-unref-13-fail`），
+   *      并在 `finally` 里 `clearTimeout`（不 clear 的话那个定时器会白占事件循环到超时为止）；
+   *   ③ **失败不抛**：字节没存下来只是"这一张以后可能发不出去"，而**收藏本身已经成功了**
+   *      （条目已落盘）⇒ 不能因为下载失败，把一次成功的收藏报成失败；
+   *   ④ 失败要**出声**，并如实说明"发送时会再试一次"（那是上一轮修的那条路）。
+   *
+   * @returns {Promise<{ok:boolean, error?:string}>} 只给日志与判据用，不改 `collect()` 的返回形状。
+   */
+  async #fillCache(entry) {
+    let timer = null;
+    try {
+      await Promise.race([
+        ensureStickerImage(this.onebot, entry),
+        new Promise((_, rej) => {
+          const limit = collectFillTimeout();
+          timer = setTimeout(() => rej(new Error(`补缓存超时（${limit}ms）`)), limit);
+          if (typeof timer.ref === 'function') timer.ref();   // 见分寸②
+        })
+      ]);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
    * 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。
+   *
+   * ⚠️ 2026-09-29（第三十一对话）改成 **async**：新增条目落盘后会**顺手把字节缓存下来**
+   *    （见 `#fillCache`）。调用方要多一个 `await`（本仓库只有 `tools.js` 那一个调用点）。
    *
    * @param {string|number} messageId 消息 id
    * @param {object} opts
@@ -122,7 +191,7 @@ export class StickerManager {
    * 出错仍然抛异常（收藏功能关闭 / 没图地址 / 限频到顶），
    * 但限频的报错里会带上"每小时上限多少"，好让模型如实告诉用户。
    */
-  collect(messageId, { url, note = '', index = 1, file = '' } = {}) {
+  async collect(messageId, { url, note = '', index = 1, file = '' } = {}) {
     if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
 
     const limit = Math.max(1, Number(getConfig().sticker?.maxCollectPerHour) || 10);
@@ -181,6 +250,19 @@ export class StickerManager {
     this.entries.push(entry);
     this.collectTimes.push(now);
     saveStickerStore(this.entries);
+
+    // ── 🆕 2026-09-29（第三十一对话）§3-26：这就是"根治"那一句 ─────────────────
+    // 条目**先落盘**再补缓存：补缓存失败/超时都不该把一次成功的收藏变成失败，
+    // 也不能让"下载到一半崩了"把刚收的条目弄丢。
+    // 🔴 **只在真新增（added）时补**，`duplicate` / `renamed` 两条路**一个字节的网络都不打**：
+    //    那两条返回的是**早就存在的条目**，它们存的是**旧 url**（可能已经死了）
+    //    ⇒ 花最多 12 秒去换一次几乎必然失败，而"发送时补缓存"那条路（上一轮修的）本来就会兜底。
+    const filled = await this.#fillCache(entry);
+    if (!filled.ok) {
+      console.warn(`[sticker] 收藏时没能把原图存到本地（${entry.id}）：${filled.error}`
+        + ' —— 这一张以后可能发不出去（发送时会再试一次补缓存）');
+    }
+
     return { entry, added: true, reason: 'added', quotaLeft: Math.max(0, quotaLeft - 1) };
   }
 }
