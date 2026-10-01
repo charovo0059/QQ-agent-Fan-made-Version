@@ -16,17 +16,27 @@ function renderSettingsSection(c) {
     onebot: () => renderOnebotSection(c)
   };
   const render = sections[sec] || sections.api;
-  // 🔴 保存条**必须是最后一个子元素**（2026-10-01 UI 改造第三阶段 条目 1 根因 1）。
-  //    `position: sticky; bottom: 0` 的语义是"元素**本应滚出视口下沿**时把它钉住"；
-  //    它原来是**第一个**子元素 ⇒ 永远从上沿滚出去、永远不满足触发条件 ⇒ 吸底是**空操作**，
-  //    设置页一往下滚它就滚没了（用户在页面下部改完东西**根本找不到保存按钮**，必须滚回顶部）。
-  // ⚠️ 挪动顺序**不影响任何绑定**：`13-settings-events.js` 走 `$('#save-cfg-btn')` / `$('#cfg-save-result')`
-  //    的 **id 查找**（document 级查询），与子元素顺序无关 ⇒ 这两个 id 一个都不能改。
+  // 🔴 保存条**移到滚动区之外**（2026-10-01 调整方案 · 用户拍板方案 B）—— ⚠️ **方向与上一版相反**，别照旧的改。
+  //    用户原话：「能给保存条像之前一样一直置顶吗，现在外观的样式很好，但是固定在下还会浮在文字上有的不美观」
+  //    ⇒ 三条要求：① 一直置顶 ② 样式不变 ③ **不浮在文字上**（这条是选型依据）。
+  //    ⚠️ **为什么不是把 `sticky` 的 `bottom` 改成 `top`**（那个方案 A 已否掉、别再论证）：
+  //       sticky 元素**在原地占位**，无论钉在顶还是底，滚动时内容都从它**底下**穿过 ⇒ 改 top 只是把遮挡
+  //       从"还没读的下方内容"挪到"已读的上方内容"，**遮挡本身没消失**。要零重叠只能**结构上分开**。
+  //    ⇒ 结构变成：`#settings-form`（= `.settings-pane`，flex 列 + overflow:hidden）
+  //         ├── `.save-bar`        （`position: static` + `flex: none` —— 恒定在顶部，不参与滚动）
+  //         └── `.settings-scroll` （`flex: 1` + `min-height: 0` + `overflow-y: auto` —— 内容在这里滚）
+  //    ⚠️ **`${render()}` 那一层包裹不能省**：直接把 `.settings-pane` 改成 flex 而不包，所有内容都会
+  //       变成 flex 项 ⇒ **相邻兄弟的 margin 不再折叠**（`.form-panel` 的 14px 与 `h3` 的 22px 会从
+  //       "折叠成 22px"变成"相加 36px"）⇒ 10 个分区的间距会整体变松。包起来后内部仍是块级流。
+  //    ⚠️ 挪动顺序**不影响任何绑定**：`13-settings-events.js` 走 `$('#save-cfg-btn')` / `$('#cfg-save-result')`
+  //       的 **id 查找**（document 级查询），与子元素顺序无关 ⇒ 这两个 id 一个都不能改。
   return `
-    ${render()}
     <div class="save-bar">
       <button class="btn btn-primary" id="save-cfg-btn">保存设置</button>
       <span id="cfg-save-result" class="muted"></span>
+    </div>
+    <div class="settings-scroll">
+      ${render()}
     </div>`;
 }
 

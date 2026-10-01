@@ -1221,11 +1221,18 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 /* 有新版本时侧栏「桌面端」右侧的红点 */
 .update-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e5534b; margin-left: 6px; vertical-align: middle; }
 
-/* ⚠️ 底部 padding **必须是 0**（2026-10-01 UI 改造第三阶段 §3.3）：
-   sticky 的参考边是滚动容器的**内容盒底边**。padding-bottom 归零 ⇒ 吸底的 `.save-bar` 正好落在 pane 底边
-   ⇒ 滚动内容**无处可露**（留 10px 缝隙就够从条下探出一行字来）。⛔ 别为了"给内容留呼吸"把它加回来 ——
-   那会重新引入"内容从保存条下沿缝隙里露出来"；pane 之外还有 `#layout` 的 16px 内边距，外框之间本来就有呼吸。 */
-.settings-pane { flex: 1; max-width: 860px; margin: 0 auto; padding: 22px 26px 0; overflow-y: auto; width: 100%; }
+/* ⚠️ 这里是**外壳**，它不再滚动（2026-10-01 调整方案 · 保存条改置顶）：
+   用户要求"保存条一直置顶、而且**不浮在文字上**" ⇒ 只能让条与滚动区**在结构上分开**
+   ⇒ 本元素改成 flex 列 + `overflow: hidden`，滚动交给内层的 `.settings-scroll`。
+   ⛔ 别把 `overflow-y: auto` 加回来：那会让内容重新从保存条底下穿过（**用户报的就是这个**）。
+   ⛔ `padding` 归零：上/左右留白分别由 `.save-bar` 的 `margin: 22px 26px 0` 与
+      `.settings-scroll` 的 `padding: 18px 26px 22px` 给 —— **两处不能同时给**，否则留白叠加。 */
+.settings-pane {
+  flex: 1; max-width: 860px; margin: 0 auto; width: 100%;
+  padding: 0;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
 .settings-pane h3 { margin: 22px 0 12px; font-size: 14px; color: var(--accent-strong); }
 .settings-pane h3:first-child { margin-top: 0; }
 .settings-divider { border: none; border-top: 1px dashed var(--border); margin: 22px 0; }
@@ -1352,21 +1359,33 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }
 .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
-/* 保存条（2026-10-01 UI 改造第三阶段 条目 1，方案 A）：吸底悬浮 + 与 `.form-panel` 同源的卡片观感。
-   🔴 三条**不许动**的地方（理由见方案 §3.2/§3.4，改任一条都会退回原来的毛病）：
-     1) `bottom: 0` 的偏移量与 `.settings-pane` 的 `padding-bottom` 是**两段独立留白** ——
-        同时给数会**叠加**（实测 12+40=52px），滚到底又少掉一段 ⇒ 保存条会"跳"。
-        现在 pane 的 padding-bottom 是 0，所以只由这里控制。
-     2) 背景用 `--bg-2` 而**不是** `--bg`：它属于设置页的内容层（`.form-panel` 也是 `--bg-2`）；
-        用 `--bg` 等于把它当成"页面底色的一部分"，暗色下它比所有卡片都黑，就成了一条孤零零的近黑横条。
-     3) **删掉了 `border-top`** —— 那是按"贴边吸底条"写的；现在是圆角悬浮卡片，留着就是一条悬空的细线。
-   ⚠️ 它**必须**是 `#settings-form` 的**最后一个**子元素（DOM 顺序在 `render()` 之后）：
-      `position: sticky; bottom: 0` 的语义是"元素**本应滚出视口下沿**时把它钉住"，
-      而首个子元素永远从上沿滚出去、永远不满足触发条件 ⇒ 吸底是**空操作**（这正是原来的 bug）。 */
+/* 设置页**内容滚动区**（2026-10-01 调整方案 · 改动 3）—— 保存条改置顶后，滚动从 `.settings-pane` 挪到这里。
+   🔴 **为什么必须"把内容包一层"再改 flex**：直接把 `.settings-pane` 改成 flex 而不包，所有内容都会变成
+      flex 项 ⇒ **相邻兄弟的 margin 不再折叠**（`.form-panel` 的 14px 与 `h3` 的 22px 会从"折叠成 22px"
+      变成"相加 36px"）⇒ 10 个分区的间距会整体变松。包起来后**内部仍是块级流**，才安全。
+   🔴 `min-height: 0` 不能省：flex 子项的默认 `min-height: auto` 会让它**长过容器**、于是滚不动
+      （"看着该滚却滚不了"的那种静默失效）。
+   ⚠️ `padding: 18px 26px 22px` 是**设计取值**（上 18px = 条与第一个标题的距离；下 22px = 滚到底时
+      最后一行与底边的距离）⇒ 觉得挤就调这两个数，⛔ 别去动 `.settings-pane` 的 padding（两处会叠加）。 */
+.settings-scroll {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 18px 26px 22px;
+}
+
+/* 保存条（2026-10-01 **调整方案**：从"吸底悬浮"改成"**顶部固定**"；用户拍板方案 B）。
+   🟢 用户明确说「**现在外观的样式很好**」⇒ 下面**四行观感原样保留**，⛔ 一个都不许动：
+      背景 `--bg-2`（与 `.form-panel` 同色，属设置页内容层；⛔ 别用 `--bg`，那是整页底色）/
+      `border: 1px solid var(--border)` / `border-radius: 12px` / `box-shadow: var(--shadow-md)`。
+   🔴 `position: static` + `flex: none`：条**不参与滚动**，恒定在 `.settings-pane` 顶部。
+      ⛔ **不留 `sticky` 的任何残留**（`top` / `bottom` 都要删）：sticky 元素**在原地占位**，内容照样
+         从它底下穿过 —— 那正是用户报的"固定在下还会浮在文字上"。⚠️ 方案 A（`sticky` 吸顶）**已否掉、
+         别再论证**：它只是把遮挡从"还没读的下方内容"挪到"已读的上方内容"，**遮挡本身没消失**。
+   ⚠️ `margin: 22px 26px 0`：条自己的上/左右留白在**这里**给（`.settings-pane` 的 padding 已归零 ⇒
+      不会叠加）。它与 `.settings-scroll` 的 padding 是**两处**：那处管的是**滚动区内部**的留白。 */
 .save-bar {
-  position: sticky; bottom: 0; z-index: 4;
+  position: static; flex: none; z-index: 4;
   display: flex; align-items: center; gap: 10px;
-  margin: 20px 0 0;
+  margin: 22px 26px 0;
   padding: 10px 12px;
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -1801,8 +1820,11 @@ details.hint-more code {
 }
 .snowluma-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
-/* ── 滚动条贴边：列表/详情/设置面板都是块级容器，把滚动条放到容器最边缘而不是内容中间 */
-#session-list, #chat-list, .detail-pane, .settings-pane, .snowluma-pane, .dreams-pane, .modal-list {
+/* ── 滚动条贴边：列表/详情/设置**内容区**都是块级容器，把滚动条放到容器最边缘而不是内容中间 */
+/* ⚠️ 2026-10-01 调整：设置页的滚动从 `.settings-pane` 挪到了内层 `.settings-scroll` ⇒ 这条规则也要跟着换。
+   ⛔ 不换的话：`scrollbar-gutter: stable` 会在**不再滚动**的 pane 上白占一条竖边，
+   而真正滚动的那一层没有预留 ⇒ 出现滚动条时内容会被挤动一下。 */
+#session-list, #chat-list, .detail-pane, .settings-scroll, .snowluma-pane, .dreams-pane, .modal-list {
   scrollbar-gutter: stable;
 }
 
