@@ -16,12 +16,18 @@ function renderSettingsSection(c) {
     onebot: () => renderOnebotSection(c)
   };
   const render = sections[sec] || sections.api;
+  // 🔴 保存条**必须是最后一个子元素**（2026-10-01 UI 改造第三阶段 条目 1 根因 1）。
+  //    `position: sticky; bottom: 0` 的语义是"元素**本应滚出视口下沿**时把它钉住"；
+  //    它原来是**第一个**子元素 ⇒ 永远从上沿滚出去、永远不满足触发条件 ⇒ 吸底是**空操作**，
+  //    设置页一往下滚它就滚没了（用户在页面下部改完东西**根本找不到保存按钮**，必须滚回顶部）。
+  // ⚠️ 挪动顺序**不影响任何绑定**：`13-settings-events.js` 走 `$('#save-cfg-btn')` / `$('#cfg-save-result')`
+  //    的 **id 查找**（document 级查询），与子元素顺序无关 ⇒ 这两个 id 一个都不能改。
   return `
+    ${render()}
     <div class="save-bar">
       <button class="btn btn-primary" id="save-cfg-btn">保存设置</button>
       <span id="cfg-save-result" class="muted"></span>
-    </div>
-    ${render()}`;
+    </div>`;
 }
 
 /**
@@ -865,9 +871,12 @@ function renderAllowSection(c) {
     ['whitelist', '只运行在白名单', '只有下面名单里的群和好友会响应（默认）'],
   ];
 
+  // ⚠️ `.mo-body` 那一层块容器**不能省**（2026-10-01 UI 改造第三阶段 条目 3 根因）：
+  //    下面两个都是 <span>，没有块级容器时它们**都是行内元素**，`margin-top` 无效
+  //    ⇒ "标题"与"说明"首尾相接挤成一句（读起来像"只运行在白名单只有下面名单里的群和好友会响应"）。
   const modeOpt = ([v, title, desc]) => `<label class="modeopt${mode === v ? ' on' : ''}">
       <input type="radio" name="allow-mode" value="${v}" ${mode === v ? 'checked' : ''}>
-      <span><span class="mo-title">${title}</span><span class="mo-desc">${desc}</span></span>
+      <span class="mo-body"><span class="mo-title">${title}</span><span class="mo-desc">${desc}</span></span>
     </label>`;
 
   // 芯片输入：一个群一个芯片，点 × 删；回车或点「添加」加。
@@ -963,15 +972,27 @@ function renderWechatContactsSection(c) {
         </label>
       </div>`).join('');
   })();
+  // ── 说明小字分层（2026-10-01 UI 改造第三阶段 条目 2，位置 A/B1/B2）────────────
+  // 载体按原型已定稿的四级规范（`index.prototype.html:1180-1185`）摊：**结论留外层 1 行、细节进二级折叠**。
+  // 折叠用**原生 `<details class="hint-more">`**（既有件，`style.css:1397-1428`）：
+  //   无 JS、天然可访问、**Ctrl+F 仍能搜到折起来的文字** —— 这就是原型选原生 details 的理由。
+  // ⚠️ 原来外层那句"与「聊天白名单」是<b>同一份</b>配置……"按 **P6「一句话只准出现一次」删掉了** ——
+  //    它与聊天白名单页底部那句是**跨页双向重复**；那个关系现在只在**聊天白名单页**说一次
+  //    （那是配置语义的发生处，且那里带 `allow.private` / `allow.groups` 的 key 名，更完整）。
+  // ⚠️ "排障：微信通道通没通，看顶栏状态点"原来要移进「？本页说明」（四级里的"汇总"层），
+  //    而**本轮没做那一级**（用户 2026-10-01 拍板先不做模型选择弹窗那条）⇒ 暂放本折叠里，
+  //    信息不丢（Ctrl+F 能搜到）；等汇总层落地时与上一条一起搬过去，见交接 §3-35。
   return `
     <h3 id="settings-wechat">微信联系人</h3>
-    <div class="hint" style="margin-bottom:10px">
-      勾选 = 放进白名单（与「聊天白名单」是<b>同一份</b>配置：私聊进 <code>allow.private</code>、群进 <code>allow.groups</code>）。
-      <br>这里显示的是微信侧的 id 与<b>当前名字</b> —— 微信侧的会话 id 是桥派生的<b>数字</b>，
-      光看微信是看不到的，所以请在这里点选，别去手填。
-      <br>名字有两个来源：<b>收到的微信消息</b>（记下 id↔名字）与<b>「↻ 同步名字」</b>
-      （去微信那边现问一次）。<b>同步只改显示，不动白名单、不动发送对象</b>。
-    </div>
+    <div class="hint">勾选 = 放行。这里的 id 是微信侧派生出来的<b>数字</b>，别手填。</div>
+    <details class="hint-more" style="margin-bottom:10px">
+      <summary>名字从哪来的？通道通没通怎么看？</summary>
+      <div class="hint-more-body">
+        名字有两个来源：<b>收到的微信消息</b>（记下 id↔名字）与<b>「↻ 同步名字」</b>（去微信那边现问一次）。
+        <br><b>同步只改显示</b> —— 不动白名单、也不动发送对象。
+        <br>排障：微信通道通没通，看顶栏那个状态点（切到「微信」模式）。
+      </div>
+    </details>
     ${blockedHint}
     <div class="field"><label>已知的微信联系人 / 群（勾选即放行）</label>
       <div id="wx-contact-list" style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
@@ -980,9 +1001,8 @@ function renderWechatContactsSection(c) {
     <div class="field" style="display:flex;align-items:center;gap:10px;margin-top:8px">
       <button class="btn btn-small" id="wx-contacts-sync"
         title="去微信那边现问一次名字表（备注/昵称改了之后点它，不用等对方再发消息）">↻ 同步名字</button>
-      <span class="muted" id="wx-contacts-sync-hint">在微信里改了备注或昵称之后点一下即可（开机时也会自动同步一次）。</span>
-    </div>
-    <div class="hint">排障：微信通道通没通，看顶栏那个状态点（切到「微信」模式）。</div>`;
+      <span class="muted" id="wx-contacts-sync-hint">改了备注点一下</span>
+    </div>`;
 }
 
 // 表情包积极程度档位：[值, 显示名]
@@ -1298,15 +1318,25 @@ return `
 function renderSecuritySection(c) {
   const lock = c.security?.browseLock || {};
   const hosts = Array.isArray(lock.hosts) ? lock.hosts.join('\n') : '';
+  // ── 说明小字分层（位置 D1/D2）──────────────────────────────────────────
+  // D1 按 **P7「代价不能藏」**：会导致"静默失效 / 直接不可用"的信息必须**常显**、不进折叠 ——
+  //   所以外层只留那句 ⚠️ 代价；"它还管什么、不管什么"属于细节（勾选框 label 已经把结论说了）⇒ 进折叠。
+  // D2 压到 1 行；顺带**去掉了原来那两个 Markdown 星号**（`**自建图床 / 本地测试**` 在 HTML 里
+  //   不会变粗体，只会把 `**` 当字面字符显示出来）。
   return `
     <h3>浏览锁定</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-browselock-enabled" ${lock.enabled === true ? 'checked' : ''} />
       <label for="cfg-browselock-enabled">开启浏览锁定（她上网只能访问下面清单里的域名）</label></div>
-    <div class="hint" style="font-size:12px;margin:-4px 0 10px">
-      管控的是她<b>上网看网页 / 搜索取页面</b>这条路（含跳转目标逐跳校验）。
+    <div class="hint" style="font-size:12px;margin:-4px 0 2px">
       ⚠️ <b>开了但清单为空 = 什么都看不了</b>（比全放行安全，但等于把上网能力关死）。
-      ⚠️ <b>按关键词找图不受它管</b> —— 与既有的「以图搜图」保持一致（那条走内置浏览器，本来就绕开锁定）。
     </div>
+    <details class="hint-more" style="margin-bottom:10px">
+      <summary>它还管什么、不管什么</summary>
+      <div class="hint-more-body">
+        管控的是她<b>上网看网页 / 搜索取页面</b>这条路（含跳转目标逐跳校验）。
+        <br>⚠️ <b>按关键词找图不受它管</b> —— 与既有的「以图搜图」保持一致（那条走内置浏览器，本来就绕开锁定）。
+      </div>
+    </details>
     <div class="field"><label>允许访问的域名（一行一个；填 example.com 时它的子域也放行）</label>
       <textarea id="cfg-browselock-hosts" rows="5" placeholder="每行一个域名，例如&#10;zh.wikipedia.org&#10;example.com" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${esc(hosts)}</textarea></div>
     <div class="field"><label>站内搜索模板（可选）</label>
@@ -1318,7 +1348,7 @@ function renderSecuritySection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-allow-private-image-hosts" ${c.security?.allowPrivateImageHosts === true ? 'checked' : ''} />
       <label for="cfg-allow-private-image-hosts">允许从内网/本机地址下载图片</label></div>
     <div class="hint" style="font-size:12px;margin:-4px 0 10px">
-      ⚠️ 默认关闭。只有在你**自建图床 / 本地测试**时才该打开 —— 打开等于允许程序去访问内网地址。
+      ⚠️ 默认关闭。只有自建图床 / 本地测试时才该打开 —— 打开等于允许程序访问内网地址。
     </div>`;
 }
 

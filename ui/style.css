@@ -1221,7 +1221,11 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 /* 有新版本时侧栏「桌面端」右侧的红点 */
 .update-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e5534b; margin-left: 6px; vertical-align: middle; }
 
-.settings-pane { flex: 1; max-width: 860px; margin: 0 auto; padding: 22px 26px 40px; overflow-y: auto; width: 100%; }
+/* ⚠️ 底部 padding **必须是 0**（2026-10-01 UI 改造第三阶段 §3.3）：
+   sticky 的参考边是滚动容器的**内容盒底边**。padding-bottom 归零 ⇒ 吸底的 `.save-bar` 正好落在 pane 底边
+   ⇒ 滚动内容**无处可露**（留 10px 缝隙就够从条下探出一行字来）。⛔ 别为了"给内容留呼吸"把它加回来 ——
+   那会重新引入"内容从保存条下沿缝隙里露出来"；pane 之外还有 `#layout` 的 16px 内边距，外框之间本来就有呼吸。 */
+.settings-pane { flex: 1; max-width: 860px; margin: 0 auto; padding: 22px 26px 0; overflow-y: auto; width: 100%; }
 .settings-pane h3 { margin: 22px 0 12px; font-size: 14px; color: var(--accent-strong); }
 .settings-pane h3:first-child { margin-top: 0; }
 .settings-divider { border: none; border-top: 1px dashed var(--border); margin: 22px 0; }
@@ -1348,7 +1352,27 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }
 .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
-.save-bar { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0; border-top: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
+/* 保存条（2026-10-01 UI 改造第三阶段 条目 1，方案 A）：吸底悬浮 + 与 `.form-panel` 同源的卡片观感。
+   🔴 三条**不许动**的地方（理由见方案 §3.2/§3.4，改任一条都会退回原来的毛病）：
+     1) `bottom: 0` 的偏移量与 `.settings-pane` 的 `padding-bottom` 是**两段独立留白** ——
+        同时给数会**叠加**（实测 12+40=52px），滚到底又少掉一段 ⇒ 保存条会"跳"。
+        现在 pane 的 padding-bottom 是 0，所以只由这里控制。
+     2) 背景用 `--bg-2` 而**不是** `--bg`：它属于设置页的内容层（`.form-panel` 也是 `--bg-2`）；
+        用 `--bg` 等于把它当成"页面底色的一部分"，暗色下它比所有卡片都黑，就成了一条孤零零的近黑横条。
+     3) **删掉了 `border-top`** —— 那是按"贴边吸底条"写的；现在是圆角悬浮卡片，留着就是一条悬空的细线。
+   ⚠️ 它**必须**是 `#settings-form` 的**最后一个**子元素（DOM 顺序在 `render()` 之后）：
+      `position: sticky; bottom: 0` 的语义是"元素**本应滚出视口下沿**时把它钉住"，
+      而首个子元素永远从上沿滚出去、永远不满足触发条件 ⇒ 吸底是**空操作**（这正是原来的 bug）。 */
+.save-bar {
+  position: sticky; bottom: 0; z-index: 4;
+  display: flex; align-items: center; gap: 10px;
+  margin: 20px 0 0;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+}
 
 /* ── 表单分组（2026-09-17 补）─────────────────────────────────────────────
    为什么加这一组：设置页原来只有 .field + .hint 两个积木，于是"相关的一组字段"
@@ -2545,7 +2569,7 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
 
 .skill-card__name { font-size: 13px; font-weight: 600; display: flex; align-items: baseline; gap: 6px; }
 .skill-card__ver { font-size: 11px; color: var(--faint); font-weight: 400; }
-.skill-card__desc { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.6; }
+.skill-card__desc { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.65; }   /* 数值对齐"卡片标题+说明"统一规格（第三阶段 §5.3） */
 
 /* 方块勾选框：未开=空框，开=绿底✓，关=红底✕ */
 .tool-checkbox-square { position: relative; width: 20px; height: 20px; flex-shrink: 0; }
@@ -3186,7 +3210,7 @@ html[data-theme='dark'] body { background: #0f1115; }
 /* note 是标题后面的小字补充（如「（本地 SnowLuma 进程）」）。
    ⚠️ 调用方传进来的 note **自带括号**，这里不要再包一层 —— 否则会变成「（（…））」。 */
 .step-note { font-size: 12px; font-weight: 400; color: var(--muted); }
-.step-desc { font-size: 12px; color: var(--muted); line-height: 1.7; margin-top: 2px; }
+.step-desc { font-size: 12px; color: var(--muted); line-height: 1.65; margin-top: 3px; }   /* 数值对齐"卡片标题+说明"统一规格（第三阶段 §5.3） */
 .step-action { flex: none; display: flex; align-items: center; gap: 6px; }
 /* 已完成：绿勾 + 号码变绿 */
 .step.done .step-num { background: rgba(var(--green-rgb), .16); color: var(--green); border-color: rgba(var(--green-rgb), .4); }
@@ -3363,8 +3387,16 @@ html[data-theme='dark'] body { background: #0f1115; }
 .modeopt:hover { border-color: var(--accent); }
 .modeopt.on { border-color: var(--accent); background: rgba(var(--accent-rgb), .07); }
 .modeopt input { margin-top: 3px; flex: none; accent-color: var(--accent); }
-.modeopt .mo-title { font-size: 13px; font-weight: 600; color: var(--text); }
-.modeopt .mo-desc { font-size: 12px; color: var(--muted); line-height: 1.6; margin-top: 2px; }
+/* 卡片内「标题 + 说明」的统一规格（2026-10-01 UI 改造第三阶段 §5.3）：
+   标题 13px / 600 / var(--text) 独占一行，说明 12px / var(--muted) / line-height 1.65 / margin-top 3px 缩到第二行。
+   ⚠️ `display: block` **必须显式写**：这里两个都是 <span>，不写就是**行内元素** ——
+      行内元素上的 `margin-top` 完全无效，标题与说明会首尾相接地挤成同一行、读起来是一句没头没尾的话
+      （这就是用户 2026-10-01 报的"标题与说明挤成一句"的根因：CSS 按两行写，HTML 交付的是行内现实）。
+   ⚠️ ⛔ **别用"把说明改小 / 改灰"来造层级** —— `--muted` 在两套主题下都已经过 WCAG AA
+      （亮 5.76:1 / 暗 5.67:1，实测自算），更灰更小只会让对比度更糟，而层级问题是**版式**问题不是颜色问题。 */
+.modeopt .mo-body  { display: block; flex: 1; min-width: 0; }
+.modeopt .mo-title { display: block; font-size: 13px; font-weight: 600; color: var(--text); }
+.modeopt .mo-desc  { display: block; font-size: 12px; line-height: 1.65; margin-top: 3px; color: var(--muted); }
 
 /* ── 技能页：卡片单行化 + 就地配置表单（条目 4 改动点 4/6）─────────────────
    方案："卡片单行化：名称+版本+徽章 / 一句话描述 / 类型·工具数小标签；
