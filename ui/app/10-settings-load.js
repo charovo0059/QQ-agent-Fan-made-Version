@@ -436,7 +436,9 @@ function stickerCardHtml(s) {
   const tags = (s.tags || []).map((t) => `<span class="sticker-tag">${esc(t)}</span>`).join('');
   // 走本地缓存接口（服务端优先读 data/stickers/<id>.bin，没有才换新链下载并缓存）。
   // 不再直接把存档里的 QQ 链接塞进 src —— 那链里的 rkey 十几小时就过期，实测 36 条**全部**已失效；
-  // 旧写法会让缩略图变成一块没有解释的黑（.thumb 的底色是 #0b0d11），连"是不是坏了"都看不出来。
+  // 旧写法会让缩略图变成一块没有解释的黑（.thumb 的底色现在走 `--thumb-bg`，随主题：
+  // 亮色浅灰空槽 / 暗色近黑空槽）。⚠️ 2026-10-01：这里原来说的是字面值 `#0b0d11` ——
+  // 那个字面值后来成了亮色主题下的 bug（露近黑底），所以别再把它写回注释里当路标。
   const img = s.url
     ? `<img src="/api/stickers/${encodeURIComponent(s.id)}/image?thumb=1" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.parentNode.classList.add('failed')" />`
     : '<span class="muted" style="font-size:12px">没有图片地址</span>';

@@ -6,6 +6,7 @@
 
    变量分层：
      --bg / --bg-2 / --bg-3      背景三级（越往后越靠前/越浅）
+     --thumb-bg                  缩略图占位底（**语义色**：亮色浅灰 / 暗色近黑，见下面各块注释）
      --border                    常规边框
      --text / --muted / --faint  正文 / 次要 / 极弱文字
      --accent                    强调色（品牌蓝）
@@ -29,6 +30,13 @@
   --bg: #f5f5f7;
   --bg-2: #ffffff;
   --bg-3: #ececf0;
+  /* 🆕 2026-10-01：表情包页缩略图的**占位底**（图盖不满时露出来的那块）。
+     它的语义是"**这里本该有图**"的空槽，不是一个普通面板色 —— 所以必须跟着主题走：
+     亮色＝浅灰空槽，暗色＝比卡片更深的空槽（图取不到时看得出来）。
+     ⛔ 组件里**只许引用这个变量**，不许再写字面色值（原来 `.sticker-card .thumb`
+        把 `#0b0d11` 写死，亮色主题下每张不匹配 232×172 的图四周、以及透明底贴纸
+        整块，都露出近黑 —— 那正是 2026-10-01 修的那个 bug）。 */
+  --thumb-bg: #ececf0;
   --border: #e3e3e8;
   --text: #1d1d1f;
   --muted: #5f6675;
@@ -88,6 +96,10 @@
   --bg: #0f1115;
   --bg-2: #161a22;
   --bg-3: #1d2330;
+  /* 缩略图占位底：**原值原样保留**（亮色修好之前，它是写死在 `.sticker-card .thumb`
+     上的 `#0b0d11`）。暗色下要的正是"比卡片更深的空槽" ⇒ ⛔ **别顺手统一成 `--bg-3`**：
+     `#1d2330` 比卡片底 `--bg-2`(#161a22) 还**亮**，图取不到时就看不出来了。 */
+  --thumb-bg: #0b0d11;
   --border: #2a3142;
   --text: #dfe3ec;
   --muted: #8b93a7;
@@ -2406,12 +2418,14 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
 }
 .sticker-card:hover { border-color: var(--accent); }
 .sticker-card .thumb {
-  background: #0b0d11; height: 172px; display: flex; align-items: center; justify-content: center;
+  background: var(--thumb-bg); height: 172px; display: flex; align-items: center; justify-content: center;
   border-bottom: 1px solid var(--border);
 }
 .sticker-card .thumb img { max-width: 100%; max-height: 172px; object-fit: contain; display: block; }
-/* 取不到图时给一句人话，而不是一块没有解释的黑（.thumb 底色是 #0b0d11）。
-   QQ 多媒体链的 rkey 十几小时就过期，旧写法（直接用存档链接）链一失效就是黑块。 */
+/* 取不到图时给一句人话，而不是一块没有解释的黑（.thumb 底色走 --thumb-bg，随主题）。
+   QQ 多媒体链的 rkey 十几小时就过期，旧写法（直接用存档链接）链一失效就是黑块。
+   ⚠️ 2026-10-01：这一段原来写的是字面值 `#0b0d11` —— 亮色主题下那个字面值就是 bug 本身
+   （亮色下露近黑底），所以注释也一并改成引用 token 名，别让路标指着一个已经搬走的常量。 */
 .sticker-card .thumb.failed img { display: none; }
 .sticker-card .thumb.failed::after {
   content: '缩略图取不到'; font-size: 12px; color: var(--muted); padding: 0 12px; text-align: center;
