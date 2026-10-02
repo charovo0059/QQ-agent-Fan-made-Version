@@ -363,12 +363,25 @@ function err(message) {
   return { content: `错误：${message}`, isError: true };
 }
 
-// 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
-function midHint(ctx) {
+/**
+ * 当前会话**真实可见**的那些 `#数字`（＝ `m.mid`）。
+ *
+ * 🔴 为什么单独抽出来（2026-10-03 第三十三对话）：`store` 的每条消息**同时**有一个
+ *    本地递增序号 `m.id`（UI 定位用）和一个 `m.mid`（QQ 消息 id），两者长得一样、含义不同。
+ *    而提示词里给她看的前缀是 `#${m.mid}`（`prompt.js` 的 `formatEntry`）。
+ *    ⇒ 凡是"要她填 #数字"的地方，**报错时也必须报 mid**：报本地序号等于给了一个
+ *      她照着填也填不对的数（核心记忆就是这么错了 5 天的 —— 它连"现在能用的范围"都报成 `#1~#362`）。
+ */
+function visibleMids(ctx, limit = 8) {
   const mids = ctx.store.recent(ctx.chatKey, { limit: 60 })
     .map((m) => m.mid)
     .filter((v) => v !== null && v !== undefined && String(v) !== '');
-  const uniq = [...new Set(mids.map(String))].slice(-8);
+  return [...new Set(mids.map(String))].slice(-limit);
+}
+
+// 找不到消息 id 时，把当前会话真实可见的 id 告诉模型，避免它继续瞎猜。
+function midHint(ctx) {
+  const uniq = visibleMids(ctx);
   return uniq.length
     ? `消息 id 只能用聊天记录里每条消息前的 #数字（最近可见：${uniq.join(' ')}），不要自己编`
     : '聊天记录里还没有带 #id 的消息';
@@ -1351,7 +1364,8 @@ export function buildToolDefs() {
       description: '把**当前会话**里的一段聊天记录**原文**存成「核心记忆」——你自己挑、原样存下来，'
         + '不压缩、不改写，以后随时能翻回来重读（像翻相册，而不是只记得"那天聊得很好"）。'
         + '和 memory_append 的分工：那是"把一个人压成一句印象"，这是"把舍不得删的那几段话整个留下来"。'
-        + 'fromId / toId 填消息前面的 `#数字`（在【过去状态】或【本次唤醒】里能看到）。'
+        + 'fromId / toId 填消息前面的 `#数字`（【本次唤醒】里每条都有；'
+        + '⚠️【过去状态】里**只有带图/带转发的那些**有 —— 要别的编号就用 get_recent_messages 翻）。'
         + '⚠️ 只存**你真心舍不得删**的那一段：不是"重要就存"，什么都存就不叫相册了（最多留 30 段，满了会挤掉最老的）。'
         + '⚠️ 只能存**当前会话**里的消息（别处的你本来也看不到）。存过之后上下文记忆被删掉，这段也还在。',
       parameters: {
@@ -1370,19 +1384,33 @@ export function buildToolDefs() {
         if (!Number.isFinite(a) || !Number.isFinite(b)) {
           return err('fromId / toId 必须是消息前面的 #数字（整数）。');
         }
-        const from = Math.min(a, b);
-        const to = Math.max(a, b);
-        const span = to - from + 1;
+        // ⚠️ 只从**当前会话**的存档里取（她看不到别的会话，也就不该能存别的会话）
+        const all = ctx.store.recent(ctx.chatKey, { limit: 2000 });
+        // 🔴 她填的 `#数字` **就是** `mid`（提示词打的前缀是 `#${m.mid}`，与 read_forward /
+        //    get_message_images 那批工具同一个口径）——
+        //    这里原来拿它去跟**本地递增序号 `m.id`** 比大小，于是"提示词里给她看的那个数"
+        //    永远匹配不上（2026-10-03 拿线上真存档实测：本地 id 1~362，mid ±21 亿，没有一个落在里面）。
+        // ❌ 也不能改成"拿 mid 比大小"：**mid 不单调**（QQ 的消息 id 会跳、还可能是负数），
+        //    `mid >= from && mid <= to` 会漏掉中间那几条、还会把范围外的捞进来。
+        // ✅ 正确语义：她给的是**两个端点**，取这两条之间（含端点）在存档里**连续的那一段**。
+        const idxOf = (v) => all.findIndex((m) => m.mid !== null && m.mid !== undefined && String(m.mid) === String(v));
+        const ia = idxOf(args.fromId);
+        const ib = idxOf(args.toId);
+        if (ia < 0 || ib < 0) {
+          const bad = [ia < 0 ? `#${args.fromId}` : null, ib < 0 ? `#${args.toId}` : null].filter(Boolean).join(' 和 ');
+          const avail = visibleMids(ctx);
+          return err(`这个会话里找不到 ${bad}（消息 id 可能记错了，或者那几条已经被删掉了）。`
+            + (avail.length
+              ? `现在能用的范围是这些 #数字（最近可见）：${avail.join(' ')}。`
+              : '现在这个会话的聊天记录里还没有带 #数字 的消息。'));
+        }
+        const lo = Math.min(ia, ib);
+        const hi = Math.max(ia, ib);
+        const span = hi - lo + 1;
         if (span > CORE_MEMORY_MAX_SPAN) {
           return err(`这一段跨了 ${span} 条，太长了（一次最多 ${CORE_MEMORY_MAX_SPAN} 条）。挑真正舍不得删的那几段，分开存。`);
         }
-        // ⚠️ 只从**当前会话**的存档里取（她看不到别的会话，也就不该能存别的会话）
-        const all = ctx.store.recent(ctx.chatKey, { limit: 2000 });
-        const picked = all.filter((m) => Number(m.id) >= from && Number(m.id) <= to);
-        if (!picked.length) {
-          return err(`这个会话的存档里没有 #${from}~#${to} 这一段（消息 id 可能记错了，或者那几条已经被删掉了）。`
-            + `现在能用的范围是 #${all[0]?.id ?? '?'}~#${all[all.length - 1]?.id ?? '?'}。`);
-        }
+        const picked = all.slice(lo, hi + 1);
         const res = saveCoreMemory({
           chatKey: ctx.chatKey,
           chatLabel: String(ctx.chatName || ctx.chatId || ''),
