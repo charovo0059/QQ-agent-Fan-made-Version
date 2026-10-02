@@ -216,3 +216,66 @@ export function toFileUri(input) {
   const encoded = encodeURI(body).replace(/[?#]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
   return unc ? 'file://' + encoded : 'file:///' + encoded;
 }
+
+// ── 「一键重启」的**续启**标记（2026-10-03 第三十三对话）────────────────────
+//
+// 要解决什么：托盘上点一下重启之后，`snowluma` 与微信**中继**都不会自己回来 ——
+//   线上 `snowluma.autoLaunch=false`、`wechat.autoLaunchRelay=false`，而微信中继还是
+//   本应用的**子进程**（应用一退就跟着没）。症状是"界面一切正常、消息永远不来"，
+//   正是本项目最忌的那类静默失败（`src/app.js` 里那段注释记的就是它）。
+// 做法：**重启之前**先把"现在到底哪些在跑"读出来，写进**新实例的命令行参数**；
+//   新实例起来时照着把它拉回来。
+//
+// ⚠️ 为什么用命令行、而不是落盘一个标记文件：
+//   · 这是一次**一次性**意图。落盘文件的话，进程若在"写完标记、还没重启"之间被杀
+//     （或用户直接关掉窗口不重启了），下次**冷启动**就会莫名其妙自己去拉 SnowLuma /
+//     微信通道 —— 那是"我们替用户做了一个他没要求的动作"，本项目最忌这个。
+//   · 命令行参数天然一次性：新进程读一次就没了，旧进程死了就当没发生过。
+//   · 还有个附带好处：命令行**看得见**（进程列表里就能核"这次到底带了什么"）。
+//
+// ⚠️ 为什么必须**原样带上旧的 argv**（见 buildResumeArgv）：
+//   `--qq-agent-debug-port=…` 就在里面。项目为"某次重启把调试口悄悄关掉"栽过一次
+//   （第十一/十三对话为此专门改过 `工具-运维\重启五步.mjs`）⇒ 这条有测试钉住。
+export const RESUME_ARG_PREFIX = '--qq-agent-resume=';
+
+/** 允许续启的东西的**白名单**。⛔ 只认这里的名字 —— 参数是外部输入，别让它变成万能开关。 */
+const RESUME_TARGETS = ['snowluma', 'wechat'];
+
+/**
+ * 从 argv 里读出"这次启动要不要续启、续启哪些"。
+ * 不认识的名字静默丢掉（当没看见），重复的只留一份。
+ * @param {string[]} argv
+ * @returns {string[]} 例如 `['snowluma','wechat']`；没有/不合法就返回 `[]`
+ */
+export function parseResumeArgv(argv = []) {
+  const list = Array.isArray(argv) ? argv : [];
+  const hit = list.find((a) => String(a).startsWith(RESUME_ARG_PREFIX));
+  if (!hit) return [];
+  const out = [];
+  for (const piece of String(hit).slice(RESUME_ARG_PREFIX.length).split(',')) {
+    const name = piece.trim().toLowerCase();
+    if (RESUME_TARGETS.includes(name) && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+/**
+ * 造"重启后那个新实例"要用的 argv。
+ *
+ * 三条性质（判据逐条钉）：
+ *  ① **原样保留**传进来的 argv（`--qq-agent-debug-port=…` 在里面，丢了就是那个老坑）；
+ *  ② **先清掉已有的续启参数**再加 ⇒ 幂等，连点两次不会叠成两串；
+ *  ③ 什么都没在跑时不加参数（保持"干净启动"这个默认行为不变）。
+ *
+ * @param {string[]} baseArgv 通常是 `process.argv.slice(1)`
+ * @param {{snowluma?:boolean, wechat?:boolean}} state 重启前实测的状态
+ * @returns {string[]}
+ */
+export function buildResumeArgv(baseArgv = [], state = {}) {
+  const base = (Array.isArray(baseArgv) ? baseArgv : [])
+    .map((a) => String(a))
+    .filter((a) => !a.startsWith(RESUME_ARG_PREFIX));
+  const keep = RESUME_TARGETS.filter((t) => state?.[t] === true);
+  if (!keep.length) return base;
+  return [...base, RESUME_ARG_PREFIX + keep.join(',')];
+}

@@ -4,6 +4,14 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, session, shell, ipcMain } 
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { parseResumeArgv, buildResumeArgv } from '../src/util.js';
+
+// ── 「一键重启」的续启标记（2026-10-03 第三十三对话）─────────────────────────
+// 由 `restartApp()` 写进**新实例的命令行**，新实例在这里读出来交给 `createApp({ resume })`。
+// 为什么走命令行而不是标记文件、为什么必须保留旧 argv：见 `src/util.js` 那两个函数的长注释。
+// ⚠️ 必须在 `requestSingleInstanceLock()` **之前**读（下面锁块里会用到它）——其实只影响启动分支，
+//    但放在文件顶部能让"这次是不是一次重启"在最上面就看得见。
+const RESUME = parseResumeArgv(process.argv);
 
 // Windows 上部分显卡驱动会导致渲染进程黑屏；禁用硬件加速是最稳妥的修复
 app.disableHardwareAcceleration();
@@ -323,9 +331,52 @@ function createTray() {
       }
     },
     { type: 'separator' },
+    // 🆕 2026-10-03 第三十三对话：一键重启（用户拍板方案 A：重启后自己把该回来的拉回来）
+    { label: '重启', click: () => { void restartApp(); } },
     { label: '退出', click: () => { quitting = true; app.quit(); } }
   ]));
   tray.on('double-click', () => showWindow());
+}
+
+/** 重启是否已经在路上（见 restartApp 的第 ③ 条）。 */
+let restarting = false;
+
+/**
+ * 托盘「重启」：**先记住现在哪些东西在跑**，把它们写进新实例的命令行，再优雅退出。
+ *
+ * 三条纪律（每条都有判据钉住）：
+ *  ① **原样带上当前 argv** 再加续启参数 —— `--qq-agent-debug-port=…` 就在里面。
+ *     本项目为"某次重启把调试口悄悄关掉"栽过一次（第十一/十三对话专门改过 `重启五步.mjs`），
+ *     所以这条不是洁癖，是踩过的坑。
+ *  ② **必须优雅退出**（`app.quit()`），⛔ 不是 `app.exit()`：会话存档是 **200ms 合并写**
+ *     （`src/store.js` 的 `WRITE_COALESCE_MS`），而 `before-quit` 里那句 `core?.stop()`
+ *     是唯一把待写数据落盘、把子进程收干净的地方。硬退最多丢最后 200ms。
+ *  ③ **加了 `restarting` 闸**：Electron 文档明说"`app.relaunch()` 调多次就会起多个实例"
+ *     ⇒ 连点两下会起两个，而第二个拿不到单实例锁、当场自杀，表现是"**点了没反应**"。
+ *     同时 `quitting = true` 保证窗口的**关闭动作走真退出**，不会又被缩回托盘。
+ *
+ * ⚠️ 为什么先读状态再 relaunch：`runState()` 问的是"**现在**"，等进程退出之后再问就晚了。
+ * ⚠️ 读不到（`runState` 不存在/抛错）一律当**什么都没在跑** ⇒ 干净重启。宁可少拉一个，
+ *    也不要替用户多开一个他没开的东西（微信通道是用户有意停掉的）。
+ */
+async function restartApp() {
+  if (restarting) {
+    console.log('[重启] 已经有一次重启在路上，忽略这次点击');
+    return;
+  }
+  restarting = true;
+  let state = {};
+  try {
+    state = (await core?.runState?.()) ?? {};
+  } catch (error) {
+    console.error('[重启] 读运行状态失败（按"什么都没在跑"处理）:', error?.message ?? error);
+    state = {};
+  }
+  const args = buildResumeArgv(process.argv.slice(1), state);
+  console.log(`[重启] 运行状态 ${JSON.stringify(state)} ⇒ 新实例参数 ${JSON.stringify(args)}`);
+  quitting = true;
+  app.relaunch({ args });
+  app.quit();
 }
 
 function createWindow(port) {
@@ -465,7 +516,8 @@ function startWhenReady() {
       await session.defaultSession.setProxy({ mode: 'direct' });
       console.log('[window] 代理模式：direct（绕过系统代理）');
       const { createApp } = await import('../src/app.js');
-      core = createApp({ log: (...args) => console.log(...args) });
+      // 🆕 RESUME：只有"托盘那次重启"才会非空（见文件顶部与 restartApp()）。
+      core = createApp({ log: (...args) => console.log(...args), resume: RESUME });
       // 先启动服务拿到真实端口，再开窗口。
       // 原先是 createWindow(core.lastPort ?? 3210) 在前、core.start() 在后 ——
       // 此时 lastPort 尚未赋值，窗口恒按 3210 加载；若端口被占用顺延到 3211+，
