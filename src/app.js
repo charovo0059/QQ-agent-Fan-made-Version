@@ -201,7 +201,14 @@ function compareSemver(a, b) {
   return 0;
 }
 
-export function createApp({ log = console.log } = {}) {
+/**
+ * @param {{log?:Function, resume?:string[]}} [opts]
+ *   `resume`：**只有从托盘发起的那次重启**才会带（见 `electron/main.js` 的 `restartApp()`）——
+ *   里面是"重启前确实在跑、起来后要续启"的那几样（`'snowluma'` / `'wechat'`）。
+ *   缺省 = 空数组 = 走今天这条"什么都不自动拉"的路，行为一个字节都不变。
+ */
+export function createApp({ log = console.log, resume = [] } = {}) {
+  const resumeTargets = Array.isArray(resume) ? resume.map((x) => String(x).toLowerCase()) : [];
   const cfg = getConfig();
   const bus = createEventBus();
   const sseClients = new Set();
@@ -842,6 +849,29 @@ export function createApp({ log = console.log } = {}) {
     };
     return st;
   };
+
+  /**
+   * 「一键重启」用：**现在到底有哪些东西在跑**（2026-10-03 第三十三对话）。
+   *
+   * 谁在用：`electron/main.js` 的托盘「重启」项 —— 它在 `app.relaunch()` **之前**调一次，
+   * 把这个结果写进新实例的命令行参数，新实例起来后照着把该回来的拉回来（见 `start()` 里那段）。
+   *
+   * ⚠️ 两个信号都取**各自已有的单一来源**，⛔ 这里不另立一套判据（本项目"同一个人看到的两份东西
+   *    来自两个源"栽过：自检路由自己拼 `agent` 段，结果与同一个响应里的第一项自相矛盾）：
+   *   · SnowLuma：`isPortOpen(wsPort)` —— 与 `launchSnowluma()` 进门第一步**同一个判据**；
+   *   · 微信通道：`wechatStatusWithAgent().channel.running`（中继端口）—— 与页签、自检**同一个函数**。
+   *   注意**不是** `wechat.connected`：那只说明"我们去连中继连上了"，而这里要回答的是
+   *   "**中继本身**在不在跑"（用户可能在页签上把通道停掉，那时 connected 也是 false，两件事同向但含义不同）。
+   *
+   * 读不到一律当 **false**（= 不续启）：宁可少拉一个、也不要替用户多开一个他没开的东西。
+   */
+  async function runState() {
+    let snowluma = false;
+    let wechat = false;
+    try { snowluma = await isPortOpen('127.0.0.1', snowlumaWsPort()); } catch { snowluma = false; }
+    try { wechat = !!(await wechatStatusWithAgent())?.channel?.running; } catch { wechat = false; }
+    return { snowluma, wechat };
+  }
 
   const stickers = new StickerManager(onebot);
   // 群禁言状态（见 src/mutes.js）。三条来源都会往里写：
@@ -4200,6 +4230,26 @@ export function createApp({ log = console.log } = {}) {
         .then((r) => log(`[微信通道] 自动启动：${r.alreadyRunning ? '中继已在跑' : r.ok ? '已拉起' : '失败 — ' + r.error}`))
         .catch((e) => log(`[微信通道] 自动启动异常：${e?.message ?? e}`));
     }
+    // 🆕 「一键重启」的**续启**（2026-10-03 第三十三对话，托盘那项）。
+    //    与上面两段的分工：那两段是**配置要求**（autoLaunch / autoLaunchRelay），
+    //    这一段是"**用户刚点了重启，重启前这几样本来就在跑**" ⇒ 按实测状态恢复。
+    //    ⚠️ 为什么必须有它：线上两个 autoLaunch 都是**关的**，而微信中继是本应用的
+    //       **子进程**（应用一退就跟着没）⇒ 只重启不续启的话，症状是"界面一切正常、
+    //       消息永远不来"（上面 4225 行那段注释记的就是这个）。
+    //    ⚠️ 口径：**只恢复重启前确实在跑的那几样**，⛔ 不替用户多拉一个他没开的东西
+    //       （微信通道是用户 2026-10-01 有意在页签上停掉的，见交接 §3-34 / §6-76）。
+    //    ⚠️ 仍然**不 await**（同上一段：拉 WeFlow 可能要等几十秒，不能拖住控制台启动）。
+    if (resumeTargets.length) log(`[续启] 本次重启要恢复：${resumeTargets.join('、')}`);
+    if (resumeTargets.includes('snowluma')) {
+      launchSnowluma()
+        .then((r) => log(`[续启] SnowLuma：${r.alreadyRunning ? '已在跑' : r.ok ? '已拉起' : '失败 — ' + r.error}`))
+        .catch((e) => log(`[续启] SnowLuma 异常：${e?.message ?? e}`));
+    }
+    if (resumeTargets.includes('wechat')) {
+      wechatChannel.start({ launchWeFlowFirst: getConfig().wechat?.autoLaunchWeFlow !== false })
+        .then((r) => log(`[续启] 微信通道：${r.alreadyRunning ? '中继已在跑' : r.ok ? '已拉起' : '失败 — ' + r.error}`))
+        .catch((e) => log(`[续启] 微信通道异常：${e?.message ?? e}`));
+    }
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     // 空闲「梦」的定时器（每 5 分钟看一次该不该做；关着的话它自己会跳过）
     dreamer.start();
@@ -4243,7 +4293,7 @@ export function createApp({ log = console.log } = {}) {
     try { stopJm(); } catch { /* ignore */ }
   }
 
-  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, probePorts, mutes, handleOneBotEvent };
+  return { server, onebot, store, memory, stickers, sender, sessions, orchestrator, start, stop, emit, getConfig, updateConfig, launchSnowluma, stopSnowluma, snowlumaStatus, runState, probePorts, mutes, handleOneBotEvent };
 }
 
 /**
