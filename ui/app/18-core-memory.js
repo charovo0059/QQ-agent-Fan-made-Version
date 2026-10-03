@@ -13,10 +13,11 @@
 //   管理端**不提供"替她挑一段存进去"的入口** —— 那正是她提案里明确不要的
 //   （原话："由我自己选择存哪一段，不用别人替我挑"）。
 //
-// ── 两个新控件（2026-10-03 用户拍板）────────────────────────────────────
+// ── 三个控件（2026-10-03 用户拍板；第三个是第三十六对话加的）──────────────
 //   · 「每轮注入」开关 → `config.coreMemory.inject`
 //   · 「字数上限」→ `config.coreMemory.injectMaxChars`（**0 = 不设限**）
-//   两者都**立刻存**（与微信联系人页那种"勾一下就存"同一写法）。
+//   · 🆕 「跨会话按人召回」→ `config.coreMemory.crossChat`（交接 §3-57，默认开）
+//   三者都**立刻存**（与微信联系人页那种"勾一下就存"同一写法）。
 //   🔴 存完**必须重新拉一次**：顶部那句"本次注入约 N 字"是**后端现算的**
 //      （`/api/core-memories` 的 `inject` 字段，与提示词共用 `coreMemoryPromptBlocks()`）——
 //      不重拉就会显示旧数，那正是"仪表在骗人"。
@@ -36,21 +37,25 @@ function groupCoreMemories(items) {
   return groups;
 }
 
-/** 顶部：注入开关 + 字数上限 + 现在会注入多少字。 */
+/** 顶部：注入开关 + 跨会话开关 + 字数上限 + 现在会注入多少字。 */
 function coreMemoryInjectHtml(inj, itemCount) {
   const i = inj || {};
   const on = i.enabled !== false;
+  const cross = i.crossChat !== false;
   const cap = Math.max(0, Math.floor(Number(i.maxChars) || 0));
   const dirChars = Math.max(0, Number(i.directoryChars) || 0);
-  const relChars = Math.max(0, Number(i.relatedAllChars) || 0);
-  const total = dirChars + relChars;
+  // 🔴 2026-10-03（第三十六对话）修：这个数原来叫 `relatedAllChars`，而它**永远是 0**
+  //    （后端不带 chatKey 调那个函数 ⇒ 恒回空表）。见 app.js 那一段注释。
+  const allChars = Math.max(0, Number(i.allOriginalsChars) || 0);
+  const total = dirChars + allChars;
 
   const nowLine = !itemCount
     ? '相册还是空的 —— 存了第一段之后，这里会显示每轮大概注入多少字。'
     : (on
-      ? `现在每轮注入：目录 <b>${dirChars}</b> 字（每轮都在）；当前会话的原文**最多**再 <b>${relChars}</b> 字`
-        + `（相册全部原文的合计，实际只注入当前这个会话那几段）。`
-        + (cap > 0 ? ` 已设上限 ${cap} 字：超了**先保目录**，装不下的原文逐段丢掉并写明丢了几段。` : ' 上限 0 = 不设限。')
+      ? `现在每轮注入：目录 <b>${dirChars}</b> 字（每轮都在）；原文**最多**再 <b>${allChars}</b> 字`
+        + `（相册全部原文的合计 = 上限；实际只注入当前这个会话那几段`
+        + (cross ? '，**加上**别的会话里和在场的人有关的那几段' : '，跨会话召回已关') + '）。'
+        + (cap > 0 ? ` 已设上限 ${cap} 字：超了**先保目录 → 再保当前会话原文**，装不下的逐组丢掉并写明丢了几段。` : ' 上限 0 = 不设限。')
       : '⏸ 已关闭：**一个字都不注入**（她那四个工具照旧能用，只是她看不到相册里有什么）。');
 
   // 🔴 看得见的护栏：不设限时涨到两万字以上就明说（⛔ 不截断他的话，只让他看见）
@@ -77,9 +82,14 @@ function coreMemoryInjectHtml(inj, itemCount) {
         <span class="tg-track"><span class="tg-knob"></span></span>
         <span class="tg-text">每轮注入</span>
       </label>
+      <label class="toggle" title="开：除了当前会话的原文，还注入**别的会话里和这一轮在场的人有关**的那几段（单开一块，自带「别主动拿到这里提」的引导）；关：只注入当前会话那几段">
+        <input type="checkbox" id="cm-crosschat" ${cross ? 'checked' : ''}>
+        <span class="tg-track"><span class="tg-knob"></span></span>
+        <span class="tg-text">跨会话按人召回</span>
+      </label>
       <label for="cm-maxchars" class="muted" style="font-size:12px">字数上限</label>
       <input type="number" id="cm-maxchars" min="0" step="100" value="${esc(cap)}"
-             style="width:110px" title="0 = 不设限。填正数时超了**先保目录**（目录是索引），装不下的原文逐段丢掉并写明丢了几段">
+             style="width:110px" title="0 = 不设限。填正数时超了**先保目录**（目录是索引），再保当前会话原文，装不下的逐组丢掉并写明丢了几段">
       <span class="muted" style="font-size:12px">0 = 不设限</span>
     </div>
     <div class="hint" style="margin-top:2px">${nowLine}</div>
@@ -169,6 +179,15 @@ function bindCoreMemoryPage(page) {
     injectBox.addEventListener('change', () => {
       const next = injectBox.checked;
       void saveCoreMemoryConfig({ inject: next }, injectBox, () => { injectBox.checked = !next; });
+    });
+  }
+  // 🆕 2026-10-03（第三十六对话 · 交接 §3-57）：跨会话按人召回。
+  //    ⚠️ 与「每轮注入」同一个写法（勾一下就存 + 存完重拉）—— ⛔ 别另立一套。
+  const crossBox = $('#cm-crosschat', page);
+  if (crossBox) {
+    crossBox.addEventListener('change', () => {
+      const next = crossBox.checked;
+      void saveCoreMemoryConfig({ crossChat: next }, crossBox, () => { crossBox.checked = !next; });
     });
   }
   const capInput = $('#cm-maxchars', page);
