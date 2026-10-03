@@ -1,4 +1,4 @@
-﻿// 运行期表情库管理：同步 QQ 收藏表情 + 本地认知层（备注/笔记/使用计数）。
+// 运行期表情库管理：同步 QQ 收藏表情 + 本地认知层（备注/笔记/使用计数）。
 // 纯函数在 stickers.js；这里管缓存、TTL 和 OneBot 交互。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -6,7 +6,8 @@ import { OneBotClient } from './onebot.js';
 import { getConfig, DATA_DIR } from './config.js';
 import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary, removeSticker,
-  findSticker, formatStickerList, applyStickerNote, markStickerUsed, contentHashOfUrl
+  findSticker, formatStickerList, applyStickerNote, markStickerUsed, contentHashOfUrl,
+  refreshStickerSource
 } from './stickers.js';
 // 🆕 2026-09-29（第三十一对话）§3-26：**收藏那一刻就把字节缓存下来** ⇒ 复用 tools.js 的
 // `ensureStickerImage`（内部 = 先读缓存 → 换新链 → 下载 → 顺手写进 `data/stickers/`）。
@@ -168,6 +169,42 @@ export class StickerManager {
   }
 
   /**
+   * 🆕 2026-10-03（第三十四对话）§3-29：**再看到同一张图时，把它救活**。
+   *
+   * 做的事就两件（顺序不能反）：
+   *   ① 把**这次刚看到的** `url` / `file` 用纯函数 `refreshStickerSource` 写回条目并落盘；
+   *   ② 再走一遍 `#fillCache` —— 此刻那条 url 是**活的**，所以这一步真的能把字节存下来。
+   *
+   * ── 为什么这是"救活"而不是"重下一遍" ─────────────────────────────────────
+   *   `ensureStickerImage` → `loadStickerImage` **第一步就读本地缓存**：已经缓存过的条目
+   *   一次网络都不打（所以"重收一张早就存好的表情"不会变成每次重下 2~8MB）。
+   *   真正会去打网络的只有**没有缓存**的那些 —— 而那正是本函数要救的目标。
+   *
+   * ── 分寸 ───────────────────────────────────────────────────────────────
+   *   · 失败**不抛**：补缓存失败只是"这一张以后可能发不出去"，而"这条已经在你库里"这件事
+   *     本来就成立 ⇒ 不能把一次成功的重收报成失败（与 `#fillCache` 同一条纪律）；
+   *   · 失败要**出声**，并如实说明"发送时会再试一次补缓存"；
+   *   · 备注/标签/用法/计数**一个字节都不动**（那是这一侧的认知层，见 `refreshStickerSource`）。
+   *
+   * @returns {Promise<{entry:object|null, refreshed:boolean, cached:boolean}>}
+   */
+  async #revive(entry, { url = '', file = '' } = {}) {
+    if (!entry) return { entry: null, refreshed: false, cached: false };
+    const r = refreshStickerSource(this.entries, entry.id, { url, file });
+    if (r.changed) {
+      this.entries = r.entries;
+      saveStickerStore(this.entries);
+    }
+    const target = r.entry || entry;
+    const filled = await this.#fillCache(target);
+    if (!filled.ok) {
+      console.warn(`[sticker] 重收时没能把原图存到本地（${target.id}）：${filled.error}`
+        + ' —— 这一张以后可能发不出去（发送时会再试一次补缓存）');
+    }
+    return { entry: target, refreshed: r.changed, cached: filled.ok };
+  }
+
+  /**
    * 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。
    *
    * ⚠️ 2026-09-29（第三十一对话）改成 **async**：新增条目落盘后会**顺手把字节缓存下来**
@@ -183,10 +220,16 @@ export class StickerManager {
    *            第 2 张起是 `collected_<mid>_<index>`。
    *            （2026-09-12：原来 id 不含序号，一条消息里 30 张图会撞成同一个 id、
    *             后一张覆盖前一张，等于只能存 1 张。）
-   * @returns {{entry:object, added:boolean, reason:string, quotaLeft:number}}
+   * @returns {{entry:object, added:boolean, reason:string, quotaLeft:number,
+   *            refreshed?:boolean, cached?:boolean}}
    *   reason = 'added' 新增成功 ｜ 'renamed' 这条消息这一张已收过，只更新了备注
    *          ｜ 'duplicate' 同一个图片地址已经在库里（同一张图），没重复收
    *   quotaLeft = 本小时还能新增几条（收藏限频用）
+   *   🆕 2026-10-03（第三十四对话）§3-29：`added:false` 那三条路会**顺手救活**已有条目
+   *      （把这次看到的新 url/file 写回 + 试着补本地缓存）。
+   *      `refreshed` = 来源字段真的被更新了（url/file 至少一个变了）；
+   *      `cached` = 这次结束时本地**确实有**字节缓存（本来就有的也算 true）。
+   *      ⚠️ 新增那条路（`added:true`）**不带**这两个字段 —— 别拿它们判"新增成功"。沿用 `added`。
    *
    * 出错仍然抛异常（收藏功能关闭 / 没图地址 / 限频到顶），
    * 但限频的报错里会带上"每小时上限多少"，好让模型如实告诉用户。
@@ -205,15 +248,26 @@ export class StickerManager {
     const idx = Math.max(1, Math.floor(Number(index)) || 1);
     const id = idx === 1 ? `collected_${messageId}` : `collected_${messageId}_${idx}`;
 
-    // ① 先看"这条消息的这一张"收过没有 —— 收过就只更新备注（不算新增、不占额度）
+    // ① 先看"这条消息的这一张"收过没有 —— 收过就更新备注 + 救活来源（不算新增、不占额度）
     const existing = this.entries.find((e) => e.id === id);
     if (existing) {
-      return { entry: this.note(id, { note: String(note || '') }), added: false, reason: 'renamed', quotaLeft };
+      const noted = this.note(id, { note: String(note || '') });
+      const revived = await this.#revive(noted, { url, file });
+      return {
+        entry: revived.entry || noted, added: false, reason: 'renamed', quotaLeft,
+        refreshed: revived.refreshed, cached: revived.cached
+      };
     }
 
     // ② 同一个图片地址 = 同一张图：已经在库里（别的消息收的）也直接返回，不重复收
     const byUrl = this.entries.find((e) => e.url && e.url === url);
-    if (byUrl) return { entry: byUrl, added: false, reason: 'duplicate', quotaLeft };
+    if (byUrl) {
+      const revived = await this.#revive(byUrl, { url, file });
+      return {
+        entry: revived.entry || byUrl, added: false, reason: 'duplicate', quotaLeft,
+        refreshed: revived.refreshed, cached: revived.cached
+      };
+    }
 
     // ③ 同一张图但 url 不同（rkey 每条消息都不一样）= 还是同一张图，照样不重复收。
     //    这一条就是这次"同一批表情包发两次、存了两遍 28 张"的护栏：
@@ -221,7 +275,13 @@ export class StickerManager {
     const hash = contentHashOfUrl(url);
     if (hash) {
       const byHash = this.entries.find((e) => e.url && contentHashOfUrl(e.url) === hash);
-      if (byHash) return { entry: byHash, added: false, reason: 'duplicate', quotaLeft };
+      if (byHash) {
+        const revived = await this.#revive(byHash, { url, file });
+        return {
+          entry: revived.entry || byHash, added: false, reason: 'duplicate', quotaLeft,
+          refreshed: revived.refreshed, cached: revived.cached
+        };
+      }
     }
 
     if (quotaLeft <= 0) {
@@ -254,9 +314,12 @@ export class StickerManager {
     // ── 🆕 2026-09-29（第三十一对话）§3-26：这就是"根治"那一句 ─────────────────
     // 条目**先落盘**再补缓存：补缓存失败/超时都不该把一次成功的收藏变成失败，
     // 也不能让"下载到一半崩了"把刚收的条目弄丢。
-    // 🔴 **只在真新增（added）时补**，`duplicate` / `renamed` 两条路**一个字节的网络都不打**：
-    //    那两条返回的是**早就存在的条目**，它们存的是**旧 url**（可能已经死了）
-    //    ⇒ 花最多 12 秒去换一次几乎必然失败，而"发送时补缓存"那条路（上一轮修的）本来就会兜底。
+    // ⚠️ 2026-10-03（第三十四对话）§3-29 **更正下面这段旧注释**：它原来写着
+    //    「只在真新增（added）时补，duplicate / renamed 两条路一个字节的网络都不打」——
+    //    那个取舍的理由是"旧条目的 url 多半已经死了，换了也是白换"。**现在那两条路也会补**
+    //    （见 `#revive`）：因为这次她手里那条 url 是**刚看到的、此刻一定活的**，
+    //    所以"救活"是可以做到的；而**已经缓存过的条目**在 `loadStickerImage` 第一步就命中缓存、
+    //    仍然一次网络都不打 ⇒ 不会变成"每重收一次就重下 2~8MB"。
     const filled = await this.#fillCache(entry);
     if (!filled.ok) {
       console.warn(`[sticker] 收藏时没能把原图存到本地（${entry.id}）：${filled.error}`

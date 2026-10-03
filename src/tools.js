@@ -848,7 +848,11 @@ export function buildToolDefs() {
       name: 'collect_sticker',
       description: '收藏别人刚发的表情/图片到你的表情库（偶尔用，收藏前先 get_message_images 看图确认）。需要备注一句简短说明。'
         + '一条消息里有好几张图的时候（比如转发过来的表情包），用 index 指定第几张（1 起），一张一张收；'
-        + '返回值里的 total/index/quotaLeft 会告诉你这条消息一共几张、这是第几张、本小时还能再收几张。',
+        + '返回值里的 total/index/quotaLeft 会告诉你这条消息一共几张、这是第几张、本小时还能再收几张。'
+        // 🆕 2026-10-03（第三十四对话）§3-29：把"重收能救活老表情"写进描述 —— 否则她认为
+        //    "早就有了、不用再收"，那条救活的路**永远不会被走到**（与 §3-42「提示词里不提就没人用」同一个病）。
+        + '已经收过的图再收一次不会重复收藏，但会把那条过期的链接更新成这次看到的、并把原图补存到本地；'
+        + '所以哪张老表情已经发不出去了，再看到它时收一次就能救回来。',
       parameters: {
         type: 'object',
         properties: {
@@ -889,9 +893,20 @@ export function buildToolDefs() {
               : saved.reason === 'renamed'
                 ? '这条消息的这一张你已经收过了，这次只更新了备注'
                 : '没有新增';
+            // 🆕 2026-10-03（第三十四对话）§3-29：`added:false` 的三条路现在会**顺手救活**已有条目
+            //    （见 sticker-manager 的 `#revive`）—— 如实把它写进给模型看的话里，
+            //    否则她以为"早就在库里 = 老样子"，而实际上那张图刚刚被换成了活链接。
+            const revived = saved.refreshed
+              ? '；顺手把它过期的链接换成了这次看到的，并试着把原图存到了本地'
+              : '';
+            const uncached = saved.cached === false
+              ? '（这张在本地还没存下来，以后可能发不出去）'
+              : '';
             return ok({
               collected: false, reason: saved.reason, index, total: images.length,
-              quotaLeft: saved.quotaLeft, id: saved.entry?.id ?? null, note: saved.entry?.localNote ?? '', message: `${where}：${why}`
+              quotaLeft: saved.quotaLeft, id: saved.entry?.id ?? null, note: saved.entry?.localNote ?? '',
+              refreshed: saved.refreshed === true, cached: saved.cached === true,
+              message: `${where}：${why}${revived}${uncached}`
             });
           }
           return ok({

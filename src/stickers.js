@@ -275,6 +275,50 @@ export function applyStickerNote(entries, id, patch = {}) {
 }
 
 /**
+ * 🆕 2026-10-03（第三十四对话）§3-29：把**刚看到的那份**图片地址/文件名写回一条**已有**条目
+ * —— 也就是"再看到同一张图时，把它救活"那一步的纯函数部分（IO 与补缓存在 sticker-manager）。
+ *
+ * ── 为什么需要它（这条推翻了同文件 `collect()` 里原来那句注释）────────────────
+ *   原来的注释写着「duplicate / renamed 两条路一个字节的网络都不打 —— 它们存的是**旧 url**
+ *   （可能已经死了）⇒ 换了也是白换」。⚠️ 那句话**只对"拿旧 url 去换链"成立**：
+ *   `resolveFreshImageUrl` 优先用 `file` 问 OneBot，`file` 也换不回来时就退回**存下来的那条 url**
+ *   ⇒ 旧条目若 url 已死、QQ 侧缓存也没了，就真的救不回来（真机实测：22 条没缓存的表情里
+ *   只有 **2** 条还能换到新链，另外 **20** 条彻底没了）。
+ *   但这轮的前提不同：**这次是她又看到这张图了**，而我们手里那条 url 是**刚刚从消息里读出来的、
+ *   此刻一定是活的** ⇒ 把它写回条目、并立刻落盘，就能真正把这 20 条之外的那些救回来。
+ *
+ * ── 三条分寸（都别改）────────────────────────────────────────────────────
+ *   ① **只在"新的非空且与旧的确实不同"时才写** ⇒ 新值为空串时**绝不覆盖**（别把好值抹成空）；
+ *   ② 只碰 `url` / `file` / `updatedAt` 三个字段 —— **备注、标签、用法、使用计数一律不动**
+ *      （那些是这一侧攒下来的认知层，`mergeStickerLibrary` 都特意保护它们）；
+ *   ③ 返回 `changed` 让调用方决定要不要落盘（本函数**不写盘**，与文件里其它纯函数一致）。
+ *
+ * @returns {{entries:Array, entry:object|null, changed:boolean, urlChanged:boolean, fileChanged:boolean}}
+ */
+export function refreshStickerSource(entries, id, { url = '', file = '' } = {}) {
+  const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
+  const target = findSticker(list, id);
+  if (!target) return { entries: list, entry: null, changed: false, urlChanged: false, fileChanged: false };
+  const nextUrl = String(url || '').trim();
+  const nextFile = String(file || '').trim();
+  const urlChanged = !!nextUrl && nextUrl !== target.url;
+  const fileChanged = !!nextFile && nextFile !== target.file;
+  if (!urlChanged && !fileChanged) {
+    return { entries: list, entry: target, changed: false, urlChanged: false, fileChanged: false };
+  }
+  const idx = list.findIndex((e) => e.id === target.id);
+  const next = normalizeStickerEntry({
+    ...target,
+    url: urlChanged ? nextUrl : target.url,
+    file: fileChanged ? nextFile : target.file,
+    updatedAt: nowIso()
+  });
+  if (!next) return { entries: list, entry: target, changed: false, urlChanged: false, fileChanged: false };
+  list[idx] = next;
+  return { entries: list, entry: next, changed: true, urlChanged, fileChanged };
+}
+
+/**
  * 从本地表情库里删掉一条（管理端「表情包」页用）。
  *
  * ⚠️ **只允许删非 QQ 收藏的条目**（source: 'ai' / 'manual'）。
