@@ -726,15 +726,36 @@ export function createApp({ log = console.log, resume = [] } = {}) {
   // ⚠️ 为什么要有 30 分钟这道闸：同步的触发点是 `/api/status`（前端每 15 秒轮询一次）⇒
   //    不拦就会变成"每 15 秒问一次桥"。而名字是给人看的，30 分钟内不会有人在意。
   //    手动按钮**绕过**这道闸（用户点了就该真的去问）。
-  const wechatContactSync = { at: 0, running: false, last: null };
+  // 🔴 2026-10-03（第三十六对话 · 交接 §3-52）补上 `retryAt` 失败地板。
+  //    为什么必须有它（真机实测的账）：原来**只在成功时**更新 `at` ⇒ 一旦桥那边永久失败
+  //    （实测：WeFlow 的数据组件从 13:00:40 起起不来，桥每问一次都回 0 条），
+  //    这道 30 分钟的闸就**整个失效**：`bridge.log` 的 `echo=relay-N` 实测从
+  //    "间隔 30~31 分钟"变成"约 4 秒一次"，一晚上白敲上万次。
+  //    ⚠️ 这不是新发现 —— **QQ 侧那套早就写对了**（见下面 `qqNameSync.retryAt` 与那段注释，
+  //       它明确点出了微信侧这个不对称），只是当时没有回填。现在两边同构。
+  //    ⚠️ 与候选 1（桥日志带上 WeFlow 的错误体）是**一件事的两半**：只做这个不做那个，
+  //       就变成"把日志变少"冒充"把问题暴露出来"。
+  const WECHAT_CONTACT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+  const WECHAT_CONTACT_SYNC_RETRY_MS = 60 * 1000;
+  const wechatContactSync = { at: 0, retryAt: 0, running: false, last: null };
   async function maybeSyncWechatContacts(reason) {
     if (wechatContactSync.running) return;
-    if (Date.now() - wechatContactSync.at < 30 * 60 * 1000) return;
+    const now = Date.now();
+    if (now < wechatContactSync.retryAt) return;                              // 失败后的 60 秒地板
+    if (now - wechatContactSync.at < WECHAT_CONTACT_SYNC_INTERVAL_MS) return; // 成功后的 30 分钟闸
     wechatContactSync.running = true;
     try {
       const r = await syncWechatContactsFromBridge(reason);
-      if (r.ok) { wechatContactSync.at = Date.now(); wechatContactSync.last = r; }
+      // 失败也要记一次（`/api/status` 的排障字段要能看到"为什么名字是旧的"），并设重试地板
+      wechatContactSync.last = r;
+      if (r.ok) {
+        wechatContactSync.at = Date.now();
+        wechatContactSync.retryAt = 0;
+      } else {
+        wechatContactSync.retryAt = Date.now() + WECHAT_CONTACT_SYNC_RETRY_MS;
+      }
     } catch (e) {
+      wechatContactSync.retryAt = Date.now() + WECHAT_CONTACT_SYNC_RETRY_MS;
       log('[wechat-contacts] 自动同步失败：' + String(e?.message ?? e));
     } finally {
       wechatContactSync.running = false;
@@ -2391,12 +2412,21 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         // 🆕 2026-10-03（第三十五对话）：把**注入的真值**一并交出去（页面顶部要显示
         //    "本次注入约 N 字"）。⚠️ 这里的数字必须来自 `coreMemoryPromptBlocks()` ——
         //    与提示词**同一个函数**，⛔ 不许页面上另算一份（那正是"仪表与事实分家"）。
-        //    ⚠️ `chatKey` 留空：页面不知道"当前会话"是哪个，所以这里给的是**与会话无关的两半**：
-        //      · directoryChars  = 每轮必进的目录长度；
-        //      · relatedAllChars = 相册**全部**原文的长度（"如果所有段都属于当前会话"的上限）。
+        //    ⚠️ `chatKey` 留空：页面不知道"当前会话"是哪个（她没有会话选择器），所以这里给的是
+        //       **与会话无关的两个数**：
+        //      · directoryChars     = 每轮必进的目录长度；
+        //      · allOriginalsChars  = 相册**全部**原文的合计（= "哪些段算当前会话"的上限，
+        //        也是"当前会话原文 + 别处按人召回"两块的合计上限）。
+        //    🔴 2026-10-03（第三十六对话）改名 + 修真 bug：它原来叫 `relatedAllChars`，
+        //       而值是 `cmAll.related.length` —— 不带 chatKey 时 `coreMemoryForChat` 恒回空表
+        //       ⇒ **永远是 0**。见下面那段注释。
         const cmCfg = getConfig().coreMemory || {};
-        const cmAll = coreMemoryPromptBlocks({ inject: cmCfg.inject !== false, maxChars: 0 });
-        const cmInjected = coreMemoryPromptBlocks({ inject: cmCfg.inject !== false, maxChars: cmCfg.injectMaxChars });
+        const cmAll = coreMemoryPromptBlocks({
+          inject: cmCfg.inject !== false, maxChars: 0, crossChat: cmCfg.crossChat !== false
+        });
+        const cmInjected = coreMemoryPromptBlocks({
+          inject: cmCfg.inject !== false, maxChars: cmCfg.injectMaxChars, crossChat: cmCfg.crossChat !== false
+        });
         return json(res, 200, {
           ok: true,
           // 🆕 2026-10-03（第三十五对话）：每条带上**归属标签**（`夏亚（QQ 1857354535）`）。
@@ -2407,9 +2437,16 @@ export function createApp({ log = console.log, resume = [] } = {}) {
           loadError: coreMemoryLoadError() || null,
           inject: {
             enabled: cmCfg.inject !== false,
+            crossChat: cmCfg.crossChat !== false,
             maxChars: Math.max(0, Math.floor(Number(cmCfg.injectMaxChars) || 0)),
             directoryChars: cmAll.directory.length,
-            relatedAllChars: cmAll.related.length,
+            // 🔴 2026-10-03（第三十六对话）**修掉一个真 bug**：这里原来是
+            //    `relatedAllChars: cmAll.related.length`，而 `cmAll` 是**不带 chatKey** 调的
+            //    ⇒ `coreMemoryForChat(items, '')` 恒回空表 ⇒ 这个数**永远是 0**，
+            //    页面上写着"当前会话的原文**最多**再 0 字"（相册当时是空的，所以没暴露）。
+            //    现在直接用函数算准的"相册全部原文的合计"上限（`allOriginalsChars`）。
+            //    ⚠️ 名字也一起改对了：它从来不是"related"，是"全部原文的上限"。
+            allOriginalsChars: cmAll.allOriginalsChars,
             // 现状（不带 chatKey）真正会进提示词的字数 —— 也就是"目录 + 全部原文"
             charsNow: cmInjected.chars
           },
