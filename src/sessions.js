@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from './config.js';
 import { addUsage, emptyUsage } from './llm.js';
+import { modelLabel, splitModelLabel } from './model-prices.js';
 
 const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
 
@@ -270,6 +271,58 @@ export class SessionRegistry {
     return { removed, files, skipped };
   }
 
+  /**
+   * 今日 token 统计**按模型**分项（🆕 2026-10-03 第三十八对话，提案 `8ec84f39`）。
+   *
+   * 为什么必须和 `todayUsage()` 同源（而不是自己去扫会话存档）：
+   *   她要回答的是"某个模型今天花了多少"，而**总数**来自 `todayUsage()`
+   *   （= `usage-today.json` 的累计 + 运行中的会话）。分项若另走一套来源
+   *   （比如扫 `sessions/*.json`），两边就会各说各话 —— 同一个回答里"总数"与"分项之和"
+   *   对不上，本项目对"两套口径"栽过跟头（控制台一个数、她嘴里另一个数）。
+   *   ⇒ 分项也在**同一份账**里记（`#bumpTodayUsage` 顺手写 `models`），这里只做读取合并。
+   *
+   * ⚠️ `unattributedTokens` 是**诚实的缺口**，不是 0：
+   *   · 不带模型信息的记账（目前只有夜里那条笔记走 `recordExternalUsage`，它没有 vendor/model）；
+   *   · 升级前那一天已经写下的老文件（当时还没有 `models` 这一栏）。
+   *   ⇒ 恒等式：`sum(models.totalTokens) + unattributedTokens === todayUsage(dayKey).totalTokens`。
+   *     ⛔ 不许把这个缺口折成 0 或摊到某个模型头上。
+   */
+  todayUsageByModel(dayKey) {
+    const map = new Map();
+    const add = (vendor, model, usage, runs = 1) => {
+      if (!String(model || '').trim()) return;      // 没有模型信息 ⇒ 进未分项那一档
+      const key = modelLabel(vendor, model);
+      const row = map.get(key) || {
+        label: key,
+        vendor: String(vendor || ''),
+        model: String(model || ''),
+        promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, runs: 0
+      };
+      row.promptTokens += Number(usage?.promptTokens) || 0;
+      row.completionTokens += Number(usage?.completionTokens) || 0;
+      row.cachedTokens += Number(usage?.cachedTokens) || 0;
+      row.totalTokens += Number(usage?.totalTokens) || 0;
+      row.runs += Number(runs) || 0;
+      map.set(key, row);
+    };
+    // ① 已结束的会话：记在 usage-today.json 的 models 里
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
+      if (data?.dayKey === dayKey && data.models && typeof data.models === 'object') {
+        for (const [label, row] of Object.entries(data.models)) {
+          const { vendor, model } = splitModelLabel(label);
+          add(vendor, model, row, Number(row?.runs) || 0);
+        }
+      }
+    } catch { /* 无记录 */ }
+    // ② 运行中的（与 todayUsage 的算法一致：它们本轮烧掉的也该看得见）
+    for (const s of this.current.values()) add(s.vendor, s.model, s.usage);
+    const models = [...map.values()].sort((a, b) => b.totalTokens - a.totalTokens);
+    const attributed = models.reduce((n, m) => n + m.totalTokens, 0);
+    const unattributedTokens = Math.max(0, (Number(this.todayUsage(dayKey)?.totalTokens) || 0) - attributed);
+    return { dayKey, models, unattributedTokens };
+  }
+
   /** 今日 token 统计（含运行中的）。 */
   todayUsage(dayKey) {
     let promptTokens = 0;
@@ -328,17 +381,33 @@ export class SessionRegistry {
   /** 在会话结束时累加今日用量。 */
   #bumpTodayUsage(s) {
     const dayKey = localDayKey(s.startedAt);
-    let data = { dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0, webSearchCount: 0 };
+    let data = { dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0, webSearchCount: 0, models: {} };
     try {
       const parsed = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
       if (parsed?.dayKey === dayKey) data = parsed;
     } catch { /* 新的一天 */ }
+    // ⚠️ 老文件（升级前写的）没有 `models` 这一栏 ⇒ 补一个空对象，
+    //    缺的那部分会如实进 `todayUsageByModel().unattributedTokens`，⛔ 不折成 0、也不摊给某个模型。
+    if (!data.models || typeof data.models !== 'object') data.models = {};
     data.promptTokens += s.usage.promptTokens;
     data.completionTokens += s.usage.completionTokens;
     data.totalTokens += s.usage.totalTokens;
     data.cachedTokens = (data.cachedTokens || 0) + (Number(s.usage.cachedTokens) || 0);
     data.runs += 1;
     data.webSearchCount = (data.webSearchCount || 0) + (Number(s.webSearchCount) || 0);
+    // 🆕 2026-10-03 第三十八对话（提案 8ec84f39）：**同一份账里**顺手记按模型的分项。
+    //    没有模型信息的记账（`recordExternalUsage`）刻意**不**进来 —— 它会落到
+    //    `todayUsageByModel().unattributedTokens`，于是"总数 = 分项 + 未分项"这条恒等式永远成立。
+    if (String(s.model || '').trim()) {
+      const key = modelLabel(s.vendor, s.model);
+      const row = data.models[key] || { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, runs: 0 };
+      row.promptTokens += Number(s.usage.promptTokens) || 0;
+      row.completionTokens += Number(s.usage.completionTokens) || 0;
+      row.cachedTokens += Number(s.usage.cachedTokens) || 0;
+      row.totalTokens += Number(s.usage.totalTokens) || 0;
+      row.runs += 1;
+      data.models[key] = row;
+    }
     const tmp = path.join(DATA_DIR, 'usage-today.json.tmp');
     fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
     fs.renameSync(tmp, path.join(DATA_DIR, 'usage-today.json'));

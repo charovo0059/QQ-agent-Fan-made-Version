@@ -814,6 +814,10 @@ export class Orchestrator {
       //    ② `/api/status` 用的是同一个 `todayUsage` ⇒ **口径只有一份**，
       //       不会出现"控制台一个数、她嘴里另一个数"（本项目对"两套口径"栽过跟头）。
       usageToday: (dayKey) => this.sessions.todayUsage(dayKey),
+      // 🆕 2026-10-03 第三十八对话（提案 8ec84f39）：按模型分项**走同一个 registry**，
+      //    与上面那条是同一天、同一份账的两个视角 ⇒ "总数 = 分项 + 未分项"永远成立。
+      //    ⚠️ 缺了它 `get_my_usage` 会**整段说"读不到"**（口径只有一份：宁可说读不到，也不给半个数）。
+      usageByModelToday: (dayKey) => this.sessions.todayUsageByModel(dayKey),
       triggerEntries,                   // 提示词要用它排除重复（【过去状态】不该再带这几条）
       sameTurnContext,                  // 同一轮的上文（见 wake() 里的说明）
       emit: (type, payload) => this.emit(type, payload)
