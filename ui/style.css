@@ -1365,11 +1365,16 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
       变成"相加 36px"）⇒ 10 个分区的间距会整体变松。包起来后**内部仍是块级流**，才安全。
    🔴 `min-height: 0` 不能省：flex 子项的默认 `min-height: auto` 会让它**长过容器**、于是滚不动
       （"看着该滚却滚不了"的那种静默失效）。
-   ⚠️ `padding: 18px 26px 22px` 是**设计取值**（上 18px = 条与第一个标题的距离；下 22px = 滚到底时
-      最后一行与底边的距离）⇒ 觉得挤就调这两个数，⛔ 别去动 `.settings-pane` 的 padding（两处会叠加）。 */
+   ⚠️ `padding: 24px 26px 28px` 是**设计取值**（上 24px = 条与第一个标题的距离；下 28px = 滚到底时
+      最后一行与底边的距离）⇒ 觉得挤就调这两个数，⛔ 别去动 `.settings-pane` 的 padding（两处会叠加）。
+   🆕 2026-10-03（第三十六对话 · 交接 §3-39）：原来是 `18px / 22px`（2026-10-01 定的），
+      用户看过真机截图后拍板**调松一点** ⇒ 上 18→**24**、下 22→**28**。
+      调之前的实测（真机探针 · 1360×860 @1.5）：条→第一个标题的**真实间距 = 18px**、
+      滚到底最后一行→下沿 = **22px**（与设计取值逐字一致 ⇒ 那两个数确实就是观众看到的那两个）。
+      ⚠️ 只改这一行；`.save-bar` 的 `margin: 22px 26px 0` **没动**（那是条自己的上留白，与这里正交）。 */
 .settings-scroll {
   flex: 1; min-height: 0; overflow-y: auto;
-  padding: 18px 26px 22px;
+  padding: 24px 26px 28px;
 }
 
 /* 保存条（2026-10-01 **调整方案**：从"吸底悬浮"改成"**顶部固定**"；用户拍板方案 B）。
@@ -2480,8 +2485,30 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
    ⚠️ 2026-10-01：这一段原来写的是字面值 `#0b0d11` —— 亮色主题下那个字面值就是 bug 本身
    （亮色下露近黑底），所以注释也一并改成引用 token 名，别让路标指着一个已经搬走的常量。 */
 .sticker-card .thumb.failed img { display: none; }
+/* 🆕 2026-10-03（第三十六对话 · 交接 §3-32，方案 §5.2 那条「可选项」）：
+   失败态改成 **浅底 + 虚线框 + 文案**。
+   为什么值得改：原来那里只是一块 `--thumb-bg` 的实底加一行灰字 —— 看起来像"这个表情就是黑的"，
+   而不像"这里本该有一张图、只是没取到"。虚线框表达的正是后者（"本该有内容"的通用视觉语言）。
+   🔴 两条实现纪律：
+     · ⛔ **不动几何**：虚线框用 `position:absolute` + `inset`（脱离文档流）⇒
+       卡片的尺寸、栅格、`.thumb` 的 `172px` 高度**一个像素都不变**（本项目刚在观感上栽过，
+       见坑 143 —— 那次就是"没量就改"). 所以 `position:relative` 只加在失败态上。
+     · 颜色**只用既有 token**（`--bg-3` / `--border`），⛔ 不新增设计变量、不写字面色值
+       （亮色主题下发现在 literal 值上踩过一次：会变成"亮色下露黑底"的 bug，见 §48 那条）。
+   浅底为什么用 `--bg-3` 而不是 `--bg`：`--bg` 是整页底色，卡片会看起来"被挖了个洞"；
+   `--bg-3` 是内容层里最浅的一档，亮色下与 `--thumb-bg` 同值（本来就已经是浅底 ⇒ 那边只多了虚线框），
+   暗色下比 `--thumb-bg` 的 `#0b0d11` 明显浅 ⇒ 两侧都比"一块黑"更像"缺图"。 */
+.sticker-card .thumb.failed {
+  position: relative;
+  background: var(--bg-3);
+}
+.sticker-card .thumb.failed::before {
+  content: ''; position: absolute; inset: 8px;
+  border: 1px dashed var(--border); border-radius: 8px; pointer-events: none;
+}
 .sticker-card .thumb.failed::after {
   content: '缩略图取不到'; font-size: 12px; color: var(--muted); padding: 0 12px; text-align: center;
+  position: relative;   /* 压在虚线框之上（框是 absolute，文字保持 flex 居中） */
 }
 .sticker-card .sbody { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
 
