@@ -557,6 +557,10 @@ export class Orchestrator {
     // 放在重试循环**之外**：会话级重试会重跑 #runAgent，若在循环内取，
     // 第一次就清空了，重试那一轮模型反而看不到这条提醒。
     session.sweptInfo = this.store.takeSwept(chatKey);
+    // 🆕 2026-10-03 第三十八对话（补做提案 d27c6e7c）：管理端删过存档 ⇒ 也取一次"毛边"。
+    //    ⚠️ 与上面同一条纪律：放在重试循环**之外**（循环内取会在第一次就清空，重试那轮看不到）。
+    //    记号住在 `data/trim-marks.json`（不在存档里）⇒ `deleteChat` 把存档整个删掉也留得住。
+    session.trimInfo = this.store.takeTrimMark(chatKey);
 
     // 同一轮上文：留痕，便于坐实"这次到底补了哪几条"（照 triggerText 的写法，都是小字符串）。
     // ⚠️ 只存 mid + 摘要，**不存条目本身** —— 存档瘦身（2026-09-17）刚把 inputMessages 剥掉，
@@ -755,7 +759,9 @@ export class Orchestrator {
       proactive,
       contextLimit,
       tierInfo,
-      sweptInfo: session.sweptInfo || null
+      sweptInfo: session.sweptInfo || null,
+      // 🆕 2026-10-03 第三十八对话（提案 d27c6e7c）：被删存档留下的"毛边"
+      trimInfo: session.trimInfo || null
     });
 
     // 主动唤醒时，真正发给模型的 user 消息会多一句引导语。
