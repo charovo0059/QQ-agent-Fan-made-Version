@@ -8,6 +8,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
+// 「新加进白名单的会话默认档位」（2026-10-03 第三十五对话，用户拍板）：
+// 私聊全响应 / 群聊仅艾特。⛔ 两个入口必须共用这一份（见该文件顶部）。
+import { applyNewChatDefaults } from './tier-defaults.js';
 import { customSearch } from './web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, fetchForward, forwardIdFromData } from './onebot.js';
 import { ensureStickerImage, buildToolDefs } from './tools.js';
@@ -1923,7 +1926,10 @@ export function createApp({ log = console.log, resume = [] } = {}) {
           const arr = new Set((cur[key] || []).map(String));
           if (allow) arr.add(id); else arr.delete(id);
           cur[key] = [...arr];
-          updateConfig({ allow: cur });
+          // 🆕 2026-10-03（第三十五对话）：勾上=新加进白名单 ⇒ 补一条默认响应档位
+          //    （私聊全响应 / 群聊仅艾特）。⛔ 与 /api/config 那条**共用同一个函数**，
+          //    别在这儿另写一份 —— 用户 2026-10-03 明确"两个入口同一套规则"。
+          updateConfig(applyNewChatDefaults({ allow: cur }, c));
           log(`[wechat-contacts] ${allow ? '放行' : '取消放行'} ${kind} ${id}`);
           return json(res, 200, { ok: true, kind, id, allow, list: cur[key] });
         } catch (error) {
@@ -3122,7 +3128,10 @@ export function createApp({ log = console.log, resume = [] } = {}) {
 
       if (pathname === '/api/config' && method === 'POST') {
         const patch = await readBody(req);
-        const next = updateConfig(patch);
+        // 🆕 2026-10-03（第三十五对话）：**新加进白名单**的会话补一条默认响应档位。
+        //    必须是"改动前的配置"当基准 ⇒ 在 updateConfig 之前、用 getConfig() 现取一份。
+        //    ⚠️ 顺序反了（先 updateConfig 再取 before）会让差集恒为空 = 这条功能**静默不生效**。
+        const next = updateConfig(applyNewChatDefaults(patch, getConfig()));
         store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）

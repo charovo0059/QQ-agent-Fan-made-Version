@@ -1111,6 +1111,18 @@ function clampInt(raw, min, max, fallback) {
  */
 const TIER_SLIDER_BANDS = { tier1End: 10, tier2End: 20, tier3End: 90 };
 
+/*
+ * 「新加进白名单的会话」默认档位（2026-10-03 第三十五对话，用户拍板）：
+ * 私聊 = 全响应、群聊 = 仅艾特。
+ *
+ * ⚠️ 与后端 `src/tier-defaults.js` 的 `newChatTierDefault()` **必须一致** ——
+ *    ui/app.js 是普通 script（非 ES module），import 不了，只能镜像一份。
+ *    判据 `test-响应档位新会话默认.mjs` 会**逐值比对**这两处，漂了当场红。
+ * ⚠️ 群聊那个值**从 TIER_SLIDER_BANDS 推**，⛔ 不写死 5 —— 与后端同一条纪律：
+ *    滑条分段哪天改了，两边都要跟着走，不能只改一处（那正是"两个口径各自演化"）。
+ */
+const NEW_CHAT_TIER_DEFAULT_UI = { private: 100, group: TIER_SLIDER_BANDS.tier1End / 2 };
+
 function sliderToTierUI(pos) {
   const b = TIER_SLIDER_BANDS;
   const raw = Number(pos);
@@ -1289,8 +1301,8 @@ return `
       </div>
       <div class="hint" id="ctx-tier-note-g" style="margin-top:8px"></div>
       <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
-        <button class="btn btn-small btn-danger" id="tier-chat-clear-btn">清除该会话的单独设置</button>
-        <span class="hint" style="margin:0">没单独设置过的会话跟随上方统一档位的滑条位置。</span>
+        <button class="btn btn-small" id="tier-chat-clear-btn" title="把这个会话恢复成刚加进白名单时的默认档：私聊=全响应、群聊=仅艾特">恢复默认档</button>
+        <span class="hint" style="margin:0">没单独设置过的会话跟随上方统一档位的滑条位置（新加进白名单的会自动记为：私聊全响应、群聊仅艾特）。</span>
       </div>
     </div>
 
