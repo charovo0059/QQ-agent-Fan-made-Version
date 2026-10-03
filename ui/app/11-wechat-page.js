@@ -489,12 +489,31 @@ async function loadWechatPage({ force = false } = {}) {
   }
 }
 
+/**
+ * 一行日志的时间戳：**只在正文没自带同款前缀时**才补一个。
+ *
+ * ℹ️ 2026-10-03（第三十七对话 · 交接 §3-65 改动点 ①，K3 看截图发现的）：
+ *    原来这一行无条件拼 `[HH:MM:SS] ${l.text}`，而桥/中继写进 `l.text` 的正文**本身就带两层**
+ *    时间戳（实测原文：`[16:23:48] [Bridge]  [16:23:48] [bridge:info] [OB11] …`）
+ *    ⇒ 界面上一行里同一个时刻出现 **3 次**，读日志先被时间戳糊住。
+ *    这里消掉的是"**前端又加的那一层**" ⇒ 渲染后是 **2 次**。
+ *    ⛔ 正文**中段**那一层是桥自己的格式（`工具-中继\*.py`），不归渲染层管 ——
+ *       要只剩 1 次得改桥，**不在本轮范围**（K3 §2 ① 明说）。
+ * ⚠️ 抽成纯函数是因为判据要把它抠进沙箱真跑（`测试-现行\test-微信日志时间戳去重.mjs`）。
+ */
+function dedupeLogTimestamp(at, text) {
+  const t = new Date(at).toLocaleTimeString('zh-CN', { hour12: false })
+  const tag = `[${t}]`
+  const s = String(text == null ? '' : text)
+  return s.startsWith(tag) ? s : `${tag} ${s}`
+}
+
 /** 把微信通道日志行渲染成 LogPanel 的分级行。 */
 function logRowsHtml(logs) {
   if (!logs || !logs.length) {
     return '<div class="logpanel-empty">（还没有日志：通道还没由本应用启动过，或者你是在外面的窗口里跑的）</div>'
   }
-  const text = logs.map((l) => `[${new Date(l.at).toLocaleTimeString('zh-CN', { hour12: false })}] ${l.text}`).join('\n')
+  const text = logs.map((l) => dedupeLogTimestamp(l.at, l.text)).join('\n')
   return logPanelRows(text, 'wx-log')
 }
 
