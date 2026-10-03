@@ -297,10 +297,21 @@ function bindSettingsEvents(c) {
       if (!key) return;
       const m = readMap(); m[key] = Number(gSlider.value); writeMap(m);
     });
+    // ── 「恢复默认档」（2026-10-03 第三十五对话，用户拍板）──────────────────
+    // 这个按钮原来叫「清除该会话的单独设置」，行为是**删掉**条目 ⇒ 回落到"跟随全局滑条"。
+    // 而用户报的正是这个：新加进白名单的好友没有条目 ⇒ 继承了全局那个数（3 档 15%），
+    // 他期望的是"默认全响应"。
+    // ⇒ 现在改成**写回该类型的默认档**：私聊=全响应、群聊=仅艾特
+    //   （值来自 12-settings-render.js 的 NEW_CHAT_TIER_DEFAULT_UI，与后端同一套）。
+    // ⚠️ 类型从下拉 option 的 `data-kind` **现读**，读不到就从键前缀推
+    //    （假 DOM、以及"已不在白名单"那组 option 都走推的那条路）。
     $('#tier-chat-clear-btn')?.addEventListener('click', () => {
       const key = chatSel.value;
       if (!key) return;
-      const m = readMap(); delete m[key]; writeMap(m); loadChat();
+      const kind = chatSel.selectedOptions?.[0]?.dataset?.kind || String(key).split(':')[0];
+      const m = readMap();
+      m[key] = NEW_CHAT_TIER_DEFAULT_UI[kind] ?? NEW_CHAT_TIER_DEFAULT_UI.private;
+      writeMap(m); loadChat();
     });
     loadChat();
   }
