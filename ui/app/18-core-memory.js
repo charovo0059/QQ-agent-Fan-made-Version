@@ -49,20 +49,31 @@ function coreMemoryInjectHtml(inj, itemCount) {
   const allChars = Math.max(0, Number(i.allOriginalsChars) || 0);
   const total = dirChars + allChars;
 
-  const nowLine = !itemCount
-    ? '相册还是空的 —— 存了第一段之后，这里会显示每轮大概注入多少字。'
-    : (on
+  // 🆕 2026-10-03（第三十七对话 · 交接 §3-65 改动点 ②，K3 看截图发现的）：
+  //    相册为空时这一行原来是「相册还是空的 —— 存了第一段之后，这里会显示每轮大概注入多少字。」
+  //    而页面中央**同时**渲染着 `.empty-hint`（"她还没存过核心记忆。…"）
+  //    ⇒ 一屏里两处说"是空的"，读者先读到重复信息、还以为下面那块是别的东西。
+  //    现在空态**那一行整行收掉**（`nowLine` 为空 ⇒ 下面那个 `.hint` 容器根本不渲染），
+  //    中央空态照旧保留；有数据之后这一行自然变成真实的注入字数，"这里会显示什么"届时自明。
+  //    ⚠️ 这是**收掉占位行**，不是把空态信息删掉 —— 判据成对钉（空态顶部无占位、中央 `.empty-hint` 在）。
+  const nowLine = itemCount
+    ? (on
       ? `现在每轮注入：目录 <b>${dirChars}</b> 字（每轮都在）；原文**最多**再 <b>${allChars}</b> 字`
         + `（相册全部原文的合计 = 上限；实际只注入当前这个会话那几段`
         + (cross ? '，**加上**别的会话里和在场的人有关的那几段' : '，跨会话召回已关') + '）。'
         + (cap > 0 ? ` 已设上限 ${cap} 字：超了**先保目录 → 再保当前会话原文**，装不下的逐组丢掉并写明丢了几段。` : ' 上限 0 = 不设限。')
-      : '⏸ 已关闭：**一个字都不注入**（她那四个工具照旧能用，只是她看不到相册里有什么）。');
+      : '⏸ 已关闭：**一个字都不注入**（她那四个工具照旧能用，只是她看不到相册里有什么）。')
+    : '';
 
   // 🔴 看得见的护栏：不设限时涨到两万字以上就明说（⛔ 不截断他的话，只让他看见）
   const warn = (on && cap === 0 && total > 20000)
     ? `<div class="hint" style="color:var(--color-text-warning)">⚠️ 相册的注入量已经不小（约 ${total} 字）——`
       + ' 想压一压就在下面填一个上限（超了会先保目录、并如实写明丢了几段）。</div>'
     : '';
+
+  // ⚠️ 空态时那个 `.hint` 容器**整个不渲染**（⛔ 不是渲染一个空 div）：留一个空容器会让
+  //    `margin-top:2px` 这类间距还占着位置，也让"顶部有没有占位行"这条判据没法成对地钉。
+  const nowHtml = nowLine ? `<div class="hint" style="margin-top:2px">${nowLine}</div>` : '';
 
   // 🔴 下面那一行**故意不用 `.field`**：`.field label { display:block }`（特异性 0,1,1）
   //    会压掉 `.toggle { display:inline-flex }`（0,1,0）⇒ 开关的 label 变成 block，
@@ -92,7 +103,7 @@ function coreMemoryInjectHtml(inj, itemCount) {
              style="width:110px" title="0 = 不设限。填正数时超了**先保目录**（目录是索引），再保当前会话原文，装不下的逐组丢掉并写明丢了几段">
       <span class="muted" style="font-size:12px">0 = 不设限</span>
     </div>
-    <div class="hint" style="margin-top:2px">${nowLine}</div>
+    ${nowHtml}
     ${warn}`;
 }
 
