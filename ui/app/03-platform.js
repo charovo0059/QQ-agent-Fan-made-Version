@@ -166,6 +166,7 @@ function switchTab(name) {
   if (name === 'chats') loadChats();
   if (name === 'memory') loadMemoryView();
   if (name === 'memorycore') loadCoreMemoryPage();   // 🆕 核心记忆页（2026-10-03 第三十五对话）
+  if (name === 'proposals') loadProposalPage();      // 🆕 改进提议页（同上，单开一页）
   if (name === 'stickers') loadStickerPage();
   if (name === 'usage') loadUsageView({ force: true });
   if (name === 'dreams') loadDreams();

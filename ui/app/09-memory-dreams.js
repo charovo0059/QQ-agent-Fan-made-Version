@@ -2,141 +2,6 @@
 // 第 10/18 段：09-memory-dreams（拆自 ui/app.js，2026-09-25 第十七对话；加载顺序见 ui/index.html）
 
 // ── 印象视图 ──
-/**
- * 待审提案区（渲染进「印象」页顶部）。
- *
- * 设计边界：**只展示与打标记，不执行**。理由见 src/proposals.js 顶部（注入通道 + 无审核点）。
- * 位置选在印象页顶部而不是新开页签：提案里最多的就是"想改记忆与印象的方式"，
- * 放在印象旁边最容易被看到；也不必再写一个页面的骨架。
- */
-// 已采纳那一栏的开合状态（2026-09-26 第二十四对话，用户截图反馈：
-// 「展开已采纳 → 点标记已实现 → 区块又自动折叠，想连着标几条得反复展开」）。
-// 成因：每次 renderProposalReview() 都用 innerHTML 重建 `<details>`，不写 `open` 就回到默认折叠。
-// 修法：把开合记在**文件级变量**里，渲染时按它写 `open`，用户开合时更新它。
-// ⚠️ 别改成"每次渲染都强制 open" —— 那样用户手动收起也无从保持（同样是个"界面不听话"的毛病）。
-let proposalAcceptedOpen = false;
-
-function renderProposalReview() {
-  const box = $('#proposal-review');
-  if (!box) return;
-  const items = state.proposals || [];
-  const accepted = state.proposalsAccepted || [];
-  const counts = state.proposalCounts || {};
-  const pending = counts.pending ?? items.length;
-
-  const kindCls = { memory: 'ok', persona: 'warn', feature: 'info', code: 'err', other: '' };
-  // 卡片。⚠️ accepted 的卡片去掉"采纳"按钮（已经采纳了），换成"标记已实现" ——
-  //    否则那一栏永远越积越长，而且看不出哪条真的做完了。
-  const card = (p, isAccepted) => {
-    const when = p.at ? new Date(p.at).toLocaleString('zh-CN', { hour12: false }) : '';
-    const from = p.fromChat ? `　来自 ${esc(p.fromChat)}` : '';
-    const reviewed = isAccepted && p.reviewedAt
-      ? `<span class="muted" style="font-size:11px">　采纳于 ${esc(new Date(p.reviewedAt).toLocaleString('zh-CN', { hour12: false }))}</span>`
-      : '';
-    return `<div class="proposal-card${isAccepted ? ' proposal-card--accepted' : ''}" data-id="${esc(p.id)}">
-      <div class="proposal-card__head">
-        <span class="proposal-kind ${isAccepted ? 'ok' : (kindCls[p.kind] || '')}">${isAccepted ? '已采纳' : esc(p.kindLabel || p.kind)}</span>
-        <span class="proposal-card__title">${esc(p.title)}</span>
-        <span class="spacer"></span>
-        <span class="muted" style="font-size:11px">${esc(when)}${from}</span>
-      </div>
-      <div class="proposal-card__detail">${esc(p.detail)}</div>
-      ${p.rationale ? `<div class="hint">理由：${esc(p.rationale)}</div>` : ''}
-      ${reviewed}
-      <div class="proposal-card__foot">
-        <span class="hint" style="margin:0">${isAccepted ? '已列入待办，改动由人来做' : '提案只是文字，勾选不会执行任何改动'}</span>
-        <span class="spacer"></span>
-        ${isAccepted
-          ? `<button class="btn btn-small" data-proposal="pending" data-id="${esc(p.id)}" title="放回待审">撤回</button>
-             <button class="btn btn-small btn-primary" data-proposal="done" data-id="${esc(p.id)}">标记已实现</button>`
-          : `<button class="btn btn-small" data-proposal="rejected" data-id="${esc(p.id)}">不采纳</button>
-             <button class="btn btn-small btn-primary" data-proposal="accepted" data-id="${esc(p.id)}">采纳（待办）</button>`}
-      </div>
-    </div>`;
-  };
-
-  if (!items.length && !accepted.length) {
-    box.innerHTML = `<div class="proposal-head">
-      <span class="proposal-title">改进提案</span>
-      <span class="segchips"><span class="chip">待审<span class="n">0</span></span></span>
-    </div>
-    ${hintLine('她可以在聊天里提议改自己（记忆/人设/功能/底层都行），提议不会自动生效。',
-      '她用 submit_proposal 提交，提议只会出现在这里，任何一项都不会自动执行；'
-      + '「采纳」只是打个标记、列进待办，真正动手由人来做（见 src/proposals.js 顶部）。')}`;
-    return;
-  }
-
-  // 已采纳那一栏默认折叠：这是"工单存档"，平时不占地方，但要能查得到
-  //（2026-09-19 修：原来只拉 pending ⇒ 一采纳就从列表消失，用户问"采纳之后在哪看"才发现）
-  const acceptedHtml = accepted.length
-    ? `<details class="proposal-accepted"${proposalAcceptedOpen ? ' open' : ''}><summary>已采纳（${accepted.length}）—— 列在待办里，改动由人来做</summary>
-         ${accepted.map((p) => card(p, true)).join('')}
-       </details>`
-    : '';
-
-  // ── UI 改造第二阶段 条目 5：提案块降噪 ─────────────────────────────────
-  // 方案要求："标题+「待审 0」「已采纳 5」分段芯片+刷新收为一行；删重复标签「改进提案（5）」；
-  //   两段说明压成一行「只记录想法，不会自动执行 ⓘ」（采纳流程、SnowLuma 链接进 ⓘ）"
-  // ⇒ 标题与计数合成**一行**，说明压成**一行 + ⓘ**（hintLine）。
-  // ⚠️ 原来标题是两处（`.proposal-title` 写了两次，一份在"暂无"分支一份在这里），
-  //    且 `.uc-tag` 与 `已采纳（N）` 在折叠头里**又重复了一次**。全部收掉。
-  box.innerHTML = `<div class="proposal-head">
-      <span class="proposal-title">改进提案</span>
-      <span class="segchips">
-        <span class="chip${pending ? ' on' : ''}" title="还没处理的条数">待审<span class="n">${pending}</span></span>
-        ${accepted.length ? `<span class="chip" title="已采纳、还没做完的条数">已采纳<span class="n">${accepted.length}</span></span>` : ''}
-      </span>
-      <span class="spacer"></span>
-      <button class="btn btn-small" id="proposal-refresh">刷新</button>
-    </div>
-    ${hintLine('只记录想法，不会自动执行。',
-      '采纳只是打个标记、列进待办，真正动手由人来做（见 src/proposals.js 顶部）。'
-      + '提案里最多的就是"想改记忆与印象的方式"，所以放在印象页而不是新开页签。')}
-    ${items.map((p) => card(p, false)).join('')}
-    ${acceptedHtml}`;
-
-  $('#proposal-refresh')?.addEventListener('click', () => loadProposals().then(() => renderProposalReview()));
-  // 记住用户手动开合的状态（下一个 renderProposalReview 会照着它写 open）。
-  // ⚠️ 只监听 `toggle` 这一个事件、只写变量：这里**不许**再调 renderProposalReview（会自激）。
-  const accDetails = $('#proposal-review details.proposal-accepted');
-  if (accDetails) accDetails.addEventListener('toggle', () => { proposalAcceptedOpen = accDetails.open; });
-  $$('#proposal-review [data-proposal]').forEach((b) => {
-    b.addEventListener('click', async () => {
-      const status = b.dataset.proposal;
-      b.disabled = true;
-      try {
-        await api(`/api/proposals/${encodeURIComponent(b.dataset.id)}`, {
-          method: 'POST',
-          body: JSON.stringify({ status })
-        });
-        await loadProposals();
-        renderProposalReview();
-      } catch (e) {
-        alert(`标记失败：${e.message}`);
-        b.disabled = false;
-      }
-    });
-  });
-}
-
-async function loadProposals() {
-  try {
-    // ⚠️ 2026-09-19 修：原来只拉 `status=pending` ⇒ **一采纳就从列表里消失**，
-    //    用户问"采纳之后在哪看"时才暴露出这个洞。现在待审与已采纳都拉。
-    //    已实现(done)与不采纳(rejected)刻意不进列表：它们已归档，留着只会让这块越来越长。
-    const [pend, acc] = await Promise.all([
-      api('/api/proposals?status=pending'),
-      api('/api/proposals?status=accepted')
-    ]);
-    state.proposals = pend.items || [];
-    state.proposalsAccepted = acc.items || [];
-    state.proposalCounts = { ...(pend.counts || {}), ...(acc.counts || {}) };
-  } catch (e) {
-    // 取不到就保持原值，别清空成"没有提案"的假象
-    console.warn('[proposal] 拉取失败：', e?.message || e);
-  }
-}
-
 async function loadMemoryView() {
   try {
     const [cfg, chats] = await Promise.all([api('/api/config'), api('/api/chats')]);
@@ -144,7 +9,6 @@ async function loadMemoryView() {
     const files = await api('/api/memory-files');
     state.memoryFiles = files.files || [];
     state.chats = chats.chats || [];
-    await loadProposals();   // 待审提案（印象页顶部那块）
     // 用后端状态校正本地记录：覆盖"页面刚刷新""SSE 断连期间状态变化"两种情况。
     // 后端 consolidating 是唯一可信来源（它在 orchestrator 里真实维护）。
     for (const f of state.memoryFiles) {
@@ -317,12 +181,8 @@ function renderMemoryList() {
   const names = {};
   for (const c of state.chats || []) names[c.key] = formatChatTitle(c.key, chatNameOf(c.key));
 
-  // ── 待审提案区（2026-09-19 第七对话加）────────────────────────────────
-  // ⚠️ 这是**只读展示 + 打标记**，这一页**不会执行任何提案内容**。
-  //    为什么坚持不自动执行：她的上下文混着群友说的话，而"待审条目本身"就是一条注入通道；
-  //    只要自动执行存在，"诱导她提一条看起来无害的改动 + 管理员瞟一眼点同意"就能被利用。
-  //    详见 src/proposals.js 顶部的边界说明。
-  renderProposalReview();
+  // ⚠️ 待审提案区**已经搬去页签「改进提议」**了（2026-10-03 第三十五对话，用户拍板"单开一页"）。
+  //    ⛔ 别在这里再调 `renderProposalReview()`：两个家 = 两个真相，而且会各拉一次 `/api/proposals`。
 
   // 「显示空印象」开关 —— 2026-09-23（第十二对话，用户点名）**归位左栏列表头**。
   // ⚠️ 它现在是**常驻元素**（在 index.html 的 .list-head--row 里，`renderMemoryList` 只重绘

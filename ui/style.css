@@ -2669,7 +2669,11 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
 .skill-modal__foot-tip { font-size: 12px; color: var(--faint); }
 
 /* ══════════════════════════════════════════════════════════════════════
-   待审提案区（「记忆」页顶部，2026-09-19 第七对话加）
+   待审提案区（2026-09-19 第七对话加；**2026-10-03 第三十五对话起搬到页签「改进提议」**，
+   ⛔ 不再是印象页顶部 —— 下面这几条现在只服务那一页）
+   ⚠️ 它现在住在 `.page-pane` 里（那一层已经给了 22px 26px 的内边距），所以 `.proposal-review`
+      的 `padding` 成了**块内**的额外留白，而 `border-bottom` 现在是一条页级分隔线。
+      观感想改就动这两处，⛔ 别去动 `.page-pane`（那是四个页面共用的）。
    颜色全部用我们自己的 token；上游那套 --layer-* 我们没有。
    ══════════════════════════════════════════════════════════════════════ */
 .proposal-review { padding: 10px 12px 4px; border-bottom: 1px solid var(--border); }

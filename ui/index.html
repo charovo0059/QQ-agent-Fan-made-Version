@@ -110,6 +110,11 @@
          用户要求"和印象系统一样单开一页" ⇒ 搬到这一页，同时**每轮注入提示词**（见 src/core-memory.js）。
          ⚠️ 名字由用户定：就叫「核心记忆」（他明确不要「相册记忆」那个别名）。 -->
     <button class="tab" data-tab="memorycore" id="tab-memorycore">核心记忆</button>
+    <!-- 改进提议（2026-10-03 第三十五对话，用户拍板）：原来固定挂在印象页**左栏顶部**
+         （`#proposal-review`），用户要求"bot 的提案也单开一页" ⇒ 搬到这一页。
+         ⚠️ 边界一个字不变：**只展示 + 打标记，这一页不会执行任何提案内容**
+            （理由见 src/proposals.js 顶部：她的上下文混着群友说的话，"待审条目本身"就是一条注入通道）。 -->
+    <button class="tab" data-tab="proposals" id="tab-proposals">改进提议</button>
     <button class="tab" data-tab="dreams" id="tab-dreams">笔记</button>
     <button class="tab" data-tab="stickers" id="tab-stickers">表情包</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
@@ -204,11 +209,9 @@
     <!-- 印象视图 -->
     <section id="view-memory" class="view" data-page-node-id="leNhwCaiL4AF1vB9JaXEQw">
       <aside id="memory-list" class="list-pane" data-page-node-id="bPnh3N5qAcbMSCpVxYthSd">
-        <!-- 待审提案区（2026-09-19 加）：她提议改自己的地方。
-             ⚠️ 必须放左边列表栏里，**不能**放 #memory-detail —— loadMemoryDetail 会整体替换
-                #memory-detail 的 innerHTML，放那边会"点一下会话就消失"（第一版就是这么写错的）。
-             ⚠️ 这里只展示 + 打标记，**不执行任何提案内容**，见 src/proposals.js 顶部。 -->
-        <div id="proposal-review" class="proposal-review"></div>
+        <!-- ⚠️ 待审提案区**已经搬走**了（2026-10-03 第三十五对话：用户拍板"单开一页"）。
+             ⛔ 别把它再放回来 —— 页签「改进提议」是它现在唯一的家（两处各渲染一份 = 两个真相，
+                而且两处都会各自去拉一次 /api/proposals）。 -->
         <!-- 「显示空印象」开关（2026-09-23 第十二对话：用户点名**移回左栏列表头**）。
              ⚠️ 它只在**这一处**存在，全页只有一个 `#mem-show-empty` —— 这条必须守住：
                 两个同名 id 会让 `$('#mem-show-empty')` **静默只拿到第一个**，
@@ -237,6 +240,13 @@
          ⚠️ 内容全由 `ui/app/18-core-memory.js` 的 `loadCoreMemoryPage()` 渲染。 -->
     <section id="view-memorycore" class="view">
       <div id="core-memory-page" class="page-pane"></div>
+    </section>
+
+    <!-- 改进提议视图（2026-10-03 第三十五对话：从印象页左栏顶部**单开一页**）
+         ⚠️ 只展示 + 打标记：这一页**不执行任何提案内容**，`src/proposals.js` 里没有任何执行路径。
+         ⚠️ 内容全由 `ui/app/19-proposals.js` 的 `loadProposalPage()` 渲染。 -->
+    <section id="view-proposals" class="view">
+      <div id="proposal-page" class="page-pane"></div>
     </section>
 
     <!-- 笔记视图（夜里做的「梦」） -->
@@ -312,5 +322,7 @@
           第一次 await 之前只做"绑页签"（那时本段已被解析），所以 switchTab('memorycore')
           真要跑的时候 loadCoreMemoryPage 一定已经定义好了。 -->
   <script src="/app/18-core-memory.js"></script>
+  <!-- 🆕 2026-10-03（第三十五对话）：改进提议页（第 20 段）。同样排在 17-init 之后。 -->
+  <script src="/app/19-proposals.js"></script>
 </body>
 </html>

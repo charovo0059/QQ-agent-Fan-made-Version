@@ -59,8 +59,19 @@ function coreMemoryInjectHtml(inj, itemCount) {
       + ' 想压一压就在下面填一个上限（超了会先保目录、并如实写明丢了几段）。</div>'
     : '';
 
+  // 🔴 下面那一行**故意不用 `.field`**：`.field label { display:block }`（特异性 0,1,1）
+  //    会压掉 `.toggle { display:inline-flex }`（0,1,0）⇒ 开关的 label 变成 block，
+  //    而里面的 `.tg-track` 又**自己没有** display（它一直靠"`.toggle` 是 flex ⇒ 子元素被
+  //    块级化"才成立的）⇒ 轨道塌成 1px、滑块压在文字上。
+  //    ⚠️ 2026-10-03 真机**截图**当场抓到过一次：探针只问"元素在不在"、纯 HTML 字符串判据
+  //       只看文本，**两种都看不出来**（量计算样式才看得见）。
+  //    ⚠️ 解释写在**这里**而不是模板里的 HTML 注释：HTML 注释会进 DOM（`innerHTML` 里能看到），
+  //       而它里面的 `⚠️` 会把"没超阈值就不报警"那条判据喂成假红（当场踩到过）。
+  //    ⚠️ 这段注释里**不许出现反引号**（本项目模板字符串里踩过：反引号把字符串当场截断，
+  //       而门禁 seal 只算哈希不查语法 ⇒ 门禁照样"通过"，只有 node --check 会红）。
+  //    另外那个 label for=cm-maxchars 不靠 .field 也有样式（本来就自己写了 class 与字号）。
   return `
-    <div class="field" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0 4px">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0 4px">
       <label class="toggle" title="开：每轮唤醒都把「核心记忆」的目录注入提示词（当前会话的原文另附在后面）；关：一个字都不注入，她那四个工具照旧能用">
         <input type="checkbox" id="cm-inject" ${on ? 'checked' : ''}>
         <span class="tg-track"><span class="tg-knob"></span></span>

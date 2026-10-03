@@ -21,7 +21,9 @@ if (!state.skills) state.skills = [];
 if (!state.skillsSummary) state.skillsSummary = {};
 if (!state.uninstalledSkills) state.uninstalledSkills = [];
 if (state.skillsHotReload === undefined) state.skillsHotReload = true;
-// 待审提案（印象页顶部那块）。取不到时保持原值，别清空成"没有提案"的假象。
+// 待审提案（页签「改进提议」；2026-10-03 第三十五对话起从印象页搬出来**单开一页**）。
+// ⚠️ 这三行**故意留在这里**（不在 19-proposals.js）：`state` 的默认值必须在**任何页面渲染之前**就位，
+//    而本段（04）在 19 之前加载。取不到时保持原值，别清空成"没有提案"的假象。
 if (!Array.isArray(state.proposals)) state.proposals = [];
 if (!state.proposalCounts) state.proposalCounts = {};
 
