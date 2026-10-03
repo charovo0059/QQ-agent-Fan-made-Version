@@ -1,7 +1,7 @@
 // OneBot v11 客户端：WebSocket 只收事件，HTTP API 负责发送与查询。
 // （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
-import { sanitizeUserText, escapeCqText, toFileUri } from './util.js';
+import { sanitizeUserText, escapeCqText, toFileUri, fmtBytes } from './util.js';
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
@@ -459,6 +459,56 @@ export function keyboardSegmentText(d) {
 
 // ── 入站事件 → 文本（移植自原版 segmentsToText） ─────────────────────────
 
+/**
+ * 磁力链接的「名字 + 总大小」—— **零依赖、不出网**（2026-10-03 第三十八对话）。
+ *
+ * 起因是她自己的提案 `0f6288a1`：「群友发 magnet 链接问里面是什么时，我完全看不到内容，
+ *   只能回『我搜不了』」。用户 2026-10-03 拍板只做**最小版**：
+ *   **只读磁力链里带的 `dn`（显示名）与 `xl`（总字节数），不引 bt 库、不做 DHT 抓取**。
+ *
+ * 为什么放在**入站解析**里、而不是做成一个工具（对照「卡片消息能看内容」那一轮）：
+ *   ① 她在**过去状态 / 本次唤醒 / 引用原文**三处读的都是同一份 `text`（入库时写一次）；
+ *      入库时解析 ⇒ 三处全都有，老消息也一并生效，⛔ 不必她记得去调一个工具；
+ *   ② **不加工具定义 = 不占每轮的 token**（工具表在前缀里，多一个工具是常驻成本）。
+ *
+ * ⛔ 三条边界（别越界）：
+ *   ① **绝不联网**：只解析这段字符串里的参数，不连 tracker、不连 DHT；
+ *   ② **不删改原链接**：只在它后面追加一段方括号说明（原话一字不动，也不替她判断内容好坏）；
+ *   ③ **读不到就说读不到**：链接里没带 `dn`/`xl` 时如实讲"没带"，⛔ 不猜文件名、不编大小。
+ *
+ * @returns {string} 追加在链接后面的说明；解析不出任何东西时返回空串（原样不动）
+ */
+export function magnetInfo(url) {
+  let u;
+  try { u = new URL(String(url)); } catch { return ''; }
+  if (String(u.protocol).toLowerCase() !== 'magnet:') return '';
+  const p = u.searchParams;
+  const name = String(p.get('dn') || '').trim();
+  const xl = String(p.get('xl') || '').trim();
+  const bytes = /^\d+$/.test(xl) ? Number(xl) : 0;
+  const parts = [];
+  if (name) parts.push(`名字「${name.slice(0, 80)}」`);
+  if (bytes > 0) parts.push(`总大小约 ${fmtBytes(bytes)}`);
+  if (!parts.length) return '[磁力链接信息：这个链接里没带名字和大小，读不出来]';
+  return `[磁力链接信息：${parts.join('｜')}]`;
+}
+
+/**
+ * 把文本里出现的磁力链接各追加一段「名字 + 总大小」说明（见 `magnetInfo`）。
+ * ⚠️ 绝大多数消息**在这里就返回**（先做一次 `includes` 粗筛，正则不跑）—— 那是热路径。
+ */
+export function annotateMagnetLinks(text) {
+  const s = String(text ?? '');
+  if (!/magnet:\?/i.test(s)) return s;
+  // ⚠️ 链接的结束判定：空白或常见的中文标点/括号 —— 群友常把链接夹在一句话中间，
+  //    只按空格切会把后面的字一起吃进来（判据里专门喂了"链接后面直接跟一句话"那种形状）。
+  return s.replace(/magnet:\?[^\s"'<>（）()【】「」，。；、]+/gi, (raw) => {
+    const info = magnetInfo(raw);
+    return info ? `${raw} ${info}` : raw;
+  });
+}
+
+
 export function forwardIdFromData(d) {
   const raw = d?.id ?? d?.res_id ?? d?.forward_id ?? d?.data_id;
   if (raw == null || String(raw).trim() === '') return null;
@@ -569,7 +619,10 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
       default: out.push(`[${seg?.type ?? '未知'}]`); break;
     }
   }
-  return sanitizeUserText(out.join('').trim());
+  // 🆕 2026-10-03（第三十八对话，提案 0f6288a1 的零依赖版）：磁力链接顺手补上「名字 + 总大小」。
+  //    ⚠️ 顺序有意：**先注解、再 sanitize** —— 注解里的名字是从链接里解出来的**用户可控文本**，
+  //      它必须和别处的用户文本走同一条消毒（防 `[系统]` 之类伪装）。
+  return sanitizeUserText(annotateMagnetLinks(out.join('').trim()));
 }
 
 /** 从消息段提取媒体定位信息（不下载）。 */

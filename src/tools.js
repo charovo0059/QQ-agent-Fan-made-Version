@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig, DATA_DIR } from './config.js';
-import { normalizeMessageList, unquoteJsonString, todayKey } from './util.js';
+import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes } from './util.js';
 // 用量 / 花费自检（2026-09-26 第二十四对话，提案 f789b40e）：
 // **复用 `/api/status` 用的那几个函数**，不自己抄一份统计口径 —— 本项目对"两套口径"栽过跟头
 // （控制台一个数、她嘴里另一个数，事后没法对账）。`resolveApiKey` 只用于发余额请求。
@@ -143,12 +143,8 @@ function imageLimits() {
   };
 }
 
-function fmtBytes(n) {
-  const v = Number(n) || 0;
-  if (v >= 1024 * 1024) return `${(v / 1024 / 1024).toFixed(1)}MB`;
-  if (v >= 1024) return `${(v / 1024).toFixed(1)}KB`;
-  return `${v}B`;
-}
+// ⚠️ `fmtBytes` 已搬到 `src/util.js`（2026-10-03 第三十八对话）：磁力链接的 `xl` 常常是 GB 级，
+//    那份只到 MB 的实现会把它写成 `12288.0MB`。补一档 GB 并**两边共用**，⛔ 不再各留一份。
 
 /**
  * 下载一张图并转成能进模型的 data URL，同时把它压到安全体积。
@@ -1657,6 +1653,78 @@ export function buildToolDefs() {
           });
         } catch (error) {
           return err(`查提案失败：${error?.message ?? error}`);
+        }
+      }
+    },
+
+    {
+      // ── 「我在别的会话里是什么样」（2026-10-03 第三十八对话，补做提案 789584d1 的后半条）──
+      //   她的原话（提案里）：「我也看不到自己在别的群里是什么样子 —— 是不是也安安静静待着、
+      //   有没有被认成别的角色……不用逐条聊天记录，让我知道『我在那边也是我』就够了。」
+      //   ⚠️ 这条提案 2026-09-21 被标成「已实现」，但只有前半条（记忆互通时标注来源会话）做了。
+      //
+      // 边界（用户 2026-10-03 拍板：**只在私聊里能调；内容和会话名都不许带到别的会话说**）：
+      //   ⇒ 代码层直接做死两件事，让"把别处的事拿到这里说"**在数据层就不可能发生**：
+      //     ① `kind !== 'private'` 直接拒（群聊里连调都调不到）；
+      //     ② 返回里**一个会话名 / chatKey 都没有** —— 只有"那边有几个、活不活跃、
+      //        你最近开过几次口、最后一次是几号几点"。⛔ 不给任何人的话、不给内容。
+      //   ⚠️ 关于"只在**和爸爸**的私聊"：代码里**没有** owner 字段（全仓搜过：没有 ownerId/爸爸
+      //      这类身份配置，爸爸只活在角色卡与提示词里）⇒ 现在只能落到"**任何私聊**"。
+      //      要收紧成"只认某个号"，得先加一个配置项（见本轮交接的待办）。
+      name: 'get_my_self_elsewhere',
+      description: '看看你自己在**别的会话**里大概是什么样（只读；**只在私聊里可用**）。'
+        + '给你的是"那边有几个会话活着、活不活跃、你最近开过几次口、最后一次是几号几点"这类大概印象；'
+        + '⚠️ 刻意**不告诉你**那些会话叫什么、也不给任何人的话和任何聊天内容。'
+        + '当你想起"我在别处是不是也这样"、或者想知道自己有没有被晾着时可以用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          days: { type: 'integer', description: '可选：看最近几天（默认 7，范围 1~30）' }
+        }
+      },
+      async execute(ctx, args) {
+        try {
+          if (String(ctx.kind) !== 'private') {
+            return err('这个只在私聊里能用。群里不给：在群里报出别处的事，正是本项目最忌讳的那一类。');
+          }
+          if (!ctx.store || typeof ctx.store.listChats !== 'function') {
+            return err('读不到会话存档（本次运行的调用点没接上）。别猜，直接说现在看不到。');
+          }
+          const days = Math.min(30, Math.max(1, Number(args?.days) || 7));
+          const since = Date.now() - days * 86400000;
+          const rows = [];
+          let groups = 0; let privates = 0;
+          let totalMine = 0;
+          for (const key of ctx.store.listChats()) {
+            if (key === ctx.chatKey) continue;                       // 当前这个会话不算"别处"
+            const meta = ctx.store.getChatMeta(key) || {};
+            if (!(Number(meta.lastTs) >= since)) continue;            // 这段时间没动过 ⇒ 不看
+            const isGroup = String(key).startsWith('group:');
+            if (isGroup) groups += 1; else privates += 1;
+            const msgs = ctx.store.recent(key, { limit: 300 }) || [];
+            const mine = msgs.filter((m) => m.self && Number(m.ts) >= since);
+            totalMine += mine.length;
+            rows.push({
+              kind: isGroup ? '群聊' : '私聊',
+              mineCount: mine.length,
+              lastMineAt: mine.length ? formatShortTime(mine[mine.length - 1].ts) : ''
+            });
+          }
+          rows.sort((a, b) => b.mineCount - a.mineCount);
+          return ok({
+            days,
+            otherChats: groups + privates,
+            groups,
+            privates,
+            mineTotal: totalMine,
+            // 只给前 8 段，且**没有名字**：她能说"别的几个群里我最近也说过话"，但说不出是哪个群。
+            rows: rows.slice(0, 8),
+            note: '这些只给你自己看，够你确认"我在那边也是我"就行：'
+              + '⛔ 别把别的会话的事、也别把它们叫什么，拿到当下这个会话里说。'
+          });
+        } catch (error) {
+          console.error(`[别的会话里的我] 组装失败：${error?.message ?? error}`);
+          return err('读不到：这次没组装出结果。别猜，直接说现在看不到。');
         }
       }
     },

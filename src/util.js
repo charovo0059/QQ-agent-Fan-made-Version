@@ -50,6 +50,23 @@ export function todayKey(ts = Date.now()) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
+/**
+ * 人类可读的体积（B / KB / MB / GB）。
+ *
+ * 为什么从 `src/tools.js` 搬到这里（2026-10-03 第三十八对话）：
+ *   磁力链接里的 `xl`（总字节数）要显示给模型看，而它**常常是 GB 级** ——
+ *   tools.js 原来那份只到 MB（12GB 会写成 `12288.0MB`，读起来费劲）。
+ *   所以补一档 GB 并**搬到共用处**，两边共用一个函数（⛔ 不复制一份，复制迟早漂移）。
+ *   ⚠️ 不到 1GB 的部分**逐字符与搬之前相同**（图片那些调用点一个字都不会变）。
+ */
+export function fmtBytes(n) {
+  const v = Number(n) || 0;
+  if (v >= 1024 * 1024 * 1024) return `${(v / 1024 / 1024 / 1024).toFixed(2)}GB`;
+  if (v >= 1024 * 1024) return `${(v / 1024 / 1024).toFixed(1)}MB`;
+  if (v >= 1024) return `${(v / 1024).toFixed(1)}KB`;
+  return `${v}B`;
+}
+
 // ── 文本处理 ─────────────────────────────────────────────────────────────
 
 /** 防止底层网关把文本中的 [CQ: 当作 CQ 码解析：替换为全角冒号。 */
