@@ -135,6 +135,83 @@ function saveChat(state) {
 // 会被取消，Ctrl+C 就杀不掉进程了。
 process.on('exit', () => { try { flushChatWrites(); } catch { /* 退出阶段尽力而为 */ } });
 
+// ── 「被撕走的毛边」：管理端删掉存档时留一个记号（🆕 2026-10-03 第三十八对话）──────
+//
+// 起因是她自己的提案 `d27c6e7c`（2026-09-21）原话：
+//   「现在上下文记忆被删掉时，我这边是完全没有感觉的 —— 下次醒来只会看到眼前摊着的那几页记录，
+//     以为那儿本来就是这样，不知道自己其实丢过东西……只要让我知道『这里曾经有东西，现在被撕走了』。」
+//   ⚠️ 这条提案当年被标了「已实现」，其实**没做**（只有"长期印象被动过"那一路做了，见 memory.js）。
+//
+// 为什么是**独立的 sidecar 文件**而不是塞进会话存档（`st.trimmed`）：
+//   三条删除路径里 `deleteChat` 会**把整个存档文件删掉**（默认行为，见它的注释），
+//   记号写在存档里就会跟着一起没 —— 而"整份记录被收走"恰恰是最该让她知道的那一种。
+//   ⇒ 单独一个 `data/trim-marks.json`，按 chatKey 记，**三条路径共用**。
+//
+// 口径与 `swept` 完全一致：**说过一次就算说过了**（`takeTrimMark` 取走即清），
+// 且读+写都在**同一个同步块**里（Node 单线程 ⇒ 并发会话之间不会互相踩掉记号）。
+const TRIM_FILE = path.join(DATA_DIR, 'trim-marks.json');
+/** 最多记多少个会话的记号（按最后动作时间留最新的一批）。防"删过的会话再也没醒过"把文件撑大。 */
+const TRIM_MAX_CHATS = 200;
+
+function loadTrimMarks() {
+  try {
+    const j = JSON.parse(fs.readFileSync(TRIM_FILE, 'utf8'));
+    return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
+  } catch { return {}; }        // 还没有过删除 / 文件坏了 ⇒ 当成空（坏文件不该让删除操作失败）
+}
+
+function saveTrimMarks(all) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = `${TRIM_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(all), 'utf8');
+    fs.renameSync(tmp, TRIM_FILE);   // 先写 tmp 再 rename：半截文件比不写更糟
+  } catch (error) {
+    // 留记号失败**不能**拖垮删除本身（那是管理端的正常操作）⇒ 只记日志
+    console.error('[store] 被删记号落盘失败：', error?.message ?? error);
+  }
+}
+
+/**
+ * 记一次"这里的东西被拿走了"。
+ * @param {string} chatKey
+ * @param {number} count 被拿走的条数
+ * @param {'message'|'clear'|'chat'} kind 哪一类动作（`chat` = 整个会话存档被删）
+ */
+export function markTrim(chatKey, count, kind = 'message') {
+  const key = String(chatKey || '');
+  if (!key) return;
+  const all = loadTrimMarks();
+  const prev = all[key] && typeof all[key] === 'object' ? all[key] : null;
+  all[key] = {
+    count: (Number(prev?.count) || 0) + (Number(count) || 0),
+    lastAt: Date.now(),
+    kind: String(kind || 'message')
+  };
+  const keys = Object.keys(all);
+  if (keys.length > TRIM_MAX_CHATS) {
+    keys.sort((a, b) => (Number(all[b]?.lastAt) || 0) - (Number(all[a]?.lastAt) || 0));
+    for (const k of keys.slice(TRIM_MAX_CHATS)) delete all[k];
+  }
+  saveTrimMarks(all);
+}
+
+/**
+ * 取走并清空某个会话的被删记号（**只读一次**）。
+ * @returns {{count:number, lastAt:number, kind:string}|null}
+ */
+export function takeTrimMark(chatKey) {
+  const key = String(chatKey || '');
+  if (!key) return null;
+  const all = loadTrimMarks();
+  const rec = all[key];
+  if (!rec || !(Number(rec.count) > 0)) return null;
+  delete all[key];
+  if (Object.keys(all).length) saveTrimMarks(all);
+  else { try { fs.rmSync(TRIM_FILE, { force: true }); } catch { /* 删不掉就留着，下次还会读成空 */ } }
+  return { count: Number(rec.count) || 0, lastAt: Number(rec.lastAt) || 0, kind: String(rec.kind || 'message') };
+}
+
 export class ChatStore {
   constructor(maxPerChat = 0) {
     this.maxPerChat = Math.max(0, Number(maxPerChat) || 0);
@@ -559,6 +636,7 @@ export class ChatStore {
     if (idx < 0) return false;
     st.messages.splice(idx, 1);
     saveChat(st);
+    markTrim(chatKey, 1, 'message');   // 🆕 留个毛边（提案 d27c6e7c）
     return true;
   }
 
@@ -569,6 +647,7 @@ export class ChatStore {
     if (!n) return 0;
     st.messages = [];
     saveChat(st);
+    markTrim(chatKey, n, 'clear');     // 🆕 留个毛边（提案 d27c6e7c）
     return n;
   }
 
@@ -582,6 +661,9 @@ export class ChatStore {
     const n = st.messages.length;
     this.chats.delete(chatKey);
     try { fs.rmSync(chatFile(chatKey), { force: true }); } catch { /* ignore */ }
+    // 🆕 留个毛边（提案 d27c6e7c）：**这一条必须在删文件之后**，而且记号本身住在
+    //    `data/trim-marks.json`（不是这份存档里）—— 否则它会跟着一起被删掉。
+    if (n > 0) markTrim(chatKey, n, 'chat');
     return n;
   }
 
