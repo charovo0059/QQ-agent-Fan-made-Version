@@ -443,6 +443,11 @@ function stickerCardHtml(s) {
     ? `<img src="/api/stickers/${encodeURIComponent(s.id)}/image?thumb=1" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.parentNode.classList.add('failed')" />`
     : '<span class="muted" style="font-size:12px">没有图片地址</span>';
   const srcLabel = s.source === 'qq' ? 'QQ收藏' : (s.source === 'ai' ? 'AI收藏' : '手动');
+  // 🆕 2026-10-03（第三十七对话 · 交接 §3-65 改动点 ④，用户拍板"做"）：
+  //    下面 `.sticker-id` 那行现在**单行截断**（CSS：nowrap + overflow hidden + ellipsis），
+  //    完整 id 靠 `title` 兜底 —— 截断了却没法看到原值，等于把排查用的信息弄丢。
+  //    🔴 代价：Ctrl+F 搜不到完整 id（`title` / `data-id` 都不进页面查找）。
+  //    ⚠️ 这段解释写在模板**外面**：模板字符串里写 `//` 会被当成正文渲染出来（本项目踩过）。
   return `
     <div class="sticker-card" data-id="${esc(s.id)}">
       <div class="thumb">${img}</div>
@@ -458,7 +463,7 @@ function stickerCardHtml(s) {
         ${s.usage ? `<div class="sticker-sub">什么时候用：${esc(s.usage)}</div>` : ''}
         ${tags ? `<div class="sticker-tags">${tags}</div>` : ''}
         ${s.lastUsedAt ? `<div class="sticker-sub">最后使用 ${fmtTime(s.lastUsedAt)}</div>` : ''}
-        <div class="sticker-id">${esc(s.id)}</div>
+        <div class="sticker-id" title="${esc(s.id)}">${esc(s.id)}</div>
         <div class="sticker-edit-row">
           <button class="btn btn-small sticker-edit" data-id="${esc(s.id)}">编辑备注 / 标签</button>
           ${s.source !== 'qq'

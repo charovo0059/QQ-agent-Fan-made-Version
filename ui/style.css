@@ -2523,9 +2523,17 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
 .sticker-sub { font-size: 12px; color: var(--muted); }
 .sticker-tags { display: flex; gap: 5px; flex-wrap: wrap; }
 .sticker-tag { background: var(--bg-3); color: var(--muted); border-radius: 5px; padding: 1px 7px; font-size: 11px; }
+/* 🆕 2026-10-03（第三十七对话 · 交接 §3-65 改动点 ④，用户拍板"做"）：
+   卡片底部那行是**本地 hash id**（如 `4U4576686_0_0_5E6842DF1A8C69AFC5934A7889516C6_0_0`），
+   原来 `word-break: break-all` 让它折成**两行**，白白把卡片撑高、又对使用者零辨识度。
+   现在**单行截断**（尾省略号），完整值走 `.sticker-id` 的 `title` 兜底（见 `10-settings-load.js`）。
+   🔴 **代价说清**：截断后 **Ctrl+F 搜不到完整 id**（`title` 与 `data-id` 都不进页面查找）
+   —— id 的主要用途是排查时对照，前 12 位已够肉眼区分（K3 §2 ④）。
+   ⚠️ 这里**只改换行策略**，字色/字号/字体一个都没动；`line-height` 留着（单行下它不参与布局，
+   但它是"这行曾经是多行"的路标，删了没有收益）。 */
 .sticker-id {
   font-family: var(--mono); font-size: 11px; color: var(--faint);
-  word-break: break-all; line-height: 1.45;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.45;
 }
 .sticker-edit-row { margin-top: 2px; }
 
