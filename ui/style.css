@@ -1392,6 +1392,9 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
   border-radius: 12px;
   box-shadow: var(--shadow-md);
 }
+/* 「？ 本页说明」推到条的右端（2026-10-03 第三十四对话 · 第三阶段改动点 5）。
+   复用**既有**的 flex 容器，⛔ 没有新增 token、也没有给按钮另写一套外观（它就用 .btn / .btn-small）。 */
+.save-bar .spacer { flex: 1 1 auto; }
 
 /* ── 表单分组（2026-09-17 补）─────────────────────────────────────────────
    为什么加这一组：设置页原来只有 .field + .hint 两个积木，于是"相关的一组字段"

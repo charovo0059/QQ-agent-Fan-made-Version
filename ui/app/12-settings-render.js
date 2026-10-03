@@ -34,6 +34,8 @@ function renderSettingsSection(c) {
     <div class="save-bar">
       <button class="btn btn-primary" id="save-cfg-btn">保存设置</button>
       <span id="cfg-save-result" class="muted"></span>
+      <span class="spacer"></span>
+      <button class="btn btn-small" id="page-help-btn" title="把这一页里折起来的说明一次摊开（Esc 关闭）">？ 本页说明</button>
     </div>
     <div class="settings-scroll">
       ${render()}
@@ -990,17 +992,19 @@ function renderWechatContactsSection(c) {
   //    它与聊天白名单页底部那句是**跨页双向重复**；那个关系现在只在**聊天白名单页**说一次
   //    （那是配置语义的发生处，且那里带 `allow.private` / `allow.groups` 的 key 名，更完整）。
   // ⚠️ "排障：微信通道通没通，看顶栏状态点"原来要移进「？本页说明」（四级里的"汇总"层），
-  //    而**本轮没做那一级**（用户 2026-10-01 拍板先不做模型选择弹窗那条）⇒ 暂放本折叠里，
-  //    信息不丢（Ctrl+F 能搜到）；等汇总层落地时与上一条一起搬过去，见交接 §3-35。
+  //    而**上一轮没做那一级**（用户 2026-10-01 拍板先不做）⇒ 上一轮暂放在本折叠里。
+  //    🆕 **2026-10-03（第三十四对话）汇总层落地了 ⇒ 它已经搬走**，见
+  //    `SETTINGS_PAGE_HELP_EXTRA.wechat`（本页说明面板里那一节）。
+  //    ⛔ 别再搬回折叠里：那句是"教用户看已经看得见的东西"（顶栏本来就有状态点），
+  //      按 P7 它连二级都不该占，只配待在汇总层。
   return `
     <h3 id="settings-wechat">微信联系人</h3>
     <div class="hint">勾选 = 放行。这里的 id 是微信侧派生出来的<b>数字</b>，别手填。</div>
     <details class="hint-more" style="margin-bottom:10px">
-      <summary>名字从哪来的？通道通没通怎么看？</summary>
+      <summary>名字从哪来的？</summary>
       <div class="hint-more-body">
         名字有两个来源：<b>收到的微信消息</b>（记下 id↔名字）与<b>「↻ 同步名字」</b>（去微信那边现问一次）。
         <br><b>同步只改显示</b> —— 不动白名单、也不动发送对象。
-        <br>排障：微信通道通没通，看顶栏那个状态点（切到「微信」模式）。
       </div>
     </details>
     ${blockedHint}
@@ -1409,4 +1413,105 @@ function renderOnebotSection(c) {
       <div class="field"><label>HTTP 令牌（与 WS 不同时填；SnowLuma 默认分开）</label><input type="password" id="cfg-obhttptoken" value="${esc(c.snowluma.httpAccessToken || '')}" /></div>
     </div>
     <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 「？ 本页说明」—— 原型四级规范里的**汇总层**
+//
+// 规范原文在 `ui/index.prototype.html:1180-1185`（四级：一级结论 `.hint` 常显 / 二级细节
+// `details.hint-more` / 三级术语 `.ihint` ⓘ / **汇总帮助 = save-bar 的「？ 本页说明」**）。
+// 前三级的构件早就有了，**只有第四级一直没落地**（`？本页说明` 在 `app/*.js` 里零命中）。
+// 这里补的就是它：2026-10-03（第三十四对话）· UI 改造第三阶段 改动点 5。
+//
+// 🔴 **为什么内容从 DOM 上现读，而不是抄成一张大表**（这是个设计决策，别改回去）：
+//   方案 §4.5 给的方向是"数据结构化"。但抄一份表 = 同一句话在源码里出现两次，
+//   而**改动点 4 的硬判据就是"重复度 = 0"**（同一句话在 `ui/app/*.js` 里只许出现一次，
+//   见 `测试-现行\test-设置页说明小字分层.mjs`）；更要命的是**以后每加一处折叠都要记得同步这张表**，
+//   漏一次就变成"面板里说的和页面上写的不一样"，而那种漂**看不出来**（正是本项目最忌的一族）。
+//   ⇒ 改成**读页面上真实存在的那几个载体**（`details.hint-more` 与 `.ihint`）：
+//     单一来源、永不重复、新加折叠自动出现，判据也能钉"面板里就是页面上那些"。
+//   ⛔ 因此这张表**只装"刻意不常显、也不进折叠"的那几句**（它们没有别的载体可读）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 汇总层**专有**的补充文案（分区 id → [[标题, 正文], …]）。正文是纯文本，渲染时会 esc。
+ *  ⚠️ 这里的字**是给用户看的** —— 别把"按 P7 降到这一层"这类内部理由写进正文（那是注释的活）。 */
+const SETTINGS_PAGE_HELP_EXTRA = {
+  // 「排障」那句原来常显在「微信联系人」页底部，上一轮暂放进二级折叠；汇总层落地后搬到这里。
+  // 为什么它连二级都不该占：顶栏本来就有微信通道的状态点 ⇒ 这句等于"教用户看已经看得见的东西"。
+  wechat: [['排障：通道通没通怎么看？', '微信通道通没通，看顶栏那个状态点（切到「微信」模式）。']]
+};
+
+/** 分区 id → 侧栏上的显示名（**从侧栏 DOM 现读**，不另存一份标签表 —— 那就是第二个来源了）。 */
+function settingsSectionLabel(sec) {
+  const el = document.querySelector(`.settings-menu-item[data-section="${sec}"]`);
+  const label = el ? String(el.textContent || '').trim() : '';
+  return label || sec;
+}
+
+/**
+ * 收集"当前这一页"的二级 / 三级文案 + 汇总层专有文案。
+ * @returns {Array<{head:string, body:string}>} head/body 都是**可直接塞进 innerHTML 的片段**
+ *   （折叠正文本身就是 HTML，原样带出来才能保住加粗与 `<code>`）。
+ */
+function collectSettingsPageHelp(sec) {
+  const items = [];
+  // 二级：原生折叠（正文取 `.hint-more-body` 的 innerHTML）
+  document.querySelectorAll('#settings-form details.hint-more').forEach((d) => {
+    const head = String(d.querySelector('summary')?.innerHTML || '').trim();
+    const body = String(d.querySelector('.hint-more-body')?.innerHTML || '').trim();
+    if (head || body) items.push({ head, body });
+  });
+  // 三级：术语 ⓘ（`hintLine(line, detail)` 渲染出的那颗 `i`）：`title` 是解释，前面那行文字是标签
+  document.querySelectorAll('#settings-form .ihint').forEach((el) => {
+    const detail = String(el.getAttribute('title') || '').trim();
+    if (!detail) return;
+    const line = String(el.parentElement?.firstChild?.textContent || '').trim();
+    items.push({ head: line, body: esc(detail) });
+  });
+  // 汇总层专有
+  for (const [head, body] of (SETTINGS_PAGE_HELP_EXTRA[sec] || [])) items.push({ head, body: esc(body) });
+  return items;
+}
+
+/**
+ * 打开「？ 本页说明」面板。
+ *
+ * ⚠️ 复用**已有的**弹窗外壳 `modelModalShell` + `closeModelModal`（⛔ 不另写一套 overlay）；
+ *    内容区复用既有的 `.modal-list`（`style.css:1785`，可滚动）—— 因为
+ *    `.model-modal-body` 是 `overflow: hidden`，长内容不自己滚就会被**裁掉**（看着像"面板是空的"）。
+ * ⚠️ **Esc 关闭是本函数自己挂的**，没有加进 `modelModalShell`：那个外壳有 25 个调用点，
+ *    给它加全局行为等于同时改 25 个弹窗；本次只有这一处需要。
+ *    ⚠️ 正因为是"自己挂的"，**三条关闭路径都要摘监听**（Esc / × / 点遮罩），
+ *       否则每开一次面板就多留一个 document 级监听（久了就是"按一下 Esc 关掉好几个"）。
+ */
+function openSettingsPageHelp(sectionKey) {
+  const sec = sectionKey || state.settingsSection || 'api';
+  const items = collectSettingsPageHelp(sec);
+  const body = items.length
+    ? `<div class="modal-list">${items.map((it) => `
+        <div style="margin-bottom:14px">
+          <b>${it.head}</b>
+          <div class="hint" style="margin-top:4px">${it.body}</div>
+        </div>`).join('')}</div>`
+    // 没有折叠内容的页要**如实说**，⛔ 不能给一个点了什么都不发生的空面板
+    : '<div class="empty-hint">这一页的说明都直接写在页面上，没有折起来的部分。</div>';
+  const overlay = modelModalShell({
+    head: `${settingsSectionLabel(sec)} · 本页说明`,
+    body,
+    foot: '<button class="btn btn-primary" id="page-help-close">知道了</button>'
+  });
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    closeModelModal(overlay);
+  };
+  function onKey(e) {
+    if (e?.key === 'Escape') close();
+  }
+  document.addEventListener('keydown', onKey);
+  overlay.querySelector('#page-help-close')?.addEventListener('click', close);
+  // ⚠️ 外壳自己已经挂了"点遮罩 / 点 ×"两条关闭路径（先注册、先执行）⇒ 这里**再挂一遍**只为摘监听；
+  //    `overlay.remove()` 对已摘下的节点是空操作，重复调用无害。
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector('.model-modal-close')?.addEventListener('click', close);
+  return overlay;
 }
