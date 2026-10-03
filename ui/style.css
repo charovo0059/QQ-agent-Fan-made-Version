@@ -2738,7 +2738,12 @@ body, .model-modal, .price-card, .tier-btn, .icon-btn {
 .proposal-review { padding: 10px 12px 4px; border-bottom: 1px solid var(--border); }
 .proposal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .proposal-head .spacer { flex: 1; }
-.proposal-title { font-size: 14px; font-weight: 600; }
+/* 🗑 2026-10-03（第三十七对话 · 待办 §3-59）：这里原来有一条
+   `.proposal-title { font-size: 14px; font-weight: 600; }` —— **现在没有任何地方在用**：
+   页签已经叫「改进提议」，块内标题与刷新按钮都被**页头**（`.pagehead`）接管了
+   （见 `ui/app/19-proposals.js:19` 那段说明）。⛔ 只删这一条，`.proposal-head` / `.proposal-card*`
+   那几条仍在用（`#proposal-review` 里的空态块还包着 `.proposal-head`），别顺手一起清。
+   ⚠️ 唯一还提到它的地方是**原型页** `ui/index.prototype.html` —— 那是设计稿、不是线上 UI。 */
 .proposal-card {
   background: var(--bg-2); border: 1px solid var(--border); border-left-width: 2px;
   border-left-color: var(--accent); border-radius: 7px; padding: 9px 11px; margin-bottom: 8px;
