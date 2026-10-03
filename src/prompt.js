@@ -1016,15 +1016,37 @@ export function buildUserPrompt(ctx) {
   //    · **目录每轮都在**（按人分组）⇒ 排在【记忆】**之前**：它只在她存/删时才变，
   //      属于稳定段，不动已有的前缀缓存收益；
   //    · **当前会话的逐字原文**排在【记忆】**之后**（随会话变 ⇒ 与易变段待在一起）；
+  //    · 🆕 **别处提到这个人的原文**（2026-10-03 第三十六对话 · 交接 §3-57）紧跟在它后面，
+  //      自带"别主动拿到这里提"的引导语（项目既有的**不串群**纪律）。
   //    · ⚠️ 与相册页**共用 `coreMemoryPromptBlocks()`**：页面显示的"本次注入约 N 字"
   //      就是这里的量，⛔ 不许页面上另算一份（仪表与事实分家，而分家的表现是"看着完全正常"）。
-  //    · 关掉（`config.coreMemory.inject=false`）⇒ 两块都为空，工具照旧能用。
+  //    · 关掉（`config.coreMemory.inject=false`）⇒ 三块都为空，工具照旧能用。
+  //    · `config.coreMemory.crossChat=false` ⇒ 只少第三块（当前会话的照旧注入）。
   const cmCfg = cfg.coreMemory || {};
+  const cmChatKey = String(ctx.chatKey || '');
+  const cmPlatOf = (k) => (ctx.memory && typeof ctx.memory.platformOf === 'function'
+    ? ctx.memory.platformOf(k)
+    : 'qq');
+  // 🔴 跨会话按人召回：把"这一轮在场的人"翻译成**带平台的身份键**。
+  //    为什么必须带平台（而不是只传号码）：QQ 与微信的数字 id **会撞号**
+  //    （微信 id = blake2s(wxid) % (2^31-1) + 1）⇒ 只按数字比会把两个不同的人当成一个，
+  //    症状是"A 的私聊原文被召回到 B 的会话里"，而且**看不出来**。
+  //    这是项目既有的一条硬纪律：`config.memory.identity` 的键就是 `qq:<id>` / `wechat:<id>`。
+  //    ⚠️ 平台以 `memory.platformOf(chatKey)` 为准（它读 `messages/<chatKey>.json` 的 source，
+  //      是权威来源）；取不到才回落到 `ctx.platform`（调用方传进来的）。
+  const cmChatPlat = String(cmPlatOf(cmChatKey) || ctx.platform || 'qq');
+  const cmPersonKeys = [...relevantUserIds].map((uid) => `${cmChatPlat}:${uid}`);
+  // 私聊：**对端本人就是那个人**。这条是给老条目兜底的（`uid` 是 2026-10-03 才进存档格式的）。
+  if (cmChatKey.startsWith('private:')) {
+    cmPersonKeys.push(`${cmChatPlat}:${cmChatKey.slice('private:'.length)}`);
+  }
   const album = coreMemoryPromptBlocks({
-    chatKey: ctx.chatKey,
-    platformOf: (k) => (ctx.memory && typeof ctx.memory.platformOf === 'function' ? ctx.memory.platformOf(k) : 'qq'),
+    chatKey: cmChatKey,
+    platformOf: cmPlatOf,
+    personKeys: cmPersonKeys,
     inject: cmCfg.inject !== false,
-    maxChars: cmCfg.injectMaxChars
+    maxChars: cmCfg.injectMaxChars,
+    crossChat: cmCfg.crossChat !== false
   });
 
   // ④ 此刻状态（档位/活跃度，每次运行都可能不同）
@@ -1160,8 +1182,10 @@ export function buildUserPrompt(ctx) {
   // 参与度已并入系统提示的【该说/不该说】，这里不再重复。
 
   // 稳定段在前、易变段在后 —— 见本段开头的说明。
+  // ⚠️ `album.elsewhere`（别处按人召回）**紧跟** `album.related`：两块都是"随会话/随人变"的
+  //    易变段，必须待在【记忆】之后（⛔ 别把它挪进前面的稳定区 —— 那会每轮都动前缀缓存）。
   const parts = [
-    roleBlock, stickerBlock, album.directory, memBlock, album.related,
+    roleBlock, stickerBlock, album.directory, memBlock, album.related, album.elsewhere,
     `【当前时间】${formatFullTime(now)}`,
     stateBlock, pastBlock, sameTurnBlock, wakeBlock,
     guideBlock

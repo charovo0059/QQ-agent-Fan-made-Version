@@ -192,20 +192,80 @@ export function coreMemoryFile() {
 //   上线 5 天、提示词补过、应用重启过两次，她**一次都没调用过**这四个工具。
 //   根因是"她根本不知道相册里有什么、也不知道它每轮都在" ⇒ 光有工具没有注入 = 形同不存在。
 //
-// ── 两个块的形状（用户 2026-10-03 逐条拍板）──────────────────────────────
+// ── 三个块的形状（用户 2026-10-03 逐条拍板）──────────────────────────────
 //   ① 目录（每轮都在）：**按人分组**，每组列出那几段的「名字 / 条数 / 日期 / 开头一句」。
 //      放在提示词的稳定区（`stickerBlock` 之后、【记忆】之前）—— 只在"她存/删"时才变，
 //      ⇒ 不改动已有的前缀缓存收益。
 //   ② 当前会话的**逐字原文**（只在这个会话有存档时出现）：仿 `read_core_memory` 的行格式，
 //      每行的说话人带上号码（`夏亚（2229596136）`，老条目没有号码就只写名字）。
-//      ⚠️ **只注入同一个会话的**（用户 2026-10-03 选"本轮先只限同会话"）——
-//         跨会话按人召回会碰项目既有的"不串群"纪律，要另开一轮做。
+//   ③ 🆕 **别处提到这个人的原文**（2026-10-03 第三十六对话 · 交接 §3-57）：
+//      别的会话里、和这一轮在场的人有关的那几段。⚠️ 它**只认带平台的身份键**
+//      （`qq:…` / `wechat:…`）—— 见下面「归属与『人』的身份键」那段注释。
+//      ⚠️ 它必须**自带"别主动拿到这里提"的引导语**（`ELSEWHERE_GUIDE`）：这是项目既有的
+//         **不串群**纪律，用户 2026-10-03 明确要求"做跨会话召回就必须同时加它"。
 //
 // 预算：`config.coreMemory.injectMaxChars`（**0 = 不设限**，用户 2026-10-03 的选择）。
-//   ⚠️ 设了正数时的**优先级是"先保目录"**：目录是索引，砍了就等于"她又忘了自己存过什么"；
-//      装不下的原文逐段丢掉，并**如实写明丢了几段**（⛔ 不静默截断）。
+//   ⚠️ 设了正数时的**优先级是硬的**："目录 → 当前会话原文 → 别处按人召回"：
+//      目录是索引，砍了就等于"她又忘了自己存过什么"；高优先那组装不下时**不再往下装**
+//      （否则会出现"自己的会话一段没进、别处陌生会话的原文倒进来了"）。
+//      装不下的逐组丢掉，并**如实写明丢了几段**（⛔ 不静默截断）。
 
 const DIR_HEAD_MAX = 40;   // 目录里"开头一句"多长（与 listCoreMemories 的 head 保持一致）
+
+// ── 归属与「人」的身份键 ─────────────────────────────────────────────────────
+//
+// 🔴 2026-10-03（第三十六对话 · 交接 §3-57）新增：**跨会话按人召回**。
+//    在这之前只有"当前会话的原文"能进提示词（用户上一轮选的是"先只限同会话"）。
+//    现在加了第三块：**别的会话里、和这个人有关**的那几段也进来（默认开，
+//    开关是 `config.coreMemory.crossChat`）。
+//
+// ⚠️ **按人召回必须按「平台:id」比，⛔ 不能比裸数字**：
+//    QQ 与微信的数字 id **在同一个数值空间里会撞号**（微信 id = blake2s(wxid) % (2^31-1) + 1），
+//    这是本项目的一条硬纪律 —— `config.memory.identity` 的键就是 `qq:<id>` / `wechat:<id>`，
+//    记忆互通、身份关联那两处也都是这么比的。只按数字比会**把两个不同的人当成一个**，
+//    后果是"把 A 的私聊原文召回到 B 的会话里"，而且**看不出来**。
+
+/** 一个会话说的是什么平台（取不到就按 qq —— 与 `MemoryStore.platformOf` 的兜底一致）。 */
+function platformNameOf(chatKey, platformOf) {
+  try {
+    if (typeof platformOf === 'function') return String(platformOf(chatKey) || 'qq');
+  } catch { /* 取不到就按 qq，与本文件其它处同一取向 */ }
+  return 'qq';
+}
+
+/**
+ * 一个「人」的身份键：`qq:2229596136` / `wechat:1857354535`。
+ * @param {string} platform `'qq'` / `'wechat'`
+ * @param {string|number} uid 那个平台上那个人的号码
+ * @returns {string} 号码为空时回 `''`（调用方负责跳过 —— ⛔ 不许拼出 `qq:` 这种半截键）
+ */
+export function coreMemoryPersonKey(platform, uid) {
+  const id = String(uid ?? '').trim();
+  if (!id) return '';
+  return `${platform === 'wechat' ? 'wechat' : 'qq'}:${id}`;
+}
+
+/**
+ * 一段核心记忆里**涉及哪些人**（身份键的集合）。
+ *
+ * 两个来源，都是有意的：
+ *   · 每一行消息的 `uid`（她自己发的那几行 `uid` 为空 ⇒ 不进集合，对）；
+ *   · **私聊会话的对端本人**（`private:<id>`）—— 这是给**老条目**兜底的：
+ *     `uid` 是 2026-10-03 才加进存档格式的，在那之前存的段一个号码都没有，
+ *     而"这一段的会话就是跟他的私聊"这件事本身已经指明了那个人。
+ */
+export function coreMemoryPeople(item, platformOf) {
+  const key = String(item?.chatKey || '');
+  const plat = platformNameOf(key, platformOf);
+  const out = new Set();
+  const [kind, id] = key.split(':');
+  if (kind === 'private' && id) out.add(coreMemoryPersonKey(plat, id));
+  for (const m of (Array.isArray(item?.messages) ? item.messages : [])) {
+    const k = coreMemoryPersonKey(plat, m?.uid);
+    if (k) out.add(k);
+  }
+  return out;
+}
 
 /**
  * 一段属于谁：私聊 = 那个人；群聊 = 那个群。
@@ -219,8 +279,7 @@ const DIR_HEAD_MAX = 40;   // 目录里"开头一句"多长（与 listCoreMemori
 export function coreMemorySourceLabel(item, platformOf) {
   const key = String(item?.chatKey || '');
   const [kind, id] = key.split(':');
-  let plat = 'qq';
-  try { if (typeof platformOf === 'function') plat = String(platformOf(key) || 'qq'); } catch { /* 取不到就按 qq */ }
+  const plat = platformNameOf(key, platformOf);
   const platName = plat === 'wechat' ? '微信' : 'QQ';
   const name = String(item?.chatLabel || '').trim();
   const bare = kind === 'group' ? `${platName} 群 ${id || '?'}` : `${platName} ${id || '?'}`;
@@ -257,9 +316,22 @@ export function coreMemoryDirectory(items, { platformOf = null, chatKey = '' } =
   return out.join('\n');
 }
 
-/** 一段的逐字原文（`read_core_memory` 的行格式）。 */
-export function coreMemoryItemText(item) {
-  const lines = [`「${String(item?.name || item?.id || '（没起名字）')}」${todayKey(Number(item?.at) || 0)}`];
+/**
+ * 一段的逐字原文（`read_core_memory` 的行格式）。
+ *
+ * @param {object} item 一段核心记忆
+ * @param {{sourceLabel?:string}} [opts] 🆕 只在**跨会话召回**那一块用：
+ *   传了 `sourceLabel` 就在标题后头缀上「· 来自 某个群（QQ 群 333333）」。
+ *   🔴 为什么必须有这一句（2026-10-03 第三十六对话，**真机验证当场发现缺的**）：
+ *      第一版的第三块只有「名字 + 日期」—— 她**看不出这一段是从哪个会话召回来的**。
+ *      而这一块的整个要点就是"这是**别处**的事" ⇒ 不写清从哪儿来，
+ *      那句"别主动拿到这里提"的引导语就**没法执行**（她不知道"这里"相对的是哪儿）。
+ *   ⚠️ `read_core_memory` 工具**不传**这个参数 ⇒ 它的输出逐字不变
+ *      （那是她已经习惯的格式，不该因为提示词加了标注就跟着变）。
+ */
+export function coreMemoryItemText(item, { sourceLabel = '' } = {}) {
+  const head = `「${String(item?.name || item?.id || '（没起名字）')}」${todayKey(Number(item?.at) || 0)}`;
+  const lines = [sourceLabel ? `${head} · 来自 ${sourceLabel}` : head];
   for (const m of (Array.isArray(item?.messages) ? item.messages : [])) {
     const who = m?.self ? '我' : (String(m?.uid || '') ? `${m.who}（${m.uid}）` : String(m?.who || ''));
     lines.push(`[${formatShortTime(Number(m?.ts) || 0)}] ${who}：${String(m?.text ?? '')}`);
@@ -274,61 +346,142 @@ export function coreMemoryForChat(items, chatKey) {
   return (Array.isArray(items) ? items : []).filter((it) => String(it?.chatKey || '') === key);
 }
 
+/**
+ * 🆕 别处（**不是当前这个会话**）提到这些人的那几段 —— 跨会话按人召回。
+ *
+ * @param {object} items 相册全部段
+ * @param {{chatKey?:string, platformOf?:Function, personKeys?:string[]}} opts
+ *   `personKeys` 是**带平台的身份键**（`qq:…` / `wechat:…`），由调用方按
+ *   "这一轮哪几个人在场"算出来（见 `prompt.js` 那段注释）。
+ * @returns {Array} 命中的段（相册顺序）
+ */
+export function coreMemoryForPerson(items, { chatKey = '', platformOf = null, personKeys = [] } = {}) {
+  const key = String(chatKey || '');
+  const want = new Set((Array.isArray(personKeys) ? personKeys : []).map((k) => String(k || '')).filter(Boolean));
+  if (!want.size) return [];
+  return (Array.isArray(items) ? items : []).filter((it) => {
+    // 当前会话的那几段走 `related` 那一块 —— 这里排除掉，⛔ 不许同一段进两次
+    // （"同一段原文在提示词里出现两遍"会让模型以为那是两件事）。
+    if (String(it?.chatKey || '') === key) return false;
+    for (const k of coreMemoryPeople(it, platformOf)) if (want.has(k)) return true;
+    return false;
+  });
+}
+
 /** 注入块的头部与尾注（尾注里的段数会变，所以长度要现算）。 */
 const RELATED_HEAD = (n) => `【核心记忆 · 当前会话的原文】你自己挑的、逐字没改过（${n} 段）`;
 const RELATED_TAIL = (n) => `（这一段有 ${n} 段没展开 —— 要看用 read_core_memory 带上 id）`;
+// 🆕 第三块（2026-10-03 第三十六对话 · 交接 §3-57）：别处按人召回的那几段。
+// ⚠️ **引导语是这块的一部分，不是可选项** —— 用户 2026-10-03 明确要求
+//    "跨会话按人召回"必须同时加"别主动拿到这里提"的引导（项目既有的**不串群**纪律）。
+//    没有它，她可能把 A 私聊里的事拿到 B 的群里讲 —— 那是这个功能最坏的失败方式。
+const ELSEWHERE_HEAD = (n) => `【核心记忆 · 别处提到这个人的原文】别的会话里、和这个人有关的原文（${n} 段）`;
+const ELSEWHERE_TAIL = (n) => `（这里还有 ${n} 段没展开 —— 要看用 read_core_memory 带上 id）`;
+const ELSEWHERE_GUIDE = '⚠️ 这几段是**别的会话**里发生的事：只当背景，⛔ 别主动拿到当前这个会话里提，'
+  + '也别把它们当成"他在这里说过的话"。';
+/** 一段都没装下时那句如实说明（措辞里的"没展开"必须与上面两条尾注**同一个词**）。 */
+const NOTHING_FITS = (what, n) => `【核心记忆 · ${what}】（${n} 段没展开 —— 这次的注入预算装不下；要看用 read_core_memory 带上 id）`;
 
 /**
- * 组装两个注入块。**提示词与相册页共用这一个函数** ——
+ * 组装三个注入块。**提示词与相册页共用这一个函数** ——
  * 页面显示的"本次注入约 N 字"就是这里的 `chars`，⛔ 不许页面上另算一份
  * （本项目最忌"仪表与事实分家"，而分家的表现是"看着完全正常"）。
  *
- * @param {{chatKey?:string, platformOf?:Function, inject?:boolean, maxChars?:number}} opts
- * @returns {{directory:string, related:string, chars:number, budget:number, droppedByBudget:number}}
+ * @param {{chatKey?:string, platformOf?:Function, personKeys?:string[], inject?:boolean,
+ *          maxChars?:number, crossChat?:boolean}} opts
+ * @returns {{directory:string, related:string, elsewhere:string, chars:number, budget:number,
+ *            droppedByBudget:number, droppedElsewhere:number, allOriginalsChars:number,
+ *            relatedCount:number, elsewhereCount:number}}
  */
-export function coreMemoryPromptBlocks({ chatKey = '', platformOf = null, inject, maxChars } = {}) {
+export function coreMemoryPromptBlocks({
+  chatKey = '', platformOf = null, personKeys = [], inject, maxChars, crossChat
+} = {}) {
   const on = inject !== false;                          // 缺省 = 开（与 config 默认一致）
+  const cross = on && crossChat !== false;              // 缺省 = 开（与 config 默认一致）
   const cap = Math.max(0, Math.floor(Number(maxChars) || 0));   // 0 = 不设限
-  const empty = { directory: '', related: '', chars: 0, budget: cap, droppedByBudget: 0 };
+  const empty = {
+    directory: '', related: '', elsewhere: '', chars: 0, budget: cap,
+    droppedByBudget: 0, droppedElsewhere: 0, allOriginalsChars: 0,
+    relatedCount: 0, elsewhereCount: 0
+  };
   if (!on) return empty;
 
   const items = load();
   if (!items.length) return empty;
 
   const directory = coreMemoryDirectory(items, { platformOf, chatKey });
-  const mine = coreMemoryForChat(items, chatKey);
-  const texts = mine.map((it) => coreMemoryItemText(it));
+  const mineTexts = coreMemoryForChat(items, chatKey).map((it) => coreMemoryItemText(it));
+  // ⚠️ 第三块的每一段都要**带上"来自哪个会话"** —— 少了它，那句"别主动拿到这里提"就没法执行
+  //    （见 `coreMemoryItemText` 的注释）。这一段是本轮真机验证当场发现补上的。
+  const otherTexts = cross
+    ? coreMemoryForPerson(items, { chatKey, platformOf, personKeys })
+      .map((it) => coreMemoryItemText(it, { sourceLabel: coreMemorySourceLabel(it, platformOf) }))
+    : [];
+
+  // 🔴 这个数是给**相册页**用的上限："相册里全部原文的合计"（与会话无关）。
+  //    2026-10-03（第三十六对话）**修掉一个真 bug**：上一版页面拿"不带 chatKey 调本函数
+  //    得到的 `related`"当这个上限，而 `coreMemoryForChat(items, '')` 恒回空表
+  //    ⇒ 那个数**永远是 0**（页面上写着"当前会话的原文最多再 0 字"）。
+  //    相册当时是空的，所以谁都没看出来。现在在这里一次算准。
+  //    ⚠️ 口径取**两者中更大的那种渲染**（第三块：带来源标签 + 引导语的完整形态）——
+  //       它天然 ≥「当前会话原文那一块」，所以是"两块合计"的真上限（⛔ 别用无标签那种算，
+  //       那会给出一个**偏小**的"上限"，等于换了种方式骗人）。
+  const allTexts = items.map((it) => coreMemoryItemText(it, { sourceLabel: coreMemorySourceLabel(it, platformOf) }));
+  const allOriginalsChars = allTexts.length
+    ? [ELSEWHERE_HEAD(allTexts.length), ...allTexts, ELSEWHERE_GUIDE].join('\n').length
+    : 0;
 
   if (cap === 0) {                                       // 不设限：全展开
-    const related = texts.length ? [RELATED_HEAD(texts.length), ...texts].join('\n') : '';
-    return { directory, related, chars: directory.length + related.length, budget: 0, droppedByBudget: 0 };
+    const related = mineTexts.length ? [RELATED_HEAD(mineTexts.length), ...mineTexts].join('\n') : '';
+    const elsewhere = otherTexts.length
+      ? [ELSEWHERE_HEAD(otherTexts.length), ...otherTexts, ELSEWHERE_GUIDE].join('\n')
+      : '';
+    return {
+      directory, related, elsewhere,
+      chars: directory.length + related.length + elsewhere.length,
+      budget: 0, droppedByBudget: 0, droppedElsewhere: 0, allOriginalsChars,
+      relatedCount: mineTexts.length, elsewhereCount: otherTexts.length
+    };
   }
 
-  // 有预算：逐段试装。目录**整份保留**（它是索引 —— 砍成半张索引等于没有索引）。
-  const kept = [];
-  const render = () => {
-    const dropped = texts.length - kept.length;
-    if (!kept.length && !dropped) return '';
-    const tail = dropped && kept.length ? RELATED_TAIL(dropped) : '';
-    if (!kept.length) {
-      // 一段都装不下：只留一句如实的说明（装不下就干脆不说，别把预算顶超）。
-      // ⚠️ 措辞必须与下面的 `RELATED_TAIL` **同一个词**（"没展开"）—— 判据是按这个词扫的，
-      //    两套说法会让"到底有没有如实说明"变成看运气（2026-10-03 判据当场扫出来过一次）。
-      const only = `【核心记忆 · 当前会话的原文】（${dropped} 段没展开 —— 这次的注入预算装不下；要看用 read_core_memory 带上 id）`;
+  // 有预算：**整份保目录**（它是索引 —— 砍成半张索引等于没有索引），
+  // 然后按"当前会话的原文 → 别处按人召回的原文"的**优先级**逐段试装。
+  // 装不下的逐组如实写明丢了几段（⛔ 不静默截断）。
+  const groups = [
+    { texts: mineTexts, kept: [], head: RELATED_HEAD, tail: RELATED_TAIL, what: '当前会话的原文' },
+    { texts: otherTexts, kept: [], head: ELSEWHERE_HEAD, tail: ELSEWHERE_TAIL, what: '别处提到这个人的原文', foot: ELSEWHERE_GUIDE }
+  ];
+  const renderGroup = (g) => {
+    const dropped = g.texts.length - g.kept.length;
+    if (!g.kept.length) {
+      if (!dropped) return '';
+      const only = NOTHING_FITS(g.what, dropped);
+      // 连这一句都装不下就干脆不说 —— ⛔ 别为了"出声"把预算顶超
       return (directory.length + only.length <= cap) ? only : '';
     }
-    return [RELATED_HEAD(texts.length), ...kept, tail].filter(Boolean).join('\n');
+    const tail = dropped ? g.tail(dropped) : '';
+    return [g.head(g.texts.length), ...g.kept, tail, g.foot || ''].filter(Boolean).join('\n');
   };
-  for (const t of texts) {
-    kept.push(t);
-    if (directory.length + 1 + render().length > cap) { kept.pop(); break; }
+  for (const g of groups) {
+    for (const t of g.texts) {
+      g.kept.push(t);
+      const used = directory.length + 1 + groups.map(renderGroup).join('\n').length;
+      if (used > cap) { g.kept.pop(); break; }
+    }
+    // 🔴 **优先级是硬的**：高优先那一组装不下任何一段时，**不再往下装**
+    //    —— 否则会出现"当前会话的原文一段没进，别处陌生会话的原文倒进来了"。
+    if (g.texts.length && !g.kept.length) break;
   }
-  const related = render();
+  const related = renderGroup(groups[0]);
+  const elsewhere = renderGroup(groups[1]);
   return {
-    directory,
-    related,
-    chars: directory.length + related.length,
+    directory, related, elsewhere,
+    chars: directory.length + related.length + elsewhere.length,
     budget: cap,
-    droppedByBudget: texts.length - kept.length,
+    droppedByBudget: groups[0].texts.length - groups[0].kept.length,
+    droppedElsewhere: groups[1].texts.length - groups[1].kept.length,
+    allOriginalsChars,
+    relatedCount: groups[0].kept.length,
+    elsewhereCount: groups[1].kept.length
   };
 }
