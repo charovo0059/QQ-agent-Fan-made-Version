@@ -1804,7 +1804,11 @@ details.hint-more code {
  * ⚠️ 想要"被框起来"必须两条都在：`-pane` 给内边距与滚动，`-page-card` 给 max-width + 居中 + 边框。
  *    只加卡片不加 pane ⇒ 卡片贴着窗口边、长内容不滚动（看着像没生效）。
  */
-.snowluma-pane { flex: 1; overflow-y: auto; padding: 22px 26px 40px; }
+/* 🆕 2026-10-03（第三十五对话）：「核心记忆」页是一个**通用单栏页**（一条列表 + 顶部几个开关），
+   与 snowluma/usage/dreams 那三个 pane 要的排版一模一样 ⇒ **挂到同一条规则上**，
+   ⛔ 不再抄一份 `flex/overflow/padding`（那就是第四份重复，改一处漂三处）。
+   名字用通用的 `page-pane`：以后再有同形状的单栏页直接用它，别再拿 `-pane` 当泛型用。 */
+.snowluma-pane, .page-pane { flex: 1; overflow-y: auto; padding: 22px 26px 40px; }
 .snowluma-page-card {
   max-width: 860px; margin: 0 auto;
   border: 1px solid var(--border); border-radius: 12px;
@@ -1827,7 +1831,7 @@ details.hint-more code {
 /* ⚠️ 2026-10-01 调整：设置页的滚动从 `.settings-pane` 挪到了内层 `.settings-scroll` ⇒ 这条规则也要跟着换。
    ⛔ 不换的话：`scrollbar-gutter: stable` 会在**不再滚动**的 pane 上白占一条竖边，
    而真正滚动的那一层没有预留 ⇒ 出现滚动条时内容会被挤动一下。 */
-#session-list, #chat-list, .detail-pane, .settings-scroll, .snowluma-pane, .dreams-pane, .modal-list {
+#session-list, #chat-list, .detail-pane, .settings-scroll, .snowluma-pane, .dreams-pane, .page-pane, .modal-list {
   scrollbar-gutter: stable;
 }
 

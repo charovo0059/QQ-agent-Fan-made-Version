@@ -1431,8 +1431,11 @@ export function buildToolDefs() {
           chatLabel: String(ctx.chatName || ctx.chatId || ''),
           name: String(args.name ?? '').trim(),
           note: String(args.note ?? '').trim(),
-          // 逐字复制（⛔ 一个字的转述都没有）；`who` 记**当时的名字**，不按现在的备注名改写历史
-          messages: picked.map((m) => ({ ts: m.ts, who: m.self ? '我' : String(m.senderName || m.senderId || ''), self: !!m.self, text: m.text }))
+          // 逐字复制（⛔ 一个字的转述都没有）；`who` 记**当时的名字**，不按现在的备注名改写历史。
+          // 🆕 2026-10-03（第三十五对话）：同时把**发送者号码**（`uid`）记下来 ——
+          //    名字会改、也可能重名，而注入时要"按人区分标注"（与 memory.js 的
+          //    "id 为准、名字为辅"同一条口径）。自己发的行 uid 留空（`self` 已经标了）。
+          messages: picked.map((m) => ({ ts: m.ts, who: m.self ? '我' : String(m.senderName || m.senderId || ''), self: !!m.self, uid: m.self ? '' : String(m.senderId || ''), text: m.text }))
         });
         if (!res.ok) return err(res.error || '没存下来');
         return ok({

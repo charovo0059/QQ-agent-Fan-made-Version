@@ -21,6 +21,9 @@ import { getConfig } from './config.js';
 import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLIDER_BANDS as _TIER_SLIDER_BANDS } from './tier-slider.js';
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
 import { formatFullTime, formatShortTime } from './util.js';
+// 🆕 2026-10-03（第三十五对话）：核心记忆的两个注入块。
+// ⚠️ core-memory.js 只 import config.js 与 util.js ⇒ 与 prompt.js 无循环依赖。
+import { coreMemoryPromptBlocks } from './core-memory.js';
 import { buildStickerContext, buildStickerStrategyHint } from './stickers.js';
 // 中文 2 字滑窗取词（记忆召回用的同一个函数，见里面的长注释）。
 // 反锚点（提案 a5fbf828）**复用它**而不是再写一份分词：同一份"什么叫一个词"的口径
@@ -1009,6 +1012,21 @@ export function buildUserPrompt(ctx) {
   });
   const memBlock = memText ? `【记忆】\n${memText}` : '';
 
+  // ③′ 🆕 核心记忆（2026-10-03 第三十五对话，用户拍板）：她自己攒的那几段原文。
+  //    · **目录每轮都在**（按人分组）⇒ 排在【记忆】**之前**：它只在她存/删时才变，
+  //      属于稳定段，不动已有的前缀缓存收益；
+  //    · **当前会话的逐字原文**排在【记忆】**之后**（随会话变 ⇒ 与易变段待在一起）；
+  //    · ⚠️ 与相册页**共用 `coreMemoryPromptBlocks()`**：页面显示的"本次注入约 N 字"
+  //      就是这里的量，⛔ 不许页面上另算一份（仪表与事实分家，而分家的表现是"看着完全正常"）。
+  //    · 关掉（`config.coreMemory.inject=false`）⇒ 两块都为空，工具照旧能用。
+  const cmCfg = cfg.coreMemory || {};
+  const album = coreMemoryPromptBlocks({
+    chatKey: ctx.chatKey,
+    platformOf: (k) => (ctx.memory && typeof ctx.memory.platformOf === 'function' ? ctx.memory.platformOf(k) : 'qq'),
+    inject: cmCfg.inject !== false,
+    maxChars: cmCfg.injectMaxChars
+  });
+
   // ④ 此刻状态（档位/活跃度，每次运行都可能不同）
   const stateLines = [];
   // 【我跑在哪】（2026-09-26 第二十四对话，提案 d809db39）：
@@ -1143,7 +1161,7 @@ export function buildUserPrompt(ctx) {
 
   // 稳定段在前、易变段在后 —— 见本段开头的说明。
   const parts = [
-    roleBlock, stickerBlock, memBlock,
+    roleBlock, stickerBlock, album.directory, memBlock, album.related,
     `【当前时间】${formatFullTime(now)}`,
     stateBlock, pastBlock, sameTurnBlock, wakeBlock,
     guideBlock

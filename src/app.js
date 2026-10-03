@@ -56,7 +56,7 @@ import { importFromDsh, currentProviders, setProviderKey, testAllProviders, test
 // 失败的那条**不进存档**（sender 只在成功后 appendSelf）⇒ 管理端原来根本看不到。
 import { recordFailure, listFailures, getFailure, removeFailure, clearFailures } from './send-failures.js';
 // 「核心记忆」（提案 c7486672）：只读 + 删。存是她自己的工具干的（tools.js）。
-import { listCoreMemories, getCoreMemory, removeCoreMemory, coreMemoryLoadError, coreMemoryFile } from './core-memory.js';
+import { listCoreMemories, getCoreMemory, removeCoreMemory, coreMemoryLoadError, coreMemoryFile, coreMemoryPromptBlocks, coreMemorySourceLabel } from './core-memory.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey } from './util.js';
@@ -2388,7 +2388,33 @@ export function createApp({ log = console.log, resume = [] } = {}) {
           if (!item) return json(res, 404, { ok: false, error: '这一段已经不在了（可能刚被删掉）' });
           return json(res, 200, { ok: true, item });
         }
-        return json(res, 200, { ok: true, items: listCoreMemories(), loadError: coreMemoryLoadError() || null, ...coreMemoryFile() });
+        // 🆕 2026-10-03（第三十五对话）：把**注入的真值**一并交出去（页面顶部要显示
+        //    "本次注入约 N 字"）。⚠️ 这里的数字必须来自 `coreMemoryPromptBlocks()` ——
+        //    与提示词**同一个函数**，⛔ 不许页面上另算一份（那正是"仪表与事实分家"）。
+        //    ⚠️ `chatKey` 留空：页面不知道"当前会话"是哪个，所以这里给的是**与会话无关的两半**：
+        //      · directoryChars  = 每轮必进的目录长度；
+        //      · relatedAllChars = 相册**全部**原文的长度（"如果所有段都属于当前会话"的上限）。
+        const cmCfg = getConfig().coreMemory || {};
+        const cmAll = coreMemoryPromptBlocks({ inject: cmCfg.inject !== false, maxChars: 0 });
+        const cmInjected = coreMemoryPromptBlocks({ inject: cmCfg.inject !== false, maxChars: cmCfg.injectMaxChars });
+        return json(res, 200, {
+          ok: true,
+          // 🆕 2026-10-03（第三十五对话）：每条带上**归属标签**（`夏亚（QQ 1857354535）`）。
+          //    ⚠️ 标签由后端 `coreMemorySourceLabel()` 现算 —— 与**注入提示词里那份逐字同源**
+          //       （页面与提示词共用同一个函数）。⛔ 别让前端自己拼一份：
+          //       两份标签一旦漂开，页面说的和注入的就不是一回事，而那种漂看不出来。
+          items: listCoreMemories().map((x) => ({ ...x, sourceLabel: coreMemorySourceLabel(x, (k) => memory.platformOf(k)) })),
+          loadError: coreMemoryLoadError() || null,
+          inject: {
+            enabled: cmCfg.inject !== false,
+            maxChars: Math.max(0, Math.floor(Number(cmCfg.injectMaxChars) || 0)),
+            directoryChars: cmAll.directory.length,
+            relatedAllChars: cmAll.related.length,
+            // 现状（不带 chatKey）真正会进提示词的字数 —— 也就是"目录 + 全部原文"
+            charsNow: cmInjected.chars
+          },
+          ...coreMemoryFile()
+        });
       }
       if (pathname === '/api/core-memories/delete' && method === 'POST') {
         const body = await readBody(req);

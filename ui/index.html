@@ -106,6 +106,10 @@
     <button class="tab active" data-tab="sessions" data-page-node-id="QA2pcdHYdARJK2APBNKZmC">会话</button>
     <button class="tab" data-tab="chats" data-page-node-id="AdXD0D2NiWH5UBfpPQqzQ2">存档</button>
     <button class="tab" data-tab="memory" data-page-node-id="vXS9OY6wG4MkJlzQ2aLADZ">印象</button>
+    <!-- 核心记忆（2026-10-03 第三十五对话，用户拍板）：原来藏在印象页底部的折叠块里，
+         用户要求"和印象系统一样单开一页" ⇒ 搬到这一页，同时**每轮注入提示词**（见 src/core-memory.js）。
+         ⚠️ 名字由用户定：就叫「核心记忆」（他明确不要「相册记忆」那个别名）。 -->
+    <button class="tab" data-tab="memorycore" id="tab-memorycore">核心记忆</button>
     <button class="tab" data-tab="dreams" id="tab-dreams">笔记</button>
     <button class="tab" data-tab="stickers" id="tab-stickers">表情包</button>
     <button class="tab" data-tab="usage" data-page-node-id="hcZzcXuMojNoiE7UcRVYfR">用量</button>
@@ -227,6 +231,14 @@
       </div>
     </section>
 
+    <!-- 核心记忆视图（2026-10-03 第三十五对话，用户拍板：从印象页底部的折叠块**单开一页**）
+         ⚠️ 这一页**只读 + 删**：存是她自己的工具（`save_core_memory`）干的，
+            管理端不提供"替她挑一段存进去"的入口 —— 那正是她提案里明确不要的。
+         ⚠️ 内容全由 `ui/app/18-core-memory.js` 的 `loadCoreMemoryPage()` 渲染。 -->
+    <section id="view-memorycore" class="view">
+      <div id="core-memory-page" class="page-pane"></div>
+    </section>
+
     <!-- 笔记视图（夜里做的「梦」） -->
     <section id="view-dreams" class="view">
       <div id="dreams-page" class="dreams-pane"></div>
@@ -295,5 +307,10 @@
   <script src="/app/15-allow-saveconfig.js"></script>
   <script src="/app/16-misc.js"></script>
   <script src="/app/17-init.js"></script>
+  <!-- 🆕 2026-10-03（第三十五对话）：核心记忆页（第 19 段）。
+       ⚠️ 排在 17-init **之后**是安全的：17-init 的启动逻辑整个包在 async IIFE 里、
+          第一次 await 之前只做"绑页签"（那时本段已被解析），所以 switchTab('memorycore')
+          真要跑的时候 loadCoreMemoryPage 一定已经定义好了。 -->
+  <script src="/app/18-core-memory.js"></script>
 </body>
 </html>
