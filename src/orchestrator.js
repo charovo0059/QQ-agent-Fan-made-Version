@@ -16,6 +16,11 @@ import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } f
 import { buildToolDefs, toOpenAiTools, executeTool, gateToolDefs } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
 import { currentProviders } from './providers.js';
+// ⚠️ `takeTrimMark` 是 `store.js` 的**模块级导出**（记号住在 `data/trim-marks.json`，
+//    是"存档之外"的一份账，不属于某个 chat 的 state）⇒ **直接调它**，⛔ 不要写成 `this.store.takeTrimMark(...)`。
+//    2026-10-03 第一版就是这么写错的：5 个用真 ChatStore 的 e2e 判据当场全炸
+//    （`this.store.takeTrimMark is not a function`），而**静态正则判据照样绿** —— 它把我写错的接收者一起钉死了。
+import { takeTrimMark } from './store.js';
 
 // ── 主动开口的三道闸（纯函数，便于单测）──────────────────────────────────
 //
@@ -560,7 +565,8 @@ export class Orchestrator {
     // 🆕 2026-10-03 第三十八对话（补做提案 d27c6e7c）：管理端删过存档 ⇒ 也取一次"毛边"。
     //    ⚠️ 与上面同一条纪律：放在重试循环**之外**（循环内取会在第一次就清空，重试那轮看不到）。
     //    记号住在 `data/trim-marks.json`（不在存档里）⇒ `deleteChat` 把存档整个删掉也留得住。
-    session.trimInfo = this.store.takeTrimMark(chatKey);
+    //    ⚠️ 它是 `store.js` 的**模块级导出**，不是 store 实例的方法（见文件头那段 import 注释）。
+    session.trimInfo = takeTrimMark(chatKey);
 
     // 同一轮上文：留痕，便于坐实"这次到底补了哪几条"（照 triggerText 的写法，都是小字符串）。
     // ⚠️ 只存 mid + 摘要，**不存条目本身** —— 存档瘦身（2026-09-17）刚把 inputMessages 剥掉，
