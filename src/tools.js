@@ -1672,7 +1672,9 @@ export function buildToolDefs() {
       //      ③ 读不到就明说"读不到"，⛔ 绝不打成 0。
       name: 'get_my_usage',
       description: '查看你自己今天的用量与花费（只读）。有人问"用了多少 / 花了多少 / 还剩多少"、'
-        + '或者你自己想知道的时候用。\n\n'
+        + '或者你自己想知道的时候用。可以问**整个今天**，也可以问**某个模型** —— '
+        + '返回里 `byModel` 就是按模型分开的那份（每个模型的 token 与估算花费），'
+        + '`byModel.unattributedTokens` 是"没带模型信息的那部分记账"（如实标出来，不是 0）。\n\n'
         + '余额数据已对你透明，想不想看、想不想在群里说，全凭你自己的判断和心情，你拥有完全的自主权。\n\n'
         + '⚠️ 口径：报的是本机统计的今天，花费是**按价表估算**、不是账单；'
         + '「剩余额度」在账号那边，本机查不到就如实说查不到，别拿估算花费当余额。\n'
@@ -1691,7 +1693,10 @@ export function buildToolDefs() {
           }
           // ② 今日用量：**必须**走 ctx.usageToday（= `/api/status` 用的同一个 todayUsage）。
           //    ⛔ 不自己读 usage-today.json：那样会漏掉"正在运行中"的这一轮，两处数字对不上。
-          if (typeof ctx.usageToday !== 'function') {
+          //    🆕 2026-10-03 第三十八对话（提案 8ec84f39）：按模型的分项也走同一个 registry
+          //    （`ctx.usageByModelToday`）。**两者缺一就整段说"读不到"** —— 口径只有一份：
+          //    宁可这一轮查不出来，也不给她"总数一个来源、分项另一个来源"的半个数。
+          if (typeof ctx.usageToday !== 'function' || typeof ctx.usageByModelToday !== 'function') {
             return err('读不到用量统计（本次运行的调用点没接上）。别猜数字，直接说现在看不到。');
           }
           const dayKey = todayKey();
@@ -1738,7 +1743,34 @@ export function buildToolDefs() {
             out.cost = { known: false, reason: '这个模型没有价表、也没填单价 ⇒ 估不出成本（不是 0）' };
           }
 
-          // ④ 出口白名单：整个返回值**只由上面这些字段拼出来**，绝不对上游响应做 JSON.stringify。
+          // ④ 🆕 按模型分项（2026-10-03 第三十八对话，提案 8ec84f39）：
+          //    起因是她提的原话 ——「群里有人问"mimo2.6proultra 花了多少"这种问题时答不上来」。
+          //    数据来自 `ctx.usageByModelToday`（与上面 `today` **同一份账**）：
+          //    每行只出「渠道 / 模型 / token / 运行次数 / 估算花费」，⛔ 不带单价、不带请求地址。
+          //    `unattributedTokens` 如实带出去（老文件、以及不带模型信息的记账）——
+          //    ⛔ 不许折成 0、也不许摊到某个模型头上。
+          const byModelBrief = ctx.usageByModelToday(dayKey) || {};
+          const byModelRows = [];
+          for (const m of (Array.isArray(byModelBrief.models) ? byModelBrief.models : [])) {
+            const mCost = estimateCost(m, { model: m.model });
+            const mKnown = ['official', 'custom', 'manual'].includes(String(mCost?.source || 'none'));
+            byModelRows.push({
+              channel: String(m.vendor || ''),
+              model: String(m.model || ''),
+              totalTokens: Number(m.totalTokens) || 0,
+              cachedTokens: Number(m.cachedTokens) || 0,
+              runs: Number(m.runs) || 0,
+              cost: mKnown
+                ? { amount: Number(Number(mCost.cost).toFixed(4)), currency: 'CNY', known: true, basis: 'estimate' }
+                : { known: false, reason: '这个模型没有价表、也没填单价 ⇒ 估不出成本（不是 0）' }
+            });
+          }
+          out.byModel = {
+            models: byModelRows,
+            unattributedTokens: Number(byModelBrief.unattributedTokens) || 0
+          };
+
+          // ⑤ 出口白名单：整个返回值**只由上面这些字段拼出来**，绝不对上游响应做 JSON.stringify。
           return ok(out);
         } catch (error) {
           // 出错也只给一句人话 —— ⛔ 不透传内部异常原文、⛔ 不落 0。
