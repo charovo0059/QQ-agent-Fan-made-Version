@@ -2,6 +2,13 @@
 // 第 14/18 段：13-settings-events（拆自 ui/app.js，2026-09-25 第十七对话；加载顺序见 ui/index.html）
 
 function bindSettingsEvents(c) {
+  // 「？ 本页说明」（四级规范里的汇总层，2026-10-03 第三十四对话 · 第三阶段改动点 5）。
+  // ⚠️ 必须在 `#settings-form` 的 innerHTML **之后**绑 —— 本函数就是那个时机
+  //    （`10-settings-load.js` 先 `box.innerHTML` 再调本函数），照抄既有顺序即可。
+  // ⚠️ 分区**不在这里传死**：面板打开时现读 `state.settingsSection`，
+  //    否则"切了页签再点按钮"会摊开上一页的说明。
+  $('#page-help-btn')?.addEventListener('click', () => openSettingsPageHelp());
+
   // 保存当前区块设置（通用保存按钮）。只有当前区块的字段才会被读取，不会 null 报错。
   const saveCfgBtn = $('#save-cfg-btn');
   if (saveCfgBtn) saveCfgBtn.addEventListener('click', async () => {
