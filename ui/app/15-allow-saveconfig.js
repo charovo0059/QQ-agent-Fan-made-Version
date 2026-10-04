@@ -63,15 +63,21 @@ function setAllowChips(kind, ids) {
   if (!box) return;
   for (const el of Array.from(box.querySelectorAll('.wchip'))) el.remove();
   const input = box.querySelector(`[data-chipinput="${kind}"]`);
-  const label = kind === 'groups' ? '群' : '好友';
+  // 标签从**盒子自己**身上读（`data-chiplabel`，由 `chipBoxHtml()` 写进去）—— 单一真相源：
+  //   不在"渲染"与"重建"两处各写一份默认值（两份就会漂：「管理员」被重建后会变成「好友」）。
+  // ⚠️ 没有该属性时按 kind 回落（旧 DOM / 判据桩）—— 回落值只影响**显示**，不影响取号：
+  //   `readAllowChips()` 去掉的是"第一个词"，标签写什么都不影响号码。
+  // ⚠️ 标签与号码之间**必须留一个空格**（同上：去掉第一个词才拿得到号）。
+  const label = String(box.dataset?.chiplabel || (kind === 'groups' ? '群' : '好友'));
+  const cls = kind === 'groups' ? 'grp' : 'frd';
   const seen = new Set();
   for (const raw of ids) {
     const id = String(raw).trim();
     if (!id || seen.has(id)) continue;   // 去重：同一个号加两次会变成两个芯片，删一个还剩一个
     seen.add(id);
     const el = document.createElement('span');
-    el.className = `wchip ${kind === 'groups' ? 'grp' : 'frd'}`;
-    el.innerHTML = `${label} ${esc(id)}<span class="wchip-x" data-rm="${kind}" data-id="${esc(id)}" role="button" tabindex="0" title="移除">×</span>`;
+    el.className = `wchip ${cls}`;
+    el.innerHTML = `${esc(label)} ${esc(id)}<span class="wchip-x" data-rm="${kind}" data-id="${esc(id)}" role="button" tabindex="0" title="移除">×</span>`;
     box.insertBefore(el, input);
   }
   bindAllowChips();
@@ -128,6 +134,28 @@ function bindAllowChips() {
       if (ids.length) { e.preventDefault(); setAllowChips(kind, ids.slice(0, -1)); }
     }
   });
+}
+
+/**
+ * 「她的能力」里的管理员号名单（`selfElsewhere.ownerIds`）。
+ *
+ * 🔴 与白名单那条守卫（`sec === 'allow'` 块里的 `pickedOrKeep`）是**同一条纪律、同一个理由**：
+ *    "盒子不在 DOM 里" ≠ "名单是空的"。两种情况都读成 `[]`，含义却正好相反：
+ *      · 盒子在、里面空  → 用户**故意**删光了 ⇒ 照实写 `[]`（他就是要"谁都别想调"）
+ *      · 盒子**根本不在 DOM 里** → 这一节没渲染 ⇒ 写 `[]` 等于把用户填的号**静默清空**
+ *    ⇒ 盒子不在时返回 `undefined`：调用方据此**不写这个键**（`updateConfig` 是深合并 ⇒ 原样保留），
+ *      并且 `console.warn` 出声（这一族全靠"看得见的失败"，不许静默）。
+ *
+ * ⚠️ 为什么不跟白名单共用同一个函数：`picked`/`chipBox`/`pickedOrKeep` 是那个
+ *    `if (sec === 'allow')` 块里的**局部**声明（这里取不到），而把它们提到模块级会挪动
+ *    白名单那条**安全事故级**路径的判据锚点（`test-白名单芯片接线.mjs` 靠那三个声明的位置切片）。
+ *    ⇒ 两份十行的守卫**互相点名**、语义由判据同时钉住，比在收尾轮里动那条路径划算。
+ *    （⛔ 但"读盒子里有哪些号"这件事没有第二份：用的是同一个 `readAllowChips()`。）
+ */
+function ownerIdsOrKeep() {
+  if (document.querySelector('.chipbox[data-chipbox="owners"]')) return readAllowChips('owners');
+  console.warn('[abilities] 界面上没有管理员号的芯片盒 ⇒ 本次**不改** selfElsewhere.ownerIds（避免静默清空）');
+  return undefined;                                 // undefined ⇒ 调用方不写这个键
 }
 
 /**
@@ -335,9 +363,12 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   // 🆕 2026-10-04（第四十对话 · 批 3，方案 §3.2 / 用户拍板 Q5）：设置页新小节「她的能力」。
-  //   ⚠️ `ownerIds` **这一个键不在这里收** —— 本轮界面故意不给输入框（用户拍板 Q6：先不填号）。
-  //      `...c.selfElsewhere` 那行展开就是为了**保住已有值**：不展开的话每次点保存都会把它清成 undefined，
-  //      而"点一下保存就把用户手填的号抹掉"正是本项目最忌的那一类静默破坏。
+  //   🆕 2026-10-04（第四十二对话 · 调研 §3）：`ownerIds` **现在收进来了** —— 用户撤销了 Q6
+  //      （界面给了芯片输入框，与白名单同一套 `chipBoxHtml()`）。
+  //   🔴 `...c.selfElsewhere` 那行展开**照旧保留**：它是"不暴露的键不许被一次保存抹掉"的那道保险
+  //      （`selfElsewhere` 以后再加键时靠的就是它），⛔ 别因为 ownerIds 收进来了就把它删掉。
+  //   🔴 而 ownerIds 自己的守卫是 `ownerIdsOrKeep()`：盒子不在 DOM 里 ⇒ 返回 undefined ⇒ 不写这个键
+  //      （同白名单那条：**"这一节没渲染" ≠ "名单是空的"**）。
   if (sec === 'abilities') {
     // ⚠️ 别用 `intIn` —— 它是上面 `if (sec === 'search')` 块里的**局部函数**，这里取不到（会 ReferenceError）。
     const daysRaw = Math.round(Number(val('#cfg-selfelsewhere-days', c.selfElsewhere?.days ?? 7)));
@@ -347,6 +378,8 @@ async function saveConfig({ quiet = false } = {}) {
       whoCanAsk: val('#cfg-selfelsewhere-who', c.selfElsewhere?.whoCanAsk || 'private') === 'ownerOnly' ? 'ownerOnly' : 'private',
       days: Number.isFinite(daysRaw) ? Math.min(30, Math.max(1, daysRaw)) : 7
     };
+    const pickedOwners = ownerIdsOrKeep();
+    if (pickedOwners !== undefined) patch.selfElsewhere.ownerIds = pickedOwners;
   }
 
   if (sec === 'persona') {

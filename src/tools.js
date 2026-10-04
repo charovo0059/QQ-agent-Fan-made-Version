@@ -13,7 +13,7 @@ import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes } from './u
 import { estimateCost, cacheHitRate, resolveApiKey } from './llm.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { webSearch, webFetch, searchImages, illustrationSearch } from './web-search.js';
+import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
@@ -1224,7 +1224,14 @@ export function buildToolDefs() {
         + '【kind 怎么给】要**角色/插画/动漫/同人**（尤其点名了角色或作品）⇒ kind=\'illustration\'；'
         + '要**现实里的东西**（风景、美食、工具、实物）⇒ kind=\'real\'；拿不准就不给（走默认那条路）。'
         + '插画路的 tag 是**英文/罗马字**（hatsune_miku 这样），中文名由内核的词典翻译；'
-        + '也可以自己给 tags（多个，如 ["hatsune_miku","1girl"]）与 rating（safe/questionable/any）。',
+        + '也可以自己给 tags（多个，如 ["hatsune_miku","1girl"]）与 rating（safe/questionable/any）。'
+        + '🆕【插画有两条来源】不给 source 时内核自己选：配了代理就**先试 pixiv**'
+        + '（直接吃中文/日文，**只有全年龄** —— 匿名拿不到 R-18；热度用「N users入り」把池子收到'
+        + '"被 N 人收藏过"的作品上，pixiv 官方那种"按热度排序"是付费功能、我们用的是免费替代），'
+        + '没搜到才退 Safebooru（按英文/罗马字 tag，有 questionable）。'
+        + '用了哪条、有没有降档，返回里都写着。'
+        + 'heat 默认 5000（=「5000users入り」这个门槛）；可以给 1000 / 10000 / "off"，'
+        + '⚠️ 冷门角色给高门槛会一条都搜不到（内核会自动降档兜底，但那是兜底不是常态）。',
       parameters: {
         type: 'object',
         properties: {
@@ -1244,7 +1251,20 @@ export function buildToolDefs() {
             type: 'string',
             enum: ['safe', 'questionable', 'any'],
             description: '可选，仅插画路用：safe=只要全年龄；questionable=只要擦边；any=两者都可能有（默认）。'
-              + '⚠️ 群里请用 safe。'
+              + '⚠️ 群里请用 safe。⚠️ 要 questionable 时只会走 Safebooru（pixiv 匿名只有全年龄）。'
+          },
+          source: {
+            type: 'string',
+            enum: ['auto', 'pixiv', 'safebooru'],
+            description: '可选，仅插画路用：auto（默认）=配了代理先 pixiv、没搜到退 Safebooru；'
+              + 'pixiv=只要 pixiv（直接吃中文/日文，**只有全年龄**，需要代理）；'
+              + 'safebooru=只要 Safebooru（按英文/罗马字 tag）。'
+          },
+          heat: {
+            type: 'string',
+            enum: ['off', '1000', '5000', '10000'],
+            description: '可选，仅插画路用（只对 pixiv 那条路生效）：热度门槛，默认 5000（=「5000users入り」）。'
+              + 'off=不按收藏数收窄。搜不到会**自动降档**（5000→1000→不加门槛），返回里会说明。'
           }
         },
         required: ['query']
@@ -1270,7 +1290,7 @@ export function buildToolDefs() {
           const limit = Math.max(1, Math.min(12, Number(args.limit) || 6));
           const kind = String(args.kind ?? 'auto').trim().toLowerCase();
 
-          // ── 插画路（2026-10-04 第四十对话 · 批 1，方案 §2）────────────────
+          // ── 插画路（2026-10-04 第四十对话 · 批 1，方案 §2；🆕 第四十二对话加了 pixiv 源）──
           if (kind === 'illustration') {
             const rating = ['safe', 'questionable', 'any'].includes(String(args.rating ?? '').toLowerCase())
               ? String(args.rating).toLowerCase()
@@ -1279,7 +1299,15 @@ export function buildToolDefs() {
               : (cfg.allowQuestionable === false ? 'safe' : 'any');
             // tag→有没有图 的缓存在**本次运行内**（ctx 上）：同一轮里重复问同一个角色不重复打接口。
             if (!(ctx.__tagProbeCache instanceof Map)) ctx.__tagProbeCache = new Map();
-            const r = await illustrationSearch(q, {
+            // 🆕 第四十二对话（调研 §1.7）：**来源**（auto/pixiv/safebooru）与**热度档**。
+            //   ⚠️ 路由判定收在 `illustrationSearchAnySource()` 里（含"没配代理就别试 pixiv"），
+            //      ⛔ 别在这里再写一份 —— 两份判定迟早会漂。
+            const wantSource = ['auto', 'pixiv', 'safebooru'].includes(String(args.source ?? '').trim().toLowerCase())
+              ? String(args.source).trim().toLowerCase() : 'auto';
+            const heat = normalizePixivHeat(args.heat);
+            const r = await illustrationSearchAnySource(q, {
+              source: wantSource,
+              heat,
               tags: Array.isArray(args.tags) ? args.tags : [],
               extraTags: cfg.extraTags || {},
               rating,
@@ -1287,12 +1315,20 @@ export function buildToolDefs() {
               cache: ctx.__tagProbeCache
             });
             if (!r.ok) {
+              const notes = (r.notes && r.notes.length) ? `（${r.notes.join('；')}）` : '';
+              if (r.source === 'pixiv') {
+                return err(`插画路按 pixiv 没搜到「${q}」。${notes}`
+                  + 'pixiv 的 tag 直接吃中文/日文，换个更常见的角色/作品名再试；'
+                  + '要擦边只能走 Safebooru（source=\'safebooru\'）。'
+                  + '⛔ 别拿不相干的图凑数。');
+              }
               // 两种"没结果"分开说：一个候选都提不出来（多半是中文）vs 候选都校验不过。
               // 共同点：⛔ 绝不拿不相干的图凑数（用已有的 baidu/bing 结果顶上会污染"插画"这个语义）。
               return err(`插画路按 tag 没搜到「${q}」。booru 站的 tag 是**英文/罗马字**：`
                 + '试试用罗马字（比如 hatsune_miku）或英文作品名再来一次，'
                 + '也可以自己给 tags 参数（比如 ["hatsune_miku","1girl"]）。'
                 + `（我试过：${r.tried.length ? r.tried.join('、') : '一个能用的候选都没提出来'}）`
+                + notes
                 + '⛔ 别拿不相干的图凑数。');
             }
             if (!r.list.length) {
@@ -1303,10 +1339,26 @@ export function buildToolDefs() {
             return ok({
               query: q,
               kind: 'illustration',
+              // 用了哪条路如实写出来（用户拍板：出错/换源要如实告诉她）
+              source: r.source,
               tag: r.tag,
+              ...(r.source === 'pixiv'
+                ? {
+                  heat: r.heat,
+                  // 降档这件事必须出现在返回值里（调研 §1.7 的硬要求）：她才知道"为什么这批是 1000 门槛的"
+                  heatNote: r.downgraded
+                    ? `⚠️ 原本要 ${heat > 0 ? `${heat}users入り` : '不加门槛'}，那个门槛下一条都没有 ⇒ 已自动降到 `
+                      + `${r.heat > 0 ? `${r.heat}users入り` : '不按收藏数收窄'}`
+                    : `热度门槛 ${r.heat > 0 ? `${r.heat}users入り` : '不按收藏数收窄（off）'}`
+                }
+                : {}),
               count: images.length,
               images,
-              tip: '要发给群友就用 send_image 传上面的 url 或 sampleUrl（一条一张）。'
+              ...(r.notes && r.notes.length ? { notes: r.notes } : {}),
+              tip: (r.source === 'pixiv'
+                ? '这些是 pixiv 的图：**只有全年龄**（匿名拿不到 R-18，要擦边得走 source=\'safebooru\'）。'
+                : '')
+                + '要发给群友就用 send_image 传上面的 url 或 sampleUrl（一条一张）。'
                 + '⚠️ size 里宽度或高度任一超过 3000、或 file_url 看着很大时，**优先发 sampleUrl**（小图更稳）。'
                 + '⚠️ rating 如实标了**原站的分级词**（general=全年龄 / sensitive=轻擦边 / questionable=擦边；'
                 // ⚠️ 这几档是原站的**单词**，不是 s/q/e（2026-10-04 真机实测：返回的是 `general`）。

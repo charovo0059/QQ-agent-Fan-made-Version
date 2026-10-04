@@ -968,3 +968,283 @@ export async function illustrationSearch(query, {
   const list = await safebooruImageSearch(query, { tags: [hit], rating, limit, browseLocked, maxBytes, fetcher });
   return { ok: true, tag: hit, tried, list };
 }
+
+// ══ pixiv 检索源（2026-10-04 第四十二对话 · 调研 §1）══════════════════════════
+//
+// **为什么需要它**：用户的抱怨是"p 站图太多、随机搜质量不佳"。而 **pixiv 的"按热度排序"
+// 是付费功能**（`order=popular_d`、按收藏数过滤都要 Premium：官方 ajax 文档逐字写着
+// "Premium account authorization is required."，实测参数被无视、`bookmarkData` 全 null）。
+// ⇒ 免费的两条替代（都真机实测过）：
+//   ① `body.popular` —— **同一个搜索响应里**就有一个人工挑选的热门列表（零额外请求；
+//      实测"按最新搜"的结果与它 0 重合，条目自带 `N users入り` tag）；
+//   ② 把词收窄成 `初音ミク 5000users入り` —— pixiv 按 tag 匹配 ⇒ 池子变成"被 5000 人收藏过"。
+//      冷门 tag 会剩个位数 ⇒ **必须自动降档**（5000 → 1000 → 不加修饰词）并如实上报。
+//
+// 🔴 四条实测钉死的事实（⛔ 别凭印象改）：
+//   ① **`order=date` 是"旧→新"**（首条是 2007 年的 258 号作品）⇒ 要**新→旧**必须写
+//      `order=date_d`（带 `_d` 后缀）。照抄文档里那个 `date` 会让搜索结果全是远古投稿。
+//   ② **匿名拿不到 R-18**（`mode=r18` 要登录；实测 `xRestrict` 恒为 0）⇒ 这条路只有全年龄，
+//      ⛔ 工具描述与给她的回话里都不许把它当承诺。
+//   ③ **全尺寸地址必须走 `/ajax/illust/<id>/pages`**：改写缩略图 URL 那条路实测 404
+//      （文件名后缀都不一样：缩略图 `_square1200.jpg`、原图 `_p0.png`）⇒ ⛔ 别猜文件名。
+//   ④ 🔴 **搜索响应是 73KB 级**，而 `safeFetch` 默认只收 50KB ⇒ 必须显式给大 `maxBytes`，
+//      否则 `JSON.parse` 在截断处炸（"搜索报错"看着像网络问题，其实是自己截的）。
+//
+// ⚠️ 这条路**必须有代理**才能走通（pixiv 本机直连不通）；`resolveProxyFor('www.pixiv.net')`
+//    为空时 `illustrationSearchAnySource` 直接退 Safebooru，⛔ 不在这里静默直连。
+export const PIXIV_DEFAULT_HEAT = 5000;
+/** pixiv 搜索响应的大小（见上面事实 ④）。 */
+export const PIXIV_TEXT_MAX_BYTES = 2 * 1024 * 1024;
+const PIXIV_PAGES_MAX_BYTES = 256 * 1024;
+/** ⚠️ `referer` 是**这个站要求的**（不是可选美化）：ajax 与图床都认它。 */
+const PIXIV_HEADERS = { referer: 'https://www.pixiv.net/', accept: 'application/json,*/*' };
+
+/** 热度档 → 搜索词。`0` = 不加修饰词（给她传 `heat='off'` 时）。 */
+export function pixivHeatWord(tag, heat) {
+  const t = String(tag ?? '').trim();
+  const h = Number(heat) || 0;
+  return h > 0 ? `${t} ${h}users入り` : t;
+}
+
+/**
+ * 降档链：`5000 → 1000 → 0`（`0` = 不加修饰词）。
+ * 传 `10000` ⇒ `[10000, 5000, 1000, 0]`；传 `off`/`0` ⇒ `[0]`。
+ * ⚠️ 冷门 tag 走 5000 门槛会**只剩个位数甚至 0 条**，所以"自动降档"不是可选优化。
+ */
+export function pixivHeatChain(heat) {
+  const h = Number(heat) || 0;
+  if (h <= 0) return [0];
+  const chain = [h];
+  for (const s of [5000, 1000]) if (s < h) chain.push(s);
+  chain.push(0);
+  return [...new Set(chain)];
+}
+
+/** 模型给的 `heat` → 数字。`off` = 0；不认识/没给 ⇒ **默认 5000**（⛔ 别把 undefined 当 0）。 */
+export function normalizePixivHeat(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return PIXIV_DEFAULT_HEAT;
+  const s = String(raw).trim().toLowerCase();
+  if (s === 'off' || s === 'none' || s === '0') return 0;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : PIXIV_DEFAULT_HEAT;
+}
+
+/** 🔴 `order=date_d` = **新→旧**（见文件段头事实 ①）。纯函数，便于单测。 */
+export function pixivSearchUrl(word, { order = 'date_d', mode = 'all' } = {}) {
+  const w = String(word ?? '').trim();
+  return `https://www.pixiv.net/ajax/search/artworks/${encodeURIComponent(w)}`
+    + `?word=${encodeURIComponent(w)}&order=${order}&mode=${mode}&s_mode=s_tag&lang=zh`;
+}
+
+/** 作品全尺寸地址的来源。⛔ 不许改成"改写缩略图 URL"。 */
+export function pixivPagesUrl(id) {
+  return `https://www.pixiv.net/ajax/illust/${encodeURIComponent(String(id ?? ''))}/pages?lang=zh`;
+}
+
+/**
+ * 解析 pixiv 搜索响应（**纯函数**）。返回 `{ rows, popular }`。
+ * ⚠️ 空响应体 ⇒ `{ rows: [], popular: [] }`（⛔ 不抛）：与 Safebooru 那条实测契约同口径
+ *    ——"查不到"在 pixiv 这边也可能表现为空体，把它说成"报错"会让人去查网络。
+ * ⚠️ `error:true` 才抛（那才是接口真的拒了）。
+ */
+export function parsePixivSearch(body) {
+  const text = String(body ?? '').trim();
+  if (!text) return { rows: [], popular: [] };
+  let j;
+  try { j = JSON.parse(text); } catch { throw new Error('pixiv 返回的不是 JSON（可能改版、被截断或被拦）'); }
+  if (j?.error) throw new Error(`pixiv 搜索报错：${j?.message || '未知'}`);
+  const b = j?.body || {};
+  const rows = Array.isArray(b?.illustManga?.data) ? b.illustManga.data : [];
+  const popular = [...(b?.popular?.recent || []), ...(b?.popular?.permanent || [])];
+  return { rows, popular };
+}
+
+/** 从 `/pages` 响应里取**第 0 页**的四个地址（纯函数；取不到就给空串，⛔ 不猜文件名）。 */
+export function parsePixivPages(body) {
+  const text = String(body ?? '').trim();
+  if (!text) return { original: '', regular: '', small: '', thumbMini: '' };
+  let j;
+  try { j = JSON.parse(text); } catch { throw new Error('pixiv /pages 返回的不是 JSON（可能改版或被拦）'); }
+  const u = j?.body?.[0]?.urls || {};
+  return {
+    original: String(u.original || ''),
+    regular: String(u.regular || ''),
+    small: String(u.small || ''),
+    thumbMini: String(u.thumb_mini || '')
+  };
+}
+
+/**
+ * 一条 pixiv 搜索结果 → **与 Safebooru 路同形状**的条目（`illustrationImagesFor` 直接能用）。
+ * ⚠️ `url`（全尺寸）留空，等 `/pages` 回来再填；`sampleUrl` 先放搜索响应里的缩略图兜底。
+ */
+export function pixivRowToItem(row) {
+  const id = String(row?.id ?? '');
+  const thumb = String(row?.url || '');
+  return {
+    id,
+    url: '',
+    sampleUrl: thumb,
+    previewUrl: thumb,
+    // 匿名 pixiv 恒 `xRestrict === 0`；>0 只可能在"哪天真的登录了"之后出现 ⇒ 调用方会把它剔掉
+    rating: Number(row?.xRestrict) > 0 ? 'r18' : 'general',
+    size: (row?.width && row?.height) ? `${row.width}x${row.height}` : '',
+    source: id ? `https://www.pixiv.net/artworks/${id}` : '',
+    pageUrl: id ? `https://www.pixiv.net/artworks/${id}` : '',
+    tags: Array.isArray(row?.tags) ? row.tags.join(',') : String(row?.tags || ''),
+    title: String(row?.title || ''),
+    pageCount: Math.max(1, Number(row?.pageCount) || 1)
+  };
+}
+
+/**
+ * pixiv 插画搜索：降档链 → 并上 `popular` → 逐条取全尺寸。
+ *
+ * ⚠️ 词的顺序**与 Safebooru 路相反**：pixiv 直接吃中文/日文（实测），所以**先搜原句**，
+ *    显式给的 `tags`（多半是 booru 的罗马字）排后面当备选。
+ *
+ * @returns {Promise<{ok:boolean, reason?:string, word?:string, heat?:number, downgraded?:boolean,
+ *   list?:Array, tried:Array, popularCount?:number, fullSizeMiss?:number, r18Dropped?:number}>}
+ *   `reason`：`no-proxy`（没配代理，这条路走不通）/ `no-candidate` / `no-result`。
+ *   ⛔ 这些都不抛（除了网络本身失败）—— 由调用方决定要不要退到另一条路。
+ */
+export async function pixivIllustrationSearch(query, {
+  tags = [], heat = PIXIV_DEFAULT_HEAT, limit = 8, browseLocked = false,
+  maxBytes = PIXIV_TEXT_MAX_BYTES, fetcher = safeFetch, pagesFetcher = null
+} = {}) {
+  // 没有代理 ⇒ 直连 pixiv 必失败。**在发请求之前**就如实说清楚（省一次必然失败的等待）。
+  if (!resolveProxyFor('www.pixiv.net')) return { ok: false, reason: 'no-proxy', tried: [] };
+
+  const query_ = String(query ?? '').trim();
+  const words = [query_, ...(Array.isArray(tags) ? tags : [tags]).map((x) => String(x ?? '').trim())]
+    .filter(Boolean);
+  if (!words.length) return { ok: false, reason: 'no-candidate', tried: [] };
+
+  const n = Math.max(1, Math.min(12, Number(limit) || 8));
+  const pages = pagesFetcher || fetcher;
+  const tried = [];
+  let used = null;
+  for (const word of words) {
+    for (const step of pixivHeatChain(heat)) {
+      const w = pixivHeatWord(word, step);
+      const { body } = await fetcher(pixivSearchUrl(w), { browseLocked, maxBytes, headers: PIXIV_HEADERS });
+      const { rows, popular } = parsePixivSearch(body);
+      tried.push({ word: w, heat: step, count: rows.length, popular: popular.length });
+      if (rows.length || popular.length) { used = { word: w, heat: step, rows, popular }; break; }
+    }
+    if (used) break;
+  }
+  if (!used) return { ok: false, reason: 'no-result', tried };
+
+  // 合并：热门（`popular`，有就排前面）→ 按最新搜的结果；按 id 去重。
+  const seen = new Set();
+  const merged = [];
+  const push = (row, hot) => {
+    const id = String(row?.id ?? '');
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    merged.push({ row, hot });
+  };
+  for (const row of used.popular) push(row, true);
+  for (const row of used.rows) push(row, false);
+
+  const allowed = merged.filter((x) => !(Number(x.row?.xRestrict) > 0));   // ⛔ 匿名拿不到的一律不给
+  const r18Dropped = merged.length - allowed.length;
+  const chosen = allowed.slice(0, n);
+
+  const list = await Promise.all(chosen.map(async ({ row, hot }) => {
+    const item = pixivRowToItem(row);
+    let fullSize = false;
+    try {
+      const { body } = await pages(pixivPagesUrl(item.id), { browseLocked, maxBytes: PIXIV_PAGES_MAX_BYTES, headers: PIXIV_HEADERS });
+      const u = parsePixivPages(body);
+      if (u.original) { item.url = u.original; fullSize = true; }
+      if (u.regular) item.sampleUrl = u.regular;
+      else if (u.small) item.sampleUrl = u.small;
+    } catch { fullSize = false; }
+    // 原图接口没给 ⇒ 至少留一个**能用**的链接（缩略图），并把这件事如实往上带
+    if (!item.url) item.url = item.sampleUrl;
+    return { ...item, hot, fullSize };
+  }));
+
+  const askedHeat = Number(heat) || 0;
+  return {
+    ok: true,
+    source: 'pixiv',
+    word: used.word,
+    heat: used.heat,
+    downgraded: used.heat !== askedHeat,
+    list,
+    tried,
+    popularCount: used.popular.length,
+    hotCount: list.filter((x) => x.hot).length,
+    fullSizeMiss: list.filter((x) => !x.fullSize).length,
+    r18Dropped
+  };
+}
+
+/** 这次 pixiv 这条路**能不能走**（= 配了代理且名单含 pixiv）。⛔ 不在别处重复这个判断。 */
+export function pixivRouted() {
+  return resolveProxyFor('www.pixiv.net') !== null;
+}
+
+/**
+ * 插画路的**来源路由**（第四十二对话 · 调研 §1.7）：`pixiv` / `safebooru` / `auto`。
+ *
+ * `auto` 的语义（用户拍板"并列、不是替换"）：
+ *   · 要 `questionable` ⇒ **直接 Safebooru**（pixiv 匿名只有全年龄，过去也是白跑）；
+ *   · 没配代理 ⇒ pixiv 走不通 ⇒ **直接 Safebooru**（连一次 pixiv 请求都不发）；
+ *   · 配了代理 ⇒ **先 pixiv**，没搜到/出错才退 Safebooru；
+ *   · 无论走哪条，**用了哪条 + 为什么**都写进 `source` / `notes` 带回去。
+ * 🔴 这三条合起来保证：**没配代理时行为与加 pixiv 之前逐字节等价**（只剩 Safebooru 那一条路）。
+ */
+export async function illustrationSearchAnySource(query, {
+  source = 'auto', tags = [], extraTags = {}, rating = 'any', heat = PIXIV_DEFAULT_HEAT,
+  limit = 8, maxProbe = 4, cache = null, browseLocked = false,
+  maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch, pixivPagesFetcher = null, prober = null
+} = {}) {
+  const src = ['auto', 'pixiv', 'safebooru'].includes(String(source)) ? String(source) : 'auto';
+  const notes = [];
+  const wantPixiv = src === 'pixiv' || src === 'auto';
+  const wantBooru = src === 'safebooru' || src === 'auto';
+
+  if (wantPixiv && String(rating) === 'questionable') {
+    notes.push('要 questionable ⇒ 这次没走 pixiv（匿名只有全年龄，而且匿名下 `mode=r18` 会被忽略）');
+  } else if (wantPixiv && !pixivRouted()) {
+    notes.push('没配代理 ⇒ pixiv 这条路走不通，这次走 Safebooru');
+  } else if (wantPixiv) {
+    try {
+      const p = await pixivIllustrationSearch(query, {
+        tags, heat, limit, browseLocked, maxBytes: PIXIV_TEXT_MAX_BYTES, fetcher, pagesFetcher: pixivPagesFetcher
+      });
+      if (p.ok) {
+        if (p.downgraded) {
+          notes.push(`热度门槛降过档：${p.heat > 0 ? `${p.heat}users入り` : '不加门槛'}`
+            + `（原本要 ${Number(heat) || 0}users入り，那个门槛下没有结果）`);
+        }
+        if (p.fullSizeMiss) notes.push(`有 ${p.fullSizeMiss} 张没拿到原图接口的全尺寸，给的是缩略图`);
+        if (p.r18Dropped) notes.push(`有 ${p.r18Dropped} 张是 R-18（匿名拿不到，已剔掉）`);
+        return {
+          ok: true, source: 'pixiv', tag: p.word, heat: p.heat, downgraded: p.downgraded,
+          list: p.list, tried: p.tried, notes,
+          // 这几个计数也带回去：它们是"这批图是怎么来的"的事实（工具层可以照实说）
+          popularCount: p.popularCount, hotCount: p.hotCount,
+          fullSizeMiss: p.fullSizeMiss, r18Dropped: p.r18Dropped
+        };
+      }
+      notes.push(p.reason === 'no-result'
+        ? `pixiv 没搜到（试过 ${p.tried.map((t) => `「${t.word}」`).join('、')}）`
+        : `pixiv 这条路用不了（${p.reason}）`);
+      if (src === 'pixiv') return { ok: false, source: 'pixiv', reason: p.reason, tried: p.tried, notes };
+    } catch (error) {
+      notes.push(`pixiv 这条路出错：${String(error?.message ?? error)}`);
+      if (src === 'pixiv') return { ok: false, source: 'pixiv', reason: 'error', tried: [], notes };
+    }
+  }
+
+  if (!wantBooru) return { ok: false, source: null, reason: 'no-source', tried: [], notes };
+  const b = await illustrationSearch(query, {
+    tags, extraTags, rating, limit, maxProbe, cache, browseLocked, maxBytes, fetcher, prober
+  });
+  return { ...b, source: 'safebooru', notes };
+}
