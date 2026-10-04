@@ -832,6 +832,32 @@ export function createApp({ log = console.log, resume = [] } = {}) {
   };
   // 脚本候选：① 设置里指定的 ② 开发布局（工作区「工具-中继」）③ 打包布局（随 app 的 wechat-channel\）。
   // 为什么要一串候选：开发机与别人机器上的目录结构不一样，写死任何一条都必然有一边找不到。
+  // WeFlow 的 Access Token：**只有"探它读不读得到库"这一件事需要它**（2026-10-04 第四十对话 · 批 0）。
+  // 🔴 token 是**凭据** ⇒ 从本地两处已有凭据文件现读，⛔ 不写进代码、不进日志、不进任何 API 返回
+  //    （对外只报状态码/错误码，见 `wechat-channel.js` 的 `#probeWeFlowDb`）。
+  // 来源顺序与 `工具-中继\config.mjs`（**真正读库的那个人**）保持一致，再兜底 Bridge 自己那份：
+  //   ① 环境变量 WEFLOW_TOKEN
+  //   ② 工具-中继\本地-凭据.json 的 weflowToken（中继在用）
+  //   ③ 工具-中继\bridge-config.json 的 access_token（Bridge 在用，同样是它的 Access Token）
+  //   两份文件都被 .gitignore 挡着、都不入库；⛔ 别在这里另立"第四个凭据文件"。
+  // ⚠️ 为什么传**函数**而不是读一次存下来：与 scriptCandidates / weflowExe 同一个道理 ——
+  //    文件是人在外面改的，存成快照就得重启才认。
+  const weflowTokenFrom = () => {
+    const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
+    try {
+      const env = String(process.env.WEFLOW_TOKEN || '').trim();
+      if (env) return env;
+      const cred = readJson(path.join(WORKSPACE_DIR, '工具-中继', '本地-凭据.json'));
+      const fromCred = String(cred?.weflowToken || '').trim();
+      if (fromCred) return fromCred;
+      const bridge = readJson(path.join(WORKSPACE_DIR, '工具-中继', 'bridge-config.json'));
+      return String(bridge?.access_token || '').trim();
+    } catch (e) {
+      // 读不到就按"读不到库"处理（界面与自检会如实说），但**要出声** —— 本项目的头号病是静默失败。
+      log('[wechat] 读 WeFlow token 失败（本次按"读不到库"处理）：' + (e?.message ?? e));
+      return '';
+    }
+  };
   const wechatChannel = new WechatChannel({
     isPortOpen,
     relayStatusUrl: cfg.wechat?.httpUrl || 'http://127.0.0.1:11230',
@@ -854,6 +880,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         path.join(process.env.PROGRAMFILES || '', 'WeFlow', 'WeFlow.exe')
       ]
     },
+    weflowToken: weflowTokenFrom,
     log: (...a) => log('[wechat-channel]', ...a)
   });
 
@@ -2170,12 +2197,20 @@ export function createApp({ log = console.log, resume = [] } = {}) {
             cfgWx.enabled ? 'config.wechat.enabled = true' : 'config.wechat.enabled = false ⇒ 收不到也不回；到「设置」打开');
           add('script', !!script, '通道启动脚本',
             script || `找不到（跑微信通道.mjs）。找过：${wechatChannel.candidates().join(' ｜ ') || '(无候选)'}；可在设置里填 wechat.channelScript`);
-          add('weflow', st.weflow.running, '① WeFlow（读微信库）',
-            st.weflow.running
-              ? `端口 5031 已通；程序 ${st.weflow.exe || '(未解析到路径)'}`
-              : (st.weflow.starting
+          // 🔴 2026-10-04（第四十对话 · 批 0）：「端口通」**不等于**「读得到库」。
+          //    实测它的数据组件挂掉期间端口照样通、`/api/v1/health` 还是 200，而读库接口全 500
+          //    `{"error":"错误码: -101"}`。旧版这一项只看 `st.weflow.running` ⇒ 体检表打绿，
+          //    而同一屏的微信页那时也该是绿的（**假绿**），用户据此以为"能收能发"。
+          //    ⇒ 现在与微信页**同一口径**：`running && dbOk !== false`（都来自同一个 status()）。
+          const dbBad = st.weflow.dbOk === false;
+          add('weflow', st.weflow.running && !dbBad, '① WeFlow（读微信库）',
+            !st.weflow.running
+              ? (st.weflow.starting
                 ? `进程在（pid ${(st.weflow.pids || []).join(',')}）但端口 5031 没通 —— 它可能还在加载，或停在登录/选数据的界面`
-                : (exe.path ? `没在跑。点「启动 WeFlow」即可（会用 ${exe.path}）` : `没在跑，而且找不到它的程序。找过：${exe.candidates.join(' ｜ ') || '(没配任何路径)'}；到设置里填 wechat.weflowExe`)));
+                : (exe.path ? `没在跑。点「启动 WeFlow」即可（会用 ${exe.path}）` : `没在跑，而且找不到它的程序。找过：${exe.candidates.join(' ｜ ') || '(没配任何路径)'}；到设置里填 wechat.weflowExe`))
+              : (dbBad
+                ? `🔴 端口 5031 已通，但**读不到库**（${st.weflow.dbError || '未知错误'}）⇒ 微信消息收不到、发出去也确认不了。这一层是它自己的数据组件（不归我们管，重启通常也没用）`
+                : `端口 5031 已通，读库正常；程序 ${st.weflow.exe || '(未解析到路径)'}`));
           add('relay', st.channel.running, '② 中继（11230）',
             st.channel.running ? '在跑' : '没在跑 —— 点「启动通道」（会顺手把 WeFlow 也点着）');
           add('bridge', st.channel.running && st.channel.bridgeConnected, '② Bridge 有没有连进中继',

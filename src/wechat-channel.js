@@ -11,6 +11,12 @@
 // ── 三段，缺一不可（界面要能一眼看出断在哪一段）──────────────────────────
 //   ① WeFlow      读微信本地库 + 推新消息的第三方应用（端口 5031）。**它不归我们管**，
 //                 只能"检测在不在跑"，必要时替用户把它拉起来。
+//                 🔴 2026-10-04（第四十对话 · 批 0，方案 §8.5）：**「端口通」不等于「读得到库」**。
+//                 实测它的数据组件挂掉时端口照样通、`/api/v1/health` 照样 200，而读库接口
+//                 `sessions`/`contacts`/`messages` 全 500 `{"error":"错误码: -101"}`
+//                 ⇒ 那时三个圆点全绿（**假绿**），真相却是"消息收不到、发出去也确认不了"。
+//                 所以现在多探一次**带 token 的读库接口**，把"端口通"（`running`）与
+//                 "读得到库"（`dbOk`/`dbError`）**分成两个字段**（判据见 #probeWeFlowDb）。
 //                 🔴 2026-09-20 用户拍板：**就停在"检测 + 拉起"这一步**。
 //                 我曾按用户早先那句「逆向 weflow，只保留我们需要的功能，逆向出来加进 app 里」
 //                 一路走到 wx_key.dll 的授权门（`AUTH_FAILED:auth_env_missing`，
@@ -32,6 +38,18 @@ import { execFileSync, spawn } from 'node:child_process'
 /** 日志环形缓冲上限（够排障，又不会把内存吃光）。 */
 const LOG_LIMIT = 300
 
+/**
+ * WeFlow「读得到库吗」的探测结果**缓存时长**（2026-10-04 批 0）。
+ *
+ * 为什么必须缓存：`status()` 被 `/api/status` 每 15 秒轮询一次，而"它能不能读库"不会在 60 秒里变
+ * —— 每次轮询都真打一次它，等于我们自己给它加压（它本来就够脆了）。
+ * 节奏照抄同一层里已有的 `WECHAT_CONTACT_SYNC_RETRY_MS = 60 * 1000`（那套是对的，⛔ 别另发明一个数）。
+ */
+const WEFLOW_DB_PROBE_TTL_MS = 60 * 1000
+
+/** WeFlow 的**读库**接口（带 token 打）。⚠️ 它没有发送端点 ⇒ 发送仍走 UIA，与本探针无关。 */
+const WEFLOW_DB_PROBE_URL = 'http://127.0.0.1:5031/api/v1/sessions?limit=1'
+
 export class WechatChannel {
   /**
    * @param {object} o
@@ -39,10 +57,11 @@ export class WechatChannel {
    * @param {string} o.relayStatusUrl 中继状态口，如 http://127.0.0.1:11230
    * @param {string[]|(()=>string[])} o.scriptCandidates 通道启动脚本的候选路径（按序找第一个存在的）
    * @param {string|(()=>string[])} o.weflowExe WeFlow 可执行文件候选（字符串=单个路径；函数=现算一串）
+   * @param {string|(()=>string)} o.weflowToken WeFlow 的 Access Token（**只用于读库探测**；字符串或函数）
    * @param {string} o.nodeExe 用哪个 node 跑脚本（默认 process.execPath + ELECTRON_RUN_AS_NODE）
    * @param {(msg:string)=>void} [o.log]
    */
-  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weflowExe = '', nodeExe = '', findPids = null, findChannelProcs = null, log = () => {} }) {
+  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weflowExe = '', weflowToken = '', nodeExe = '', findPids = null, findChannelProcs = null, log = () => {} }) {
     this.isPortOpen = isPortOpen
     this.relayStatusUrl = String(relayStatusUrl || 'http://127.0.0.1:11230').replace(/\/$/, '')
     // 候选路径可以是**数组**，也可以是**函数**（每次现算）。
@@ -52,6 +71,12 @@ export class WechatChannel {
     // WeFlow 那条同理，而且是同一个坑：第一版我把 weflowExe 存成构造时的**快照**，
     // 于是"用户在设置里填了路径"要重启才认 —— 和 channelScript 犯的是同一个错。
     this.#weflowFn = typeof weflowExe === 'function' ? weflowExe : () => (weflowExe ? [weflowExe] : [])
+    // 🔴 WeFlow 的 Access Token：探"读得到库吗"必须带它（它的数据接口一律鉴权）。
+    //    ⚠️ 与 scriptCandidates / weflowExe 同一个道理 —— **传函数、每次现算**：凭据文件是人在
+    //       外面改的，存成快照就得重启才认（而这个坑在这个文件里已经犯过两次）。
+    //    🔴 token 是**凭据** ⇒ 在这里**只进不出**：绝不写日志、绝不出现在 status() 的返回里
+    //       （对外只报状态码与错误码）。来源见 `src/app.js` 的 `weflowTokenFrom()`。
+    this.#tokenFn = typeof weflowToken === 'function' ? weflowToken : () => String(weflowToken || '')
     this.nodeExe = nodeExe || process.execPath
     // ⚠️ 进程探测**可注入**：它读的是"这台机器上真有没有 WeFlow 在跑"，
     //    测试里必须能固定住，否则断言会随测试机的状态飘（本机恰好一直开着 WeFlow）。
@@ -67,8 +92,11 @@ export class WechatChannel {
 
   #candidatesFn = () => []
   #weflowFn = () => []
+  #tokenFn = () => ''
   #findPids = () => []
   #findChannels = () => []
+  /** 最近一次读库探测的结论 `{ at, dbOk, dbError }`（60 秒内复用，见 WEFLOW_DB_PROBE_TTL_MS）。 */
+  #dbCache = null
 
   /** 当前的候选路径（现算，见构造函数的说明）。 */
   candidates() {
@@ -146,6 +174,57 @@ export class WechatChannel {
     }
   }
 
+  /**
+   * 探一次"WeFlow 到底读不读得到库"（带 token 打它的会话表），结论**缓存 60 秒**。
+   *
+   * 🔴 为什么必须有这一探（2026-10-04 第四十对话 · 批 0，方案 §8.5）：**端口通 ≠ 能读库**。
+   *    实测它的数据组件挂掉时 `running=true`、`/api/v1/health` 还是 200，而读库接口
+   *    全 500 `{"error":"错误码: -101"}`。只看端口就会报"链路已连通"（**假绿**），
+   *    而那时的真相是：**微信消息收不到、发出去也确认不了**。
+   *
+   * 口径（与项目既有纪律一致：**有证据才拦、读不到就出声**）：
+   *    · 探到 200             ⇒ `dbOk=true`（**唯一**能说"①段好了"的证据）
+   *    · 探到非 200 / 抛异常  ⇒ `dbOk=false` + `dbError`（例如 `-101`）—— 异常也算"读不到"，
+   *      ⛔ 不留 `null` 蒙过去（本项目头号病就是"仪器坏了读数还很好看"）
+   *    · **没有 token**       ⇒ `dbOk=false` + `dbError='没配置 token（读不到库）'`
+   *      ⛔ **不许折成"通"**：没有 token 我们**就是**读不到库（我们那条中继同样读不到）
+   *    · WeFlow 没在跑       ⇒ `dbOk=null`（这一层不归我们判 —— `running=false` 已经把话说清了，
+   *      "没跑"与"跑了但坏了"是两句不同的话，处置也不同）
+   *
+   * @returns {Promise<{dbOk:boolean|null, dbError:string|null}>}
+   */
+  async #probeWeFlowDb() {
+    const now = Date.now()
+    if (this.#dbCache && now - this.#dbCache.at < WEFLOW_DB_PROBE_TTL_MS) {
+      return { dbOk: this.#dbCache.dbOk, dbError: this.#dbCache.dbError }
+    }
+    let token = ''
+    try { token = String(this.#tokenFn() || '').trim() } catch { token = '' }
+    let dbOk = false
+    let dbError = null
+    if (!token) {
+      // 连 token 都没有 ⇒ 一次请求都不发（那必然是 401），但**如实说读不到**。
+      dbError = '没配置 token（读不到库）'
+    } else {
+      try {
+        const r = await fetch(`${WEFLOW_DB_PROBE_URL}&access_token=${encodeURIComponent(token)}`,
+          { signal: AbortSignal.timeout(2500) })
+        if (r.status === 200) {
+          dbOk = true
+        } else {
+          // 错误体长这样：`{"error":"错误码: -101"}` ⇒ 只取那个码（界面要一句话说清）
+          let body = ''
+          try { body = String(await r.text()) } catch { /* 读不出响应体不影响判定：非 200 就是读不到 */ }
+          dbError = (/-?\d+/.exec(body) || [])[0] || `HTTP ${r.status}`
+        }
+      } catch (e) {
+        dbError = `请求失败：${String(e?.message ?? e).slice(0, 60)}`
+      }
+    }
+    this.#dbCache = { at: now, dbOk, dbError }
+    return { dbOk, dbError }
+  }
+
   /** 三段的实时状态。②段的细节从**中继自己**的状态口取（不猜）。 */
   async status() {
     const weflowUp = await this.isPortOpen('127.0.0.1', 5031).catch(() => false)
@@ -158,12 +237,19 @@ export class WechatChannel {
       } catch { relay = null }
     }
     const exe = this.resolveWeFlowExe()
-    // WeFlow 有两种"在"：端口通了（真的能读库）与进程在（可能还在启动/在登录界面）。
-    // 分开报，是因为"点了启动没反应"和"启动了但还没就绪"要给用户不同的话。
+    // WeFlow 有三种"在"（第三种是 2026-10-04 批 0 拆出来的），分开报是因为**处置完全不同**：
+    //   running=true           端口通
+    //   dbOk=true              而且**真的读得到库** —— 只有这一种能说"①段通了"
+    //   dbOk=false + dbError   端口通但读不到库（例如 -101）⇒ 收不到消息、发送也确认不了
+    //   （没在跑 ⇒ 不探，dbOk=null：`running=false` 已经把话说了）
+    // ⚠️ 旧的注释在这里写过"端口通了（真的能读库）"——那句话 2026-10-04 被实测证伪，别抄回来。
+    const db = weflowUp ? await this.#probeWeFlowDb() : { dbOk: null, dbError: null }
     const pids = weflowUp ? [] : this.findWeFlowPids()
     return {
       weflow: {
         running: weflowUp,
+        dbOk: db.dbOk,
+        dbError: db.dbError,
         port: 5031,
         pids,
         starting: !weflowUp && pids.length > 0,
