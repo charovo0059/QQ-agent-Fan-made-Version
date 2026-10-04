@@ -138,6 +138,16 @@ export const DEFAULT_CONFIG = {
     // 🆕 找图（`search_images`）单次运行的上限，与上面 maxPerRun **各算各的**：
     //    一次运行里"查出处的图"和"找新图"是两件事，两个都做是合理的。
     keywordMaxPerRun: 2,
+    // 🆕 2026-10-04（第四十对话 · 批 1，用户拍板 Q3）：插画路**默认允许 questionable**。
+    //    判定一律写 `=== false` —— 这是"默认开"的开关（写反的症状是"界面上没动过它却变成 safe"）。
+    //    ⚠️ 它只是**数据层的旋钮**：群聊 safe / 私聊随你这条**政策留在提示词里**（与 get_my_usage
+    //       那条"完全走提示词、代码不写死限制"同一取向）。关掉它的后果：rating 默认退回 safe。
+    allowQuestionable: true,
+    // 🆕 2026-10-04（第四十对话 · 批 1，用户拍板 Q4）：中文 → booru tag 的**配置扩展**。
+    //    映射型（`{"我的角色":"my_tag"}`），键**覆盖**内置种子的同名键 —— 与 `api.modelPrices`
+    //    的既有形状一致。⛔ 本轮不做界面（用户拍板"配置项越少越好"）：直接在 config.json 里加。
+    //    内置种子在 `src/web-search.js` 的 ILLUSTRATION_TAG_SEED（约 80 条常见角色/作品）。
+    extraTags: {},
     // 可选：SauceNAO 官方 API Key（注册 saucenao.com 账号免费获取）。
     // 填了走官方 JSON API（稳定、免费额度约 200 次/天）；留空走匿名网页抓取兜底。
     saucenaoApiKey: '',

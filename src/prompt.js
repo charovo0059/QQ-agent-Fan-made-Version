@@ -290,6 +290,23 @@ function qqSceneRules(platform) {
         : '- 找图不要滥用：没人对图表现出兴趣时不要找，更不要主动发图刷屏。',
       '- 【找图的边界】① 一次运行最多找 2 次（换关键词算新的那次）；② `send_image` 的 url **只能**用本轮 search_images 找回来的、或 get_message_images 刚看过的链接 —— 自己拼的、别处抄的会被直接拒绝；③ 一条图一条消息，不能配文字（想说话先 send_message）；④ 链接可能带防盗链/时效，发失败就换下一张，别对着同一张反复重试。'
     );
+    // 🆕 2026-10-04（第四十对话 · 批 1，方案 §2.7）：插画路（Safebooru）。
+    //   ⚠️ 只**追加**，⛔ 不改上面任何一句（既有句子的措辞有判据钉着）。
+    //   🔴 这几行住在 `qqSceneRules` 里，而它**不在**用户那 5 段覆盖清单里 ⇒ **QQ/微信两侧都生效**
+    //      （坑 161 的反面）。⚠️ 但用户**以后若给 `qqSceneRules` 写覆盖**，这几句会整段消失
+    //      —— 交付时必须提醒他一起粘过去。
+    lines.push(
+      '- 【找插画的图】要的是**角色 / 插画 / 动漫 / 同人**（尤其点名了角色或作品）⇒ search_images 给 kind=\'illustration\'，'
+        + 'tag 走**英文或罗马字**（hatsune_miku 这样，中文名内核会翻译）；要的是**现实里的东西**'
+        + '（风景、美食、工具、实物）⇒ kind=\'real\'；拿不准就不给 kind。'
+        + '插画路也能自己给 tags（多个，如 ["hatsune_miku","1girl"]）与 rating。',
+      '- 【插画的分级】rating 三档：safe=不加分级过滤（它的默认检索）/ questionable=只要擦边 / any=两者都可能。'
+        + '**群聊里用 safe，私聊随你**。⚠️ 结果里那条 rating 是**原站的词**：general 全年龄 / sensitive 轻擦边 / questionable 擦边；'
+        + 'Safebooru 上基本没有 explicit —— 真露骨的这条路给不了，搜不到就如实说。',
+      '- 【插画搜到之后】要发出去才算发（send_image，url 或 sampleUrl 都行，一条一张）。'
+        + '⚠️ size 里宽度或高度任一超过 3000、或 file_url 看着很大时**优先发 sampleUrl**（小图更稳）。'
+        + '⚠️ rating 如实标着（general / sensitive / questionable）：别把 questionable 的图发到群里。'
+    );
   }
   // ⚠️ 这句**不需要**平台分支：本函数对微信在开头就 `return wechatSceneRules()` 了，
   //    走不到这里。上一版我在这儿写了 `wx ? … : …`，而 `wx` 只存在于 toolProtocol 的作用域里

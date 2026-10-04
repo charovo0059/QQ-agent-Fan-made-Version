@@ -635,3 +635,301 @@ export async function searchImages(query, { limit = 8, browseLocked = false, max
   }
   throw new Error(`图片搜索全部失败 —— ${errors.join('；')}`);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 插画路：Safebooru（2026-10-04 第四十对话 · 批 1，方案 §2）
+//
+// ── 为什么是它、而不是 pixiv 直连 ────────────────────────────────────────
+// 用户拍板 A2：**先做能用的**（Safebooru，天花板 = questionable），真 R-18 那条路
+// （路线 C：本机直连 pixiv）依赖 `safeFetch` 的代理支持，是另一个改动点。
+//
+// ── 本机实测契约（探针：`_临时产物-第三十九对话\探-safebooru*.mjs`，别凭印象改）──
+//   · `GET /index.php?page=dapi&s=post&q=index&json=1&limit=N&tags=<空格分隔，整体 encodeURIComponent>`
+//   · 🔴 **查不到 ⇒ HTTP 200 + 空响应体**（不是 `[]`、也不报错）—— 不存在的 tag、
+//     `rating:explicit`、中文 tag 都是这个形态 ⇒ 解析器**必须把空体当"没有"**。
+//   · `rating` 与角色 tag 可以 AND（`hatsune_miku rating:questionable` ✔）；
+//     **默认检索不含 questionable** ⇒ `rating='any'` 要**发两次**再按 id 去重合并。
+//   · 排序是**伪 tag**（`sort:score:desc` 写在 tags 里才有效，`&sort=` 查询参数无效）。
+//   · `file_url` / `sample_url` / `preview_url` **我们自己都下得下来**（HTTP 206）⇒
+//     **搜索这条路不需要反代**。反代只对"别人贴的 i.pximg.net 链接"有用（见 onebot.js）。
+//   · `safebooru.org` **不在** `security.browseLock` 的域名白名单管辖范围内
+//     （`validateImageUrl` 不读它）⇒ 不需要改任何白名单。
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SAFEBOORU_ENDPOINT = 'https://safebooru.org/index.php';
+
+/**
+ * Safebooru 要的请求头。
+ * ⚠️ 实测（`探-safebooru契约要点4.mjs`）跑的是**浏览器 UA**；我们默认的 `qq-agent/1.0`
+ *    没有被验证过 —— 这里照实测那一套写，⛔ 别"顺手换成默认的"。
+ * 🔴 这两个头走的是 `safeFetch` 的**白名单覆盖**（`host`/`cookie` 永远不许覆盖）。
+ */
+const SAFEBOORU_HEADERS = {
+  'user-agent': IMAGE_UA,
+  accept: 'application/json,*/*'
+};
+
+/** 拼 Safebooru 的 dapi 地址（纯函数：抽出来才能单测"tag 真的编码了、rating 只加在第二次"）。 */
+export function safebooruSearchUrl(tags, { limit = 12 } = {}) {
+  const t = (Array.isArray(tags) ? tags : [tags])
+    .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
+  if (!t) throw new Error('插画搜索的 tag 为空');
+  const n = Math.max(1, Math.min(50, Number(limit) || 12));
+  return `${SAFEBOORU_ENDPOINT}?page=dapi&s=post&q=index&json=1&limit=${n}&tags=${encodeURIComponent(t)}`;
+}
+
+/**
+ * 从 `source` 里认出 pixiv 作品页 —— 没有就给空串。
+ *
+ * 两种形态都认（第二种是**主力**）：
+ *   ① `source` 直接写着 `pixiv.net/artworks/<id>`；
+ *   ② 🔴 `source` 是 `i.pximg.net/img-original/img/..../<作品id>_p<页码>.<ext>` ——
+ *      实测这是最常见的一类（抽样里 4/10 是 pximg），而它**不含 artworks**。
+ *      文件名前缀那个数字就是作品 id ⇒ 能直接拼出作品页（这就是方案要的"出处"）。
+ */
+export function pixivArtworkUrl(source) {
+  const s = String(source ?? '');
+  const m = /pixiv\.net\/(?:[a-z]{2}\/)?artworks\/(\d+)/i.exec(s);
+  if (m) return `https://www.pixiv.net/artworks/${m[1]}`;
+  const p = /i\.pximg\.net\/[^\s"']*?\/(\d+)_p\d+\.(?:jpg|jpeg|png|gif|webp)/i.exec(s);
+  return p ? `https://www.pixiv.net/artworks/${p[1]}` : '';
+}
+
+/**
+ * 解析 Safebooru 的 post 列表（**纯函数**）。
+ *
+ * 🔴 **空响应体 ⇒ 返回 `[]`，⛔ 不抛 JSON 解析异常**：实测"查不到"就是 200 + 空体
+ *    （不存在的 tag / `rating:explicit` / 中文 tag 全是这个形态）。第一版若直接
+ *    `JSON.parse('')`，症状是"翻一个不存在的角色就报错"，看着像网络问题。
+ */
+export function parseSafebooruImages(body, limit = 12) {
+  const max = Math.max(1, Math.min(50, Number(limit) || 12));
+  const text = String(body ?? '').trim();
+  if (!text) return [];
+  let arr;
+  try { arr = JSON.parse(text); } catch { throw new Error('Safebooru 返回的不是 JSON（可能改版或被拦）'); }
+  // ⚠️ 正常成功 = **JSON 数组**（实测 `limit=1` 也是长度 1 的数组）。别的形状（对象/字符串/null）
+  //    说明接口变了或被拦了 ⇒ **抛**，⛔ 不许静默折成"没找到"（本项目最忌"看着像没结果"）。
+  if (!Array.isArray(arr)) throw new Error('Safebooru 返回的不是 post 数组（可能改版或被拦）');
+  const out = [];
+  for (const p of arr) {
+    const url = String(p?.file_url ?? '').trim();
+    if (!/^https?:\/\//i.test(url)) continue;      // 没有可下载地址的条目直接跳过（不产出 undefined）
+    const source = String(p?.source ?? '').trim();
+    out.push({
+      url,
+      sampleUrl: String(p?.sample_url ?? '').trim(),
+      previewUrl: String(p?.preview_url ?? '').trim(),
+      rating: String(p?.rating ?? '').trim(),
+      size: (p?.width && p?.height) ? `${p.width}x${p.height}` : '',
+      source,
+      pageUrl: pixivArtworkUrl(source),
+      id: p?.id ?? null,
+      tags: String(p?.tags ?? '').trim()
+    });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/**
+ * 插画路搜索（Safebooru）。
+ *
+ * @param {object} o
+ * @param {string[]} o.tags 已校验过的 tag（至少一个）
+ * @param {'safe'|'questionable'|'any'} o.rating `any` = 默认一次 + `rating:questionable` 一次，按 id 去重合并
+ * @param {Function} [o.fetcher] **只为测试注入**（默认 `safeFetch`）
+ * @returns {Promise<Array>} 每条带 `url/sampleUrl/rating/size/source/pageUrl/title`
+ *
+ * ⚠️ 空体（= 这个 tag 没图）**不抛错**，返回 `[]` —— 由调用方给"换 tag"的话；
+ *    只有**请求本身失败**（网络/非 JSON）才抛。
+ */
+export async function safebooruImageSearch(query, {
+  tags = [], rating = 'any', limit = 8, browseLocked = false,
+  maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch
+} = {}) {
+  const base = (Array.isArray(tags) ? tags : [tags]).map((x) => String(x ?? '').trim()).filter(Boolean);
+  if (!base.length) throw new Error('插画搜索缺少 tag');
+  const n = Math.max(1, Math.min(12, Number(limit) || 8));
+  // 🔴 实测：默认检索**不含** questionable，所以 'any' 必须发两次（第二次才加 rating 标签）。
+  const rounds = rating === 'any' ? [base, [...base, 'rating:questionable']]
+    : rating === 'questionable' ? [[...base, 'rating:questionable']]
+      : [base];
+  const out = [];
+  const seen = new Set();
+  const errors = [];
+  for (const round of rounds) {
+    try {
+      const { body } = await fetcher(safebooruSearchUrl(round, { limit: n }), { browseLocked, maxBytes, headers: SAFEBOORU_HEADERS });
+      for (const it of parseSafebooruImages(body, n)) {
+        if (seen.has(it.url)) continue;             // 两轮之间按地址去重（同一个 post 可能两边都出现）
+        seen.add(it.url);
+        out.push(it);
+      }
+    } catch (error) {
+      errors.push(String(error?.message ?? error));
+    }
+  }
+  if (!out.length && errors.length) throw new Error(`Safebooru 搜索失败 —— ${errors.join('；')}`);
+  return out.slice(0, n).map((it) => ({ ...it, title: String(query ?? '').trim() }));
+}
+
+// ── 中文 → booru tag 的词典（内置种子 + 配置扩展）─────────────────────────
+//
+// **为什么必须有它**：bing/百度吃中文，而 booru 的 tag 是英文/罗马字。
+// 实测 `tags=初音未来` ⇒ **空响应体**（不是 []）。所以"中文问一句角色名"必须翻译。
+// ⚠️ 只做**确定性映射**（不猜、不调模型）：映射不到的候选 tag 会**逐个打接口校验**
+//    （空体 = 这个 tag 没有图），所以词典里写歪一条的后果只是"那一条不生效"，不会造假。
+// 配置扩展 `imageSearch.extraTags`（映射型）的键**覆盖**内置的同名键 —— 与
+// `api.modelPrices` 的既有形状一致。
+const ILLUSTRATION_TAG_SEED = {
+  // ── VOCALOID / 中文圈常见 ──
+  初音未来: 'hatsune_miku', 初音: 'hatsune_miku', miku: 'hatsune_miku',
+  镜音铃: 'kagamine_rin', 镜音连: 'kagamine_len', 巡音露卡: 'megurine_luka', 洛天依: 'luo_tianyi',
+  // ── 东方 Project ──
+  博丽灵梦: 'hakurei_reimu', 雾雨魔理沙: 'kirisame_marisa', 十六夜咲夜: 'izayoi_sakuya',
+  芙兰朵露: 'flandre_scarlet', 蕾米莉亚: 'remilia_scarlet', 帕秋莉: 'patchouli_knowledge',
+  八云紫: 'yakumo_yukari', 魂魄妖梦: 'konpaku_youmu', 琪露诺: 'cirno', 东风谷早苗: 'kochiya_sanae',
+  古明地恋: 'komeiji_koishi', 古明地觉: 'komeiji_satori', 藤原妹红: 'fujiwara_no_mokou',
+  蓬莱山辉夜: 'houraisan_kaguya', 西行寺幽幽子: 'saigyouji_yuyuko', 铃仙: 'reisen_udongein_inaba',
+  射命丸文: 'shameimaru_aya', 四季映姬: 'shiki_eiki', 比那名居天子: 'hinanawi_tenshi',
+  八坂神奈子: 'yasaka_kanako', 洩矢诹访子: 'moriya_suwako', 伊吹萃香: 'ibuki_suika',
+  秦心: 'hata_no_kokoro', 鬼人正邪: 'kijin_seija',
+  东方: 'touhou', 东方project: 'touhou', 东方红魔乡: 'touhou',
+  // ── 原神 / 崩坏 / 其他手游 ──
+  原神: 'genshin_impact', 钟离: 'zhongli_(genshin_impact)', 胡桃: 'hu_tao_(genshin_impact)',
+  甘雨: 'ganyu_(genshin_impact)', 刻晴: 'keqing_(genshin_impact)', 可莉: 'klee_(genshin_impact)',
+  雷电将军: 'raiden_shogun', 派蒙: 'paimon_(genshin_impact)', 荧: 'lumine_(genshin_impact)',
+  神里绫华: 'kamisato_ayaka', 八重神子: 'yae_miko',
+  崩坏3: 'honkai_impact_3rd', 琪亚娜: 'kiana_kaslana', 雷电芽衣: 'raiden_mei',
+  明日方舟: 'arknights', 蔚蓝档案: 'blue_archive', 碧蓝档案: 'blue_archive',
+  碧蓝航线: 'azur_lane', 少女前线: 'girls\'_frontline', 舰队collection: 'kantai_collection',
+  公主连结: 'princess_connect!', 赛马娘: 'uma_musume_pretty_derby',
+  偶像大师: 'idolmaster', lovelive: 'love_live!',
+  // ── 动画 / 漫画 ──
+  火影忍者: 'naruto', 漩涡鸣人: 'uzumaki_naruto', 春野樱: 'haruno_sakura', 日向雏田: 'hyuuga_hinata',
+  旗木卡卡西: 'hatake_kakashi', 宇智波鼬: 'uchiha_itachi',
+  海贼王: 'one_piece', 航海王: 'one_piece', 娜美: 'nami_(one_piece)', 索隆: 'roronoa_zoro',
+  罗宾: 'nico_robin', 汉库克: 'boa_hancock',
+  死神: 'bleach', 黑崎一护: 'kurosaki_ichigo', 朽木露琪亚: 'kuchiki_rukia',
+  银魂: 'gintama', 坂田银时: 'sakata_gintoki',
+  名侦探柯南: 'detective_conan', 灰原哀: 'haibara_ai', 毛利兰: 'mouri_ran',
+  进击的巨人: 'shingeki_no_kyojin', 鬼灭之刃: 'kimetsu_no_yaiba', 咒术回战: 'jujutsu_kaisen',
+  间谍过家家: 'spy_x_family', 孤独摇滚: 'bocchi_the_rock!', 葬送的芙莉莲: 'sousou_no_frieren',
+  轻音少女: 'k-on!', 凉宫春日: 'suzumiya_haruhi_no_yuuutsu', 长门有希: 'nagato_yui',
+  冰菓: 'hyouka', 千反田爱瑠: 'chitanda_eru',
+  我的青春恋爱物语果然有问题: 'yahari_ore_no_seishun_love_come_wa_machigatteiru',
+  雪之下雪乃: 'yukinoshita_yukino', 由比滨结衣: 'yuigahama_yui', 一色彩羽: 'isshiki_iroha',
+  辉夜大小姐想让我告白: 'kaguya-sama_wa_kokurasetai', 四宫辉夜: 'shinomiya_kaguya',
+  藤原千花: 'fujiwara_chika', 白银御行: 'shirogane_miyuki',
+  从零开始的异世界生活: 're:zero_kara_hajimeru_isekai_seikatsu', re0: 're:zero_kara_hajimeru_isekai_seikatsu',
+  雷姆: 'rem_(re:zero)', 拉姆: 'ram_(re:zero)', 艾米莉娅: 'emilia_(re:zero)',
+  为美好的世界献上祝福: 'kono_subarashii_sekai_ni_shukufuku_wo!', 阿库娅: 'aqua_(konosuba)',
+  惠惠: 'megumin', 达克妮斯: 'darkness_(konosuba)',
+  fate: 'fate_(series)', 阿尔托莉雅: 'artoria_pendragon', saber: 'artoria_pendragon',
+  远坂凛: 'tohsaka_rin', 间桐樱: 'matou_sakura', 尼禄: 'nero_claudius', 玉藻前: 'tamamo_no_mae',
+  玛修: 'mash_kyrielight', 贞德: 'jeanne_d\'arc_(fate)', 冲田总司: 'okita_souji',
+  斯卡哈: 'scathach_(fate)', 阿斯托尔福: 'astolfo_(fate)',
+  新世纪福音战士: 'neon_genesis_evangelion', eva: 'neon_genesis_evangelion',
+  魔法少女小圆: 'mahou_shoujo_madoka_magica', 某科学的超电磁炮: 'toaru_kagaku_no_railgun',
+  你的名字: 'kimi_no_na_wa', 天气之子: 'tenki_no_ko', 千与千寻: 'sen_to_chihiro_no_kamikakushi',
+  龙猫: 'tonari_no_totoro',
+  宝可梦: 'pokemon', 精灵宝可梦: 'pokemon', 宠物小精灵: 'pokemon',
+  刀剑神域: 'sword_art_online', 亚丝娜: 'yuuki_asuna',
+  // ── 常见 tag / 题材（她可能直接这么问）──
+  猫娘: 'catgirl', 女仆: 'maid', 泳装: 'swimsuit', 和服: 'kimono', 校服: 'school_uniform',
+  兔女郎: 'bunny_girl', 兽耳: 'animal_ears', 双马尾: 'twintails', 长发: 'long_hair',
+  短发: 'short_hair', 银发: 'silver_hair', 金发: 'blonde', 黑发: 'black_hair', 白发: 'white_hair',
+  蓝发: 'blue_hair', 粉发: 'pink_hair', 红发: 'red_hair',
+  风景: 'scenery', 天空: 'sky', 樱花: 'cherry_blossoms', 星空: 'starry_sky'
+};
+
+/**
+ * 归一化成 booru tag：小写、空格→下划线、全角括号→半角、剔掉非法字符。
+ * ⚠️ 保留 `:`（`rating:questionable` / `sort:score:desc` 要用）与 `-`、`_`、`.`、`(`、`)`。
+ * 中文会被整段剔掉 ⇒ 返回空串（调用方据此放弃这个候选、而不是拿中文去打接口白跑一次）。
+ */
+export function normalizeBooruTag(s) {
+  return String(s ?? '')
+    .trim().toLowerCase()
+    .replace(/（/g, '(').replace(/）/g, ')')
+    .replace(/\s+/g, '_')
+    .replace(/\s*\(\s*/g, '(').replace(/\s*\)\s*/g, ')')
+    .replace(/[^a-z0-9_()\-.:]/g, '')
+    .replace(/\(\)/g, '')                 // 整段中文被剔掉后可能只剩一对空括号 ⇒ 那不是 tag
+    .replace(/_{2,}/g, '_')
+    .replace(/^[_.]+|[_.]+$/g, '');
+}
+
+/**
+ * 把一句话（可能带角色名）翻成**一串候选 tag**，按优先级排（调用方只校验前几个）。
+ *
+ * 顺序：① 显式给的 `tags` → ② 整串精确命中词典 → ③ 词典键出现在句子里（长的优先）
+ *      → ④ 整串本身归一化（英文/罗马字的情形，如 `hatsune_miku`）。
+ * @param {object} [o.extraTags] 配置扩展（`imageSearch.extraTags`），键覆盖内置同名键
+ */
+export function illustrationTagCandidates(query, { tags = [], extraTags = {} } = {}) {
+  const dict = { ...ILLUSTRATION_TAG_SEED };
+  for (const [k, v] of Object.entries(extraTags || {})) {
+    const key = String(k ?? '').trim().toLowerCase();
+    const val = normalizeBooruTag(v);
+    if (key && val) dict[key] = val;
+  }
+  const out = [];
+  const push = (t) => {
+    const v = normalizeBooruTag(t);
+    if (v && !out.includes(v)) out.push(v);
+  };
+  for (const t of Array.isArray(tags) ? tags : []) push(t);
+  const ql = String(query ?? '').trim().toLowerCase();
+  if (dict[ql]) push(dict[ql]);
+  const keys = Object.keys(dict).filter((k) => k && ql.includes(k)).sort((a, b) => b.length - a.length);
+  for (const k of keys) push(dict[k]);
+  push(query);
+  return out;
+}
+
+/**
+ * 插画路的完整编排：候选 tag → **逐个校验**（空体 = 这个 tag 没有图）→ 取第一个真的有图的搜。
+ *
+ * 为什么要"校验"这一步（实测口径）：词典映射不到的候选（中文、拼错的罗马字）打过去
+ * 一律是**空响应体**。不校验的话她会拿到一句干巴巴的"没找到"，而**校验过之后**我们能
+ * 明确告诉她"按 tag 搜不到，请用罗马字"（方案 §2.4③）。
+ *
+ * @param {object} o
+ * @param {number} [o.maxProbe] 每次调用最多校验几个候选（默认 4，方案 §2.4②）
+ * @param {Map}    [o.cache]   **本次运行内**的 tag→有无图 缓存（挂在 ctx 上，见 tools.js）
+ * @param {Function} [o.fetcher] / [o.prober] **只为测试注入**
+ * @returns {Promise<{ok:boolean, reason?:string, tag?:string, tried:string[], list?:Array}>}
+ *   `reason`：`no-candidate`（一个候选都提不出来）/ `no-tag`（都校验不过）—— 都不抛错，
+ *   由调用方翻译成给她看的话。
+ */
+export async function illustrationSearch(query, {
+  tags = [], extraTags = {}, rating = 'any', limit = 8, maxProbe = 4,
+  cache = null, browseLocked = false, maxBytes = IMAGE_SEARCH_MAX_BYTES,
+  fetcher = safeFetch, prober = null
+} = {}) {
+  const candidates = illustrationTagCandidates(query, { tags, extraTags });
+  if (!candidates.length) return { ok: false, reason: 'no-candidate', tried: [] };
+  const probe = prober || (async (t) => {
+    const { body } = await fetcher(safebooruSearchUrl([t], { limit: 1 }), { browseLocked, maxBytes, headers: SAFEBOORU_HEADERS });
+    return parseSafebooruImages(body, 1).length > 0;
+  });
+  const tried = [];
+  let hit = '';
+  for (const t of candidates.slice(0, Math.max(1, Number(maxProbe) || 4))) {
+    tried.push(t);
+    let okTag;
+    if (cache instanceof Map && cache.has(t)) {
+      okTag = cache.get(t);
+    } else {
+      // ⚠️ 校验时**网络失败要抛**（别把"网断了"说成"没这个 tag"），由调用方如实转述。
+      okTag = await probe(t);
+      if (cache instanceof Map) cache.set(t, !!okTag);
+    }
+    if (okTag) { hit = t; break; }
+  }
+  if (!hit) return { ok: false, reason: 'no-tag', tried };
+  const list = await safebooruImageSearch(query, { tags: [hit], rating, limit, browseLocked, maxBytes, fetcher });
+  return { ok: true, tag: hit, tried, list };
+}

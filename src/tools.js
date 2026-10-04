@@ -13,7 +13,7 @@ import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes } from './u
 import { estimateCost, cacheHitRate, resolveApiKey } from './llm.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { webSearch, webFetch, searchImages } from './web-search.js';
+import { webSearch, webFetch, searchImages, illustrationSearch } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
@@ -521,6 +521,29 @@ function rememberImageUrls(ctx, urls) {
     const s = String(u || '').trim();
     if (s) set.add(s);
   }
+}
+
+/**
+ * 插画路的结果组装 + **URL 登记**（2026-10-04 第四十对话 · 批 1）。
+ *
+ * 为什么抽成一个函数：`send_image` 只肯发"本轮见过"的地址，而插画路每条结果有
+ * **两个**可发地址（`url` 大图 / `sampleUrl` 小图）—— 漏登记任何一个，她一发就是
+ * "这个链接不是本轮你自己找回来/看到过的图片，已拒绝发送"（**症状很像搜索坏了**）。
+ * ⚠️ 抽出来还为了能**离线单测**这条登记：真跑一次要联网，还要白花搜索额度。
+ */
+export function illustrationImagesFor(ctx, list) {
+  const rows = Array.isArray(list) ? list : [];
+  rememberImageUrls(ctx, rows.flatMap((x) => [x?.url, x?.sampleUrl]));
+  return rows.map((x, i) => ({
+    n: i + 1,
+    url: x?.url ?? '',
+    ...(x?.sampleUrl ? { sampleUrl: x.sampleUrl } : {}),
+    ...(x?.rating ? { rating: x.rating } : {}),
+    ...(x?.size ? { size: x.size } : {}),
+    ...(x?.source ? { source: x.source } : {}),
+    ...(x?.pageUrl ? { pageUrl: x.pageUrl } : {}),
+    title: x?.title ?? ''
+  }));
 }
 
 /**
@@ -1193,12 +1216,32 @@ export function buildToolDefs() {
         + '⚠️ 与 search_image_source **不是一回事**：那个是"给你一张图、查它出自哪"；这个是"给一句话、找图"。'
         + '⚠️ 只在**有人明确要图**时才用（"来张图""发张看看""给我找张 XX 的图"）。'
         + '没人要图就别主动找 —— 更不要找完自己发出去。想给图就先用 send_image 发出去（链接单独贴出来没用）。'
-        + '找不到合适的图就如实说"没找到合适的"，不要拿不相干的图凑数。',
+        + '找不到合适的图就如实说"没找到合适的"，不要拿不相干的图凑数。'
+        + '【kind 怎么给】要**角色/插画/动漫/同人**（尤其点名了角色或作品）⇒ kind=\'illustration\'；'
+        + '要**现实里的东西**（风景、美食、工具、实物）⇒ kind=\'real\'；拿不准就不给（走默认那条路）。'
+        + '插画路的 tag 是**英文/罗马字**（hatsune_miku 这样），中文名由内核的词典翻译；'
+        + '也可以自己给 tags（多个，如 ["hatsune_miku","1girl"]）与 rating（safe/questionable/any）。',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: '搜索关键词（一句话，别塞整段聊天记录）' },
-          limit: { type: 'integer', description: '最多要几张，默认 6，上限 12' }
+          limit: { type: 'integer', description: '最多要几张，默认 6，上限 12' },
+          kind: {
+            type: 'string',
+            enum: ['auto', 'illustration', 'real'],
+            description: 'auto（默认）=原来的路；illustration=插画/角色（Safebooru，tag 用罗马字）；real=现实里的东西'
+          },
+          tags: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '可选，仅插画路用：自己指定的 tag（英文/罗马字，多个）。填了会优先用它们。'
+          },
+          rating: {
+            type: 'string',
+            enum: ['safe', 'questionable', 'any'],
+            description: '可选，仅插画路用：safe=只要全年龄；questionable=只要擦边；any=两者都可能有（默认）。'
+              + '⚠️ 群里请用 safe。'
+          }
         },
         required: ['query']
       },
@@ -1217,8 +1260,58 @@ export function buildToolDefs() {
             return err('这次没有人要图 —— 没人说"来张图""发张看看"这类话。'
               + '不要主动找图：正常聊天就好。如果你觉得确实该给，先用 send_message 问一句"要我找张图吗"，等对方同意再找。');
           }
+          // ⚠️ 计数器**只有这一个**（`__keywordImageCalls`）：插画路与老路**共用同一份额度**
+          //    （两条路都属于"找图"这件事，各算各的会让上限形同虚设）。
           ctx.__keywordImageCalls = used + 1;
           const limit = Math.max(1, Math.min(12, Number(args.limit) || 6));
+          const kind = String(args.kind ?? 'auto').trim().toLowerCase();
+
+          // ── 插画路（2026-10-04 第四十对话 · 批 1，方案 §2）────────────────
+          if (kind === 'illustration') {
+            const rating = ['safe', 'questionable', 'any'].includes(String(args.rating ?? '').toLowerCase())
+              ? String(args.rating).toLowerCase()
+              // 默认值由配置决定（用户拍板 Q3：允许 questionable ⇒ 默认 any）。
+              // ⚠️ 判定用 `=== false`：这是"默认开"的开关，⛔ 别写反。
+              : (cfg.allowQuestionable === false ? 'safe' : 'any');
+            // tag→有没有图 的缓存在**本次运行内**（ctx 上）：同一轮里重复问同一个角色不重复打接口。
+            if (!(ctx.__tagProbeCache instanceof Map)) ctx.__tagProbeCache = new Map();
+            const r = await illustrationSearch(q, {
+              tags: Array.isArray(args.tags) ? args.tags : [],
+              extraTags: cfg.extraTags || {},
+              rating,
+              limit,
+              cache: ctx.__tagProbeCache
+            });
+            if (!r.ok) {
+              // 两种"没结果"分开说：一个候选都提不出来（多半是中文）vs 候选都校验不过。
+              // 共同点：⛔ 绝不拿不相干的图凑数（用已有的 baidu/bing 结果顶上会污染"插画"这个语义）。
+              return err(`插画路按 tag 没搜到「${q}」。booru 站的 tag 是**英文/罗马字**：`
+                + '试试用罗马字（比如 hatsune_miku）或英文作品名再来一次，'
+                + '也可以自己给 tags 参数（比如 ["hatsune_miku","1girl"]）。'
+                + `（我试过：${r.tried.length ? r.tried.join('、') : '一个能用的候选都没提出来'}）`
+                + '⛔ 别拿不相干的图凑数。');
+            }
+            if (!r.list.length) {
+              return err(`插画路搜到 tag「${r.tag}」但这次没有返回图片，换个更常见的角色/作品名再试（英文或罗马字）。`
+                + '⛔ 别拿不相干的图凑数。');
+            }
+            const images = illustrationImagesFor(ctx, r.list);
+            return ok({
+              query: q,
+              kind: 'illustration',
+              tag: r.tag,
+              count: images.length,
+              images,
+              tip: '要发给群友就用 send_image 传上面的 url 或 sampleUrl（一条一张）。'
+                + '⚠️ size 里宽度或高度任一超过 3000、或 file_url 看着很大时，**优先发 sampleUrl**（小图更稳）。'
+                + '⚠️ rating 如实标了**原站的分级词**（general=全年龄 / sensitive=轻擦边 / questionable=擦边；'
+                // ⚠️ 这几档是原站的**单词**，不是 s/q/e（2026-10-04 真机实测：返回的是 `general`）。
+                //    第一版照 gelbooru 的字母写 ⇒ 属"照印象写文案"，判据抓不到，是真跑一次才发现。
+                + 'Safebooru 上基本没有 explicit）——别把 questionable 的图发到群里。'
+            });
+          }
+
+          // ── 老路（auto / real：百度在前、必应兜底）────────────────────────
           const list = await searchImages(q, { limit });
           if (!list.length) return err(`"${q}" 没找到图片，换个说法再试一次。`);
           // 登记进"见过的图片地址" ⇒ 之后 send_image 才允许发这几种链接
