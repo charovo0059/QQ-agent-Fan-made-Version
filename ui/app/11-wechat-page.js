@@ -189,15 +189,23 @@ function renderWechatStatus(st) {
   const w = st.weflow || {}, c = st.channel || {}, a = st.agent || {};
 
   // ── 三段的"通没通"判据（**只在这里定义一次**）──────────────────────────
-  // ⚠️ WeFlow 有两种"在"，方案也点到了：端口通 = 真能读库；只有进程 = 还在加载/停在登录页。
-  //    这两个状态的处置完全不同，混成一句话会让用户白等。
-  const s1 = !!w.running;
+  // 🔴 2026-10-04（第四十对话 · 批 0，方案 §8.5）：这里原来写着"端口通 = 真能读库"——
+  //    **那句话被实测证伪了**：WeFlow 的数据组件挂掉时端口照样通、`/api/v1/health` 还是 200，
+  //    而读库接口全 500 `{"error":"错误码: -101"}`（复测：`_临时产物-第三十六对话\探-WeFlow读库通不通.mjs`
+  //    读数 0/3）。旧判据只看 `running` ⇒ 三个圆点全绿（**假绿**），真相是"消息收不到、发送也确认不了"。
+  // ⇒ 第①段现在要**两个都成立**：端口通（running）**且**后端没探到"读不到库"（dbOk !== false）。
+  //    ⚠️ 写成 `!== false`（不是 `=== true`）是刻意的、也是后端契约：`dbOk` 只有三种值 ——
+  //      `true`（探到 200）/`false`（探到非 200 或没 token）/`null`（WeFlow 没在跑，不探）。
+  //      项目口径是"**有证据才拦**"：字段缺失/未知时不许自己把红点亮起来（那种"宁可错杀"会变成新的假红）。
+  const s1 = !!w.running && w.dbOk !== false;
   const s2 = !!(c.running && c.bridgeConnected);
   const s3 = !!(a.enabled && a.connected && a.bridgeConnected !== false);
   const allOk = s1 && s2 && s3;
 
   // ── 聚合徽标：三段全通才绿，断开则**指出哪段**（方案要求）───────────────
-  const broken = [s1 ? null : 'WeFlow', s2 ? null : '通道', s3 ? null : '我的链路'].filter(Boolean);
+  // ⚠️ "地址对但不通"要说清是**哪一种**不通：WeFlow 那段故障时端口是通的，
+  //    只写个"未连通：WeFlow"会让人去查端口/查进程（那儿没事），实际坏在它读不到库。
+  const broken = [s1 ? null : (w.running ? 'WeFlow（读不到库）' : 'WeFlow'), s2 ? null : '通道', s3 ? null : '我的链路'].filter(Boolean);
   const aggBadge = allOk
     ? statusBadge('ok', '链路已连通')
     : statusBadge('err', `未连通：${broken.join(' / ')}`);
@@ -222,11 +230,17 @@ function renderWechatStatus(st) {
   ];
 
   // ── 三段分步器：启停是**段内两态开关**（方案要求）────────────────────────
-  const step1Desc = s1
-    ? `在跑（端口 ${w.port || 5031} 已通）`
-    : (w.starting
+  // 🔴 第①段的话分**三种**（2026-10-04 批 0，方案 §8.5）：没在跑 / 端口通但读不到库 / 都好。
+  //    中间那种是本次要治的"假绿"：必须把"端口通、但读不到库（-101）"**原样说出来**，
+  //    并说明后果（收不到、确认不了），否则用户会一直在端口/进程上找原因。
+  const step1Desc = !w.running
+    ? (w.starting
       ? `进程在（pid ${(w.pids || []).join(',')}），但端口 ${w.port || 5031} 还没通 —— 它可能还在加载，或停在登录/选数据的界面`
-      : '没在跑。WeFlow 是第三方应用，我们只能替你点一下火。');
+      : '没在跑。WeFlow 是第三方应用，我们只能替你点一下火。')
+    : (w.dbOk === false
+      ? `端口通、但读不到库（${w.dbError || '未知原因'}）—— 微信消息收不到，发出去也无法确认。`
+        + '坏的是它自己的数据组件（不归我们管，重启通常也没用）；这一层没修好之前，这一页下面两段再绿也不算通。'
+      : `在跑（端口 ${w.port || 5031} 已通${w.dbOk === true ? '，读库正常' : ''}）`);
   const step2Desc = !c.running
     ? '中继没在跑。'
     : (!c.bridgeConnected
@@ -240,8 +254,11 @@ function renderWechatStatus(st) {
     {
       title: 'WeFlow', note: '（读微信本地库、推新消息）',
       desc: step1Desc, state: s1 ? 'done' : 'active',
-      actionHtml: s1
-        ? `<button class="btn btn-small" id="wx-weflow-btn" title="已经通了；再点一次会尝试重新拉起">重启</button>`
+      // ⚠️ 按钮看的是 `w.running`（**不是** s1）：它已经在跑的时候不该给一个写着「启动 WeFlow」的按钮
+      //    —— 那正是"按钮没干它写着的事"。读不到库时按钮仍是「重启」（点它通常也没用，
+      //    所以 desc 已经把"不归我们管"说了）。
+      actionHtml: w.running
+        ? `<button class="btn btn-small" id="wx-weflow-btn" title="已经在跑；再点一次会尝试重新拉起（它读不到库时，重启通常也没用）">重启</button>`
         : `<button class="btn btn-small btn-primary" id="wx-weflow-btn" title="WeFlow 是第三方应用，我们只能替你点一下火">启动 WeFlow</button>`,
     },
     {
@@ -372,7 +389,11 @@ function bindWechatPageEvents() {
       const st2 = state.wechatStatus || {}
       const w2 = st2.weflow || {}, c2 = st2.channel || {}
       const txt = [
-        `WeFlow 端口：${w2.port || 5031}（${w2.running ? '通' : (w2.starting ? '进程在但端口未通' : '未运行')}）`,
+        // ⚠️ 这一行是"贴给别人看"的排查文本，**最容易假绿**：端口通就写"通"，而对方据此
+        //    以为读库也没问题（正是本次治的病）。⇒ 读不到库时把状态与错误码一起写出来。
+        `WeFlow 端口：${w2.port || 5031}（${w2.running
+          ? (w2.dbOk === false ? `通，但读不到库（${w2.dbError || '未知原因'}）` : (w2.dbOk === true ? '通，读库正常' : '通'))
+          : (w2.starting ? '进程在但端口未通' : '未运行')}）`,
         `WeFlow 程序：${w2.exe || '（没找到）'}`,
         `中继 + Bridge：${c2.running ? '中继在跑' : '未运行'}${c2.bridgeConnected ? '，Bridge 已连入' : '，Bridge 未连入'}`,
         `通道进程 pid：${st2.managed?.pid ?? '（不是本应用拉起的）'}`,
