@@ -508,6 +508,45 @@ export function annotateMagnetLinks(text) {
   });
 }
 
+/**
+ * pixiv 图链的反代地址（**纯函数、不出网**）—— 2026-10-04 第四十对话 · 批 1。
+ *
+ * 起因：群里有人贴 `https://i.pximg.net/...` 的图链时，那条链接**必然超时失败**
+ *   （pximg 有防盗链，要 Referer）。实测 `i.pixiv.re` 这个反代能下（HTTP 206，
+ *   带 Referer 更快但**不带也通**，尺寸与 source 一致）。
+ *
+ * ⚠️ 只换 **host**：路径与查询**逐字保留**。⛔ 不用 `new URL()` 拼回去 —— 它会对
+ *    路径做一遍百分号编码，把"逐字保留"变成"大多数时候保留"（那种模糊的保证没法判据）。
+ *
+ * @returns {string} 反代地址；不是 `i.pximg.net` 的链接返回空串（原样不动）
+ */
+export function pixivProxyUrl(url) {
+  const m = /^https?:\/\/i\.pximg\.net(\/[^\s]*)?$/i.exec(String(url ?? '').trim());
+  return m ? `https://i.pixiv.re${m[1] || ''}` : '';
+}
+
+/**
+ * 把文本里出现的 pixiv 图链各追加一句「（可用地址：…）」（见 `pixivProxyUrl`）。
+ *
+ * ⛔ 三条边界（与 `annotateMagnetLinks` 完全一致，别越界）：
+ *   ① **绝不联网**（只做字符串替换）；
+ *   ② **不删改原链接**（原地追加，群友的原话一字不动）；
+ *   ③ 只在**认出是 pximg** 时才出声，别的链接一个字都不碰。
+ *
+ * 🔴 这**不是**"她就能发这张图了"（用户拍板 Q2=B1）：`send_image` 有一条既有的安全边界
+ *    ——只肯发"本轮她真的见过"的地址（由 `search_images`/`get_message_images` 登记），
+ *    而入站贴来的链接**不在那里面** ⇒ 她那轮仍发不出去。这条注释写在这儿，是为了下一个人
+ *    别把"看见了可用地址"误读成"这条路已经通了"（要真通得动那条安全边界，是 Q2-B2）。
+ */
+export function annotatePixivLinks(text) {
+  const s = String(text ?? '');
+  if (!/i\.pximg\.net\//i.test(s)) return s;
+  return s.replace(/https?:\/\/i\.pximg\.net\/[^\s"'<>（）()【】「」，。；、]+/gi, (raw) => {
+    const proxy = pixivProxyUrl(raw);
+    return proxy ? `${raw}（可用地址：${proxy}）` : raw;
+  });
+}
+
 
 export function forwardIdFromData(d) {
   const raw = d?.id ?? d?.res_id ?? d?.forward_id ?? d?.data_id;
@@ -622,7 +661,8 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
   // 🆕 2026-10-03（第三十八对话，提案 0f6288a1 的零依赖版）：磁力链接顺手补上「名字 + 总大小」。
   //    ⚠️ 顺序有意：**先注解、再 sanitize** —— 注解里的名字是从链接里解出来的**用户可控文本**，
   //      它必须和别处的用户文本走同一条消毒（防 `[系统]` 之类伪装）。
-  return sanitizeUserText(annotateMagnetLinks(out.join('').trim()));
+  // 🆕 2026-10-04（第四十对话 · 批 1）：pixiv 图链顺手补一句「可用地址」（反代）——同样先注解再消毒。
+  return sanitizeUserText(annotatePixivLinks(annotateMagnetLinks(out.join('').trim())));
 }
 
 /** 从消息段提取媒体定位信息（不下载）。 */
