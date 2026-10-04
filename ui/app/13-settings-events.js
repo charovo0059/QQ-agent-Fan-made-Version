@@ -162,6 +162,45 @@ function bindSettingsEvents(c) {
     }
   });
 
+  // 🆕 2026-10-04（第四十一对话 · 内置代理批 A）：「设置 → 网络」的「测试连接」。
+  //
+  // 🔴 两个**必须**遵守的点（都有踩过的教训）：
+  //   ① 它写的是**沙箱配置**（只改内存、不落盘），而且**测完立刻 `loadSettings()`**：
+  //      否则"界面上未保存的值"会留在 DOM 里，用户之后一次正常的「保存设置」
+  //      就会把它写进线上配置（交接 §1 第 18 条那一族）。
+  //   ② 后端测的是 **`safeFetch` 本体**（她平时联网走的那条路），不是渲染进程的 fetch
+  //      —— 所以它报"通"才真的是通（见 src/app.js 的 /api/proxy/test 注释）。
+  $('#proxy-test-btn')?.addEventListener('click', async () => {
+    const hint = $('#proxy-test-result');
+    const setHint = (t) => { if (hint) hint.textContent = t; };
+    const mode = ($('#cfg-proxy-mode')?.value || 'off') === 'byRule' ? 'byRule' : 'off';
+    if (mode !== 'byRule') { setHint('先选「按规则走代理」再测。'); return; }
+    const addr = String($('#cfg-proxy-addr')?.value || '').trim();
+    if (!addr) { setHint('先把代理地址填上（一般是 127.0.0.1）。'); return; }
+    const portNum = Math.round(Number($('#cfg-proxy-port')?.value || 3067));
+    const port = Number.isFinite(portNum) ? Math.min(65535, Math.max(1, portNum)) : 3067;
+    const rules = String($('#cfg-proxy-rules')?.value || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    const user = String($('#cfg-proxy-user')?.value || '').trim();
+    // 🔴 **不把密码发出去**（见 src/app.js /api/proxy/test 的注释）：后端只认已存的那份。
+    //    ⇒ 这里连读都不读它 —— "占位符 ****** 被当成真密码发过去"这个坑在结构上不可能发生。
+    const body = { mode, http: `http://${addr}:${port}`, user, rules };
+    setHint('测试中…（最多约 20 秒）');
+    try {
+      const r = await api('/api/proxy/test', { method: 'POST', body: JSON.stringify(body) });
+      if (r.ok) setHint(`✓ 通了（HTTP ${r.status}，${r.ms}ms）—— 目标：${r.url || 'pixiv'}`);
+      else setHint(`✗ 不通：${r.error || '未知原因'}`);
+    } catch (e) {
+      setHint(`✗ 测试请求本身失败：${e.message}`);
+    } finally {
+      // 见纪律①：无论成败都从服务端重新加载一次，抹掉这次留下的沙箱值。
+      // ⚠️ 这一步会把"测试中…"那句结论也一起刷掉（因为整块重渲染）—— 所以先把它记下来再补回去。
+      const shown = hint ? hint.textContent : '';
+      try { await loadSettings(); } catch { /* ignore */ }
+      const after = $('#proxy-test-result');
+      if (after && shown) after.textContent = shown;
+    }
+  });
+
   // ── 响应档位滑条：拖动时即时反馈（档位 + 概率 + 参数高亮）──
   // ⚠️ 档位的唯一真相是滑条的 value（DOM 实时值），不用全局变量记录 ——
   //   曾经用过 window.__ctxTier，结果每次重渲染重新绑定事件时被"未保存的旧配置"

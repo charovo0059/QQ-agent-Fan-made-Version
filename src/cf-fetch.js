@@ -13,8 +13,30 @@
 // 非 Electron 环境（CLI 冒烟脚本等）自动退化为只有第 1 级，行为与裸 fetch 一致。
 //
 // 安全约束：第 3 级只允许打开内置引擎白名单里的域名，不加载任意 URL。
-
+//
+// ── 代理支持（2026-10-04 第四十一对话 · 内置代理批 B）──────────────────────
+// 回执 §四 须知 3 要求"先确认 cf-fetch 的隐藏窗口用独立 partition，加一条判据：
+// 设置代理后默认 session 的请求**不**走代理（不外溢）"。
+//
+// 🔴 **实测结论：它当前用的是 `session.defaultSession`**（第 3 级读 `cf_clearance`
+//    就是读它）⇒ **没有独立 partition**。而 `session.setProxy({proxyRules})` 是
+//    **会话级**的、**没有"按请求"的粒度**（只有 `setProxy` / `resolveProxy`，
+//    没有 per-request 覆盖）⇒ 一旦给它打上代理配置，**整个 Electron 会话**
+//    （包括应用自己的窗口与所有 `net.fetch`）都会跟着变。
+//    那正是须知 3 要拦的"外溢"。
+//
+// ⇒ 本模块**刻意不调用 `session.setProxy`**（于是也不引入任何命名 partition、
+//   任何全局状态），改成：**命中 `proxy.rules` 的目标只在第 1 级用
+//   `ProxyAgent` 走代理**（undici 自带，`undici@6.28.0` 是既有依赖）。
+//    ⚠️ 走代理时**不再降级到 Chromium 通道**：那两级不带代理，
+//       放它过去就等于"请求悄悄从代理外面出去了"（比失败更坏）。
+//       ⇒ 如实抛错，让调用方看到"这条路需要代理，而代理这一跳没过"。
+//    判据：`测试-现行\test-代理分流与隧道.mjs` 钉住"本模块源码里不许出现
+//    session.setProxy"（防以后有人顺手加回来，那会让外溢重新出现）。
 import { getConfig } from './config.js';
+import { initProxyConfig, resolveProxyFor } from './proxy.js';
+
+initProxyConfig(getConfig);   // 不注入 ⇒ 代理静默不生效（见 proxy.js）
 
 // CF 验证页特征（403/503 + 这些字样；正常 4xx 业务错误不会带）
 const CHALLENGE_RE = /just a moment|请稍候|checking your browser|verify you are human|challenge-platform|cf-chl|__cf_chl|attention required/i;
@@ -74,6 +96,36 @@ async function toElectronBody(body, headers) {
     return Buffer.from(await r.arrayBuffer());
   }
   return body;
+}
+
+/**
+ * 经 HTTP(S) 代理发一次请求（批 B 的第 1 级带代理通道）。
+ *
+ * ⚠️ 用 **_undici 自带的 fetch_**，不是全局 fetch：`dispatcher` 是 undici 的选项，
+ *    Node 内建 fetch **不认**它（传了等于没传 ⇒ 请求照样直连，而且看不出来）。
+ * ⚠️ `FormData` 不能跨 realm 交给 undici（与上面 toElectronBody 同一个坑）⇒
+ *    先转成 Buffer + content-type 再发。
+ * @param {object} endpoint `proxy.js` 的 `parseProxyEndpoint` 产物
+ */
+async function fetchViaProxyAgent(url, options, endpoint, timeoutMs) {
+  const { fetch: undiciFetch, ProxyAgent } = await import('undici');
+  const headers = { ...(options.headers || {}) };
+  const body = await toElectronBody(options.body, headers);
+  const agent = new ProxyAgent({
+    uri: `${endpoint.protocol}//${endpoint.hostname}:${endpoint.port}`,
+    ...(endpoint.auth ? { token: endpoint.auth } : {})   // ⚠️ 凭据只进 agent，不进日志
+  });
+  try {
+    return await undiciFetch(url, {
+      method: options.method || 'GET',
+      headers,
+      body,
+      dispatcher: agent,
+      signal: options.signal ?? AbortSignal.timeout(timeoutMs)
+    });
+  } finally {
+    try { await agent.close(); } catch { /* ignore */ }
+  }
 }
 
 // 第 2/3 级共用的 Chromium 请求：去掉自定义 UA 和 cookie 头——
@@ -171,15 +223,26 @@ async function solveWithBrowser(e, host, timeoutMs = 30000) {
  */
 export async function cfFetch(url, options = {}, { timeoutMs = 30000, forceElectron = false } = {}) {
   const host = new URL(url).hostname;
-  const canBypass = bypassEnabled();
+  // ── 代理分流（批 B）：命中规则 ⇒ 只在第 1 级走代理，⛔ 不许外溢到会话 ──
+  const proxyHit = resolveProxyFor(host);
+  const canBypass = bypassEnabled() && !proxyHit;   // 走代理时不启用 Chromium 通道（见文件头）
   const e = (forceElectron || canBypass) ? await electronApi() : null;
 
   // 第 1 级：裸 fetch（forceElectron 时跳过）
   let t1 = null;
   if (!forceElectron) {
-    const res = await fetch(url, { ...options, signal: options.signal ?? AbortSignal.timeout(timeoutMs) });
+    let res;
+    if (proxyHit) {
+      res = await fetchViaProxyAgent(url, options, proxyHit.endpoint, timeoutMs);
+    } else {
+      res = await fetch(url, { ...options, signal: options.signal ?? AbortSignal.timeout(timeoutMs) });
+    }
     t1 = await normalize(res, false);
     if (!looksLikeCfChallenge(t1.status, t1.rawText.slice(0, 2000))) return t1;
+    if (proxyHit) {
+      // 🔴 走代理时**刻意不降级**：第 2/3 级不带代理，放它过去 = 请求从代理外面溜出去了。
+      throw new Error(`${host} 走代理时被 Cloudflare 拦截（HTTP ${t1.status}）—— 没有可用的带代理通道（第 2/3 级不带代理，不放它过去）`);
+    }
     if (!canBypass || !e) return t1;   // CLI 环境无计可施，交回原始 403（引擎自己报可读错误）
     console.log(`[cf-fetch] ${host} 普通请求被 CF 拦截，切换 Chromium 通道`);
   } else if (!e) {

@@ -292,6 +292,32 @@ export const DEFAULT_CONFIG = {
       timeoutMs: 20000
     }
   },
+  // ── 代理（2026-10-04 第四十一对话 · 内置代理批 A/批 B）────────────────────
+  // 拍板依据：`回执-内置代理拍板结果与执行须知-20261004.md`（V1 只做 (A)：
+  // **只让 QQ Agent 自己的出网请求走代理**；(B) 整机 VPN 不做）。
+  //
+  // 🔴 **分流白名单制**（回执 §四 须知 4）：`mode:'off'`（默认）⇒ 一切照旧；
+  //    `byRule` ⇒ **只有命中 `rules` 名单的目标**走代理，其余一律直连。
+  //    ⛔ 刻意**不做**"全局代理 + 排除名单"：那会把 DeepSeek API、本机 SearXNG、
+  //    OneBot（3000/3001）、微信中继（11230）一起塞进代理 —— 而它们走代理不仅没必要，
+  //    还会把"机器人连不上自己的网关"变成一个看不出原因的故障。
+  //
+  // ⚠️ 默认 `mode:'off'` + 空规则 ⇒ **本段的存在不改变任何现有行为**
+  //    （判据钉住"没配代理时逐字节等价于现在"，见 `测试-现行\test-代理分流与隧道.mjs`）。
+  // ⚠️ `http` 这一格里**不许**写用户名密码（URL 里带凭据会被 parseProxyEndpoint 拒掉）——
+  //    凭据走 `user`/`password` 两格，其中 `password` 命中 app.js 的 SECRET_KEY_PATTERN
+  //    ⇒ GET /api/config 会把它删掉只留 `hasPassword` 布尔（与各家 API Key 同一套保护）。
+  proxy: {
+    mode: 'off',                       // 'off' = 不启用（默认）| 'byRule' = 按 rules 名单走代理
+    http: '',                          // 形如 http://127.0.0.1:3067（karing 混合端口默认填这个）
+    user: '',                          // 代理认证用户名；留空 = 无认证
+    password: '',                      // 代理认证密码（GET /api/config 不返回，只回 hasPassword）
+    rules: [
+      // 默认都是"本机直连不通、必须走代理"的站。`*.x` 与 `x` 等价（支持子域，见 hostMatchesRules）
+      '*.pixiv.net', '*.pximg.net', '*.dlsite.com',
+      'trace.moe', 'saucenao.com', 'ascii2d.net', 'iqdb.org', 'soutubot.moe'
+    ]
+  },
   // 安全例外（默认全部关闭）
   security: {
     allowPrivateImageHosts: false,          // true 时图片下载允许内网地址（仅本地测试/自建图床）

@@ -8,14 +8,38 @@
 //
 // 例外开关：security.allowPrivateImageHosts = true 时，图片下载跳过内网检查
 // （仅供本地测试/自建图床使用，默认关闭）。
+//
+// ── 代理支持（2026-10-04 第四十一对话 · 内置代理批 A）──────────────────────
+// 见 `proxy.js` 与 `回执-内置代理拍板结果与执行须知-20261004.md`。三条要害：
+// ① **HTTP 代理**：HTTPS 目标走 `CONNECT` 隧道、HTTP 目标走"绝对地址请求行"，
+//    HTTP 代理与 **SOCKS5** 都在 `buildTunnelOptions` 里 —— 不引任何新依赖
+//    （`undici 6.28` 虽然自带 `ProxyAgent`，但它的 `Socks5ProxyAgent` 实测不存在，
+//     而且改用 undici 就得把下面这套 SSRF 校验重写一遍 —— 那是本文件存在的理由）。
+// ② 🔴 **目标地址的校验一个字都没松，但有一处**有意识的**委托**（须如实说，别写"全松/全不松"）：
+//    · **hostname 级**校验（协议、URL 内嵌凭据、DNS 解析、逐跳重定向重校验）
+//      **对代理连接同样生效** —— 走的还是 `validateFetchUrl`，一行没跳过；
+//    · **IP 级**校验（"解析出内网/环回/链路本地就拒"）**只对直连生效**；
+//      走隧道时域名由**代理端**解析，我们拿不到它的解析结果 ⇒ 这一层是
+//      **有意识地委托**给代理端，而不是"我们仍然在查"。
+//    ⇒ 判据/文档里⛔不许写成"校验一个字都没松"，那是字面上做不到的。
+// ③ **代理端点本身（127.0.0.1:3067 之类）必须有唯一一处有意豁免**：
+//    它是本机回环地址，会被下面的 `isPrivateIp` 挡掉；豁免的**位置与范围**写死在
+//    `buildTunnelOptions` 里 —— 只对"连代理的那一跳"放行，目标 host **照样**过
+//    `validateFetchUrl`（⛔ 不是"给 127.0.0.1 开个白名单"，那样目标也能变回内网）。
 import dns from 'node:dns';
 import net from 'node:net';
+import tls from 'node:tls';
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { getConfig } from './config.js';
+import { initProxyConfig, resolveProxyFor } from './proxy.js';
+
+// 🔴 必须在这里注入（见 proxy.js 的 initProxyConfig 注释）：不注入 ⇒ proxyEnabled()
+//    恒 false ⇒ 用户配了代理却完全没生效，且**没有任何报错**。
+initProxyConfig(getConfig);
 
 const dnsLookup = dns.promises.lookup;
 
@@ -147,6 +171,316 @@ export async function validateFetchUrl(raw, { allowPrivate = false } = {}) {
   if (url.username || url.password) throw new Error('URL 不能包含凭据');
   const ip = await resolveSafeHost(url.hostname, { allowPrivate });
   return { url, ip };
+}
+
+/**
+ * 是否允许访问内网/本机地址（既有安全开关 `security.allowPrivateImageHosts`，默认 false）。
+ *
+ * 🔴 2026-10-04（第四十一对话）**补上的一处接线缺口**：这个开关的既有语义是
+ *   "图片下载跳过内网检查（仅供本地测试/自建图床）"，而**只有 `safeFetchBinary` /
+ *   `safeFetchBinaryToFile` 在读它** —— `safeFetch`（抓网页正文）的
+ *   `validateFetchUrl` 调用**从来没传过**它，于是"打开了开关，`web_fetch` 照样拒绝本机地址"。
+ *   症状是"开关看着生效了、实际只有一半路生效"（本项目最忌的静默不一致）。
+ *   ⚠️ 这里**只是让四个入口对同一个开关的解释一致**，默认值仍是 false
+ *      ⇒ **不打开开关时行为逐字节不变**（回归底线）。
+ */
+function allowPrivateHosts() {
+  return getConfig().security?.allowPrivateImageHosts === true;
+}
+
+// ── 代理隧道 ────────────────────────────────────────────────────────────
+//
+// 目标：把"用哪个 socket 出去"这一件事与"请求怎么发"解耦。原来的两个请求函数
+// 都是 `mod.request({ hostname: 已校验的IP, ... })`；现在多一个可选 `tunnel`：
+//   · 没有 tunnel ⇒ 逐字节等于改造前（同一个 hostname/port/path/headers）；
+//   · 有 tunnel   ⇒ HTTPS 走 CONNECT + TLS（servername/host 仍是**目标域名**，
+//                   证书校验与 SNI 一点不松）；HTTP 走"绝对地址请求行"（代理侧解析域名）。
+//
+// 🔴 唯一一处有意豁免就在 `buildTunnelOptions`：连**代理端点**那一跳放行内网检查。
+//    目标 host **不经过这里** —— 它仍然走 `validateFetchUrl`。
+
+/** 建立与代理端点的连接（http/https 直连代理；socks5 见 buildTunnelOptions）。 */
+function connectToProxy(endpoint, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const onErr = (err) => reject(err);
+    if (endpoint.protocol === 'https:') {
+      // HTTPS 代理（代理本身要 TLS）：`rejectUnauthorized` 保持默认 true。
+      const sock = tls.connect({ host: endpoint.hostname, port: endpoint.port, servername: endpoint.hostname }, () => {
+        sock.setTimeout(timeoutMs, () => sock.destroy(new Error(`连接代理超时：${endpoint.hostname}:${endpoint.port}`)));
+        resolve(sock);
+      });
+      sock.once('error', onErr);
+    } else {
+      const sock = net.connect({ host: endpoint.hostname, port: endpoint.port }, () => {
+        sock.setTimeout(timeoutMs, () => sock.destroy(new Error(`连接代理超时：${endpoint.hostname}:${endpoint.port}`)));
+        resolve(sock);
+      });
+      sock.once('error', onErr);
+    }
+  });
+}
+
+/** 读一个 HTTP 响应头（到 \r\n\r\n 为止，含 body 的起始部分）。 */
+function readResponseHead(sock, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buf = Buffer.alloc(0);
+    const onData = (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      const end = buf.indexOf('\r\n\r\n');
+      if (end >= 0) { cleanup(); resolve(buf); }
+      else if (buf.length > 64 * 1024) { cleanup(); reject(new Error('代理响应头过大')); }
+    };
+    const onErr = (err) => { cleanup(); reject(err); };
+    const onClose = () => { cleanup(); reject(new Error('代理在响应前提早关闭了连接')); };
+    const cleanup = () => {
+      sock.off('data', onData); sock.off('error', onErr); sock.off('close', onClose);
+      if (timer) clearTimeout(timer);
+    };
+    const timer = timeoutMs ? setTimeout(() => { cleanup(); reject(new Error('等待代理响应超时')); }, timeoutMs) : null;
+    sock.on('data', onData); sock.once('error', onErr); sock.once('close', onClose);
+  });
+}
+
+/**
+ * 取响应头第一行的状态码。
+ *
+ * 🔴 2026-10-05 真机抓到的 bug（如实记）：第一版写的是 `head.split('\r\n')`，
+ *   而 `readResponseHead` 返回的是 **Buffer**（刻意不转字符串：要用 Buffer 找 `\r\n\r\n`，
+ *   转成 utf8 字符串在二进制边界上会失真）⇒ `Buffer` 上没有 `split`，
+ *   报 **`head.split is not a function`**。
+ *   ⚠️ 这个 bug **只在 HTTPS（走 CONNECT）那条路上**才出现 —— 而我的离线判据当时只覆盖了
+ *     HTTP 目标（那条走"绝对地址请求行"、不经过本函数）⇒ 判据漏了一个分支。
+ *     ⇒ 教训：**两条分支都要有判据**（现在 `test-代理分流与隧道.mjs` 的 ⑥ 段补上了 HTTPS 隧道）。
+ */
+function headStatus(head) {
+  const first = String(head ?? '').split('\r\n')[0] || '';
+  const m = first.match(/^HTTP\/\d\.\d\s+(\d{3})/);
+  return m ? Number(m[1]) : 0;
+}
+
+/** 一次 CONNECT 的目标地址编码：IPv6 要带方括号。 */
+function authorityOf(host, port) {
+  return net.isIP(host) === 6 ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+/**
+ * 与代理建好一条到 `targetHost:targetPort` 的隧道，返回一个可直接当 socket 用的流。
+ *
+ * @param {object} endpoint `parseProxyEndpoint` 的产物
+ * @param {{host:string, port:number}} target
+ * @param {number} timeoutMs
+ */
+async function openProxyTunnel(endpoint, target, timeoutMs = 20000) {
+  if (endpoint.protocol === 'socks5:' || endpoint.protocol === 'socks5h:') {
+    return openSocks5Tunnel(endpoint, target, timeoutMs);
+  }
+  const sock = await connectToProxy(endpoint, timeoutMs);
+  const target6 = net.isIP(target.host) === 6;
+  const lines = [
+    `CONNECT ${authorityOf(target.host, target.port)} HTTP/1.1`,
+    `Host: ${authorityOf(target.host, target.port)}`,
+    'Proxy-Connection: keep-alive',
+    'Connection: keep-alive'
+  ];
+  if (endpoint.auth) lines.push(`Proxy-Authorization: ${endpoint.auth}`);
+  sock.write(lines.join('\r\n') + '\r\n\r\n');
+  let head;
+  try {
+    head = await readResponseHead(sock, timeoutMs);
+  } catch (error) {
+    try { sock.destroy(); } catch { /* ignore */ }
+    throw error;
+  }
+  const status = headStatus(head);
+  if (status === 407) {
+    sock.destroy();
+    throw new Error('代理要求认证（HTTP 407）—— 请在「设置 → 网络」里填代理用户名与密码');
+  }
+  if (status !== 200) {
+    sock.destroy();
+    throw new Error(`代理拒绝建立隧道（HTTP ${status || '无响应'}）`);
+  }
+  sock.setTimeout(0);          // 隧道已建立 ⇒ 交给请求自己的 timeout 管
+  return sock;
+}
+
+/**
+ * SOCKS5 隧道（CONNECT 命令）—— 只为"karing 那种混合端口只给 socks5"的情形兜底。
+ *
+ * 为什么自己实现而不加依赖：`undici 6.28` 实测**没有** `Socks5ProxyAgent`
+ *   （见事项文档 §四），而本项目"零新依赖"是硬约束（`复用账本.md`）。
+ * `socks5h:` 与 `socks5:` 在这里**同等对待**（域名都交给代理端解析）——
+ *   理由：走代理时我们**本来就把 DNS 委托给代理端**（见文件头注释 ②），
+ *   所以两者对我们没有区别；刻意不为一个做不到的区分写两套代码。
+ *
+ * ⚠️ 只实现 CONNECT（无认证 / 用户名密码）。UDP ASSOCIATE 不支持（我们只用 TCP）。
+ */
+function openSocks5Tunnel(endpoint, target, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host: endpoint.hostname, port: endpoint.port }, async () => {
+      sock.setTimeout(timeoutMs, () => sock.destroy(new Error(`SOCKS5 代理超时：${endpoint.hostname}:${endpoint.port}`)));
+      try {
+        // ① 问候：支持"无认证"(0x00) 与"用户名密码"(0x02)
+        const methods = endpoint.auth ? [0x00, 0x02] : [0x00];
+        const greeting = Buffer.from([0x05, methods.length, ...methods]);
+        sock.write(greeting);
+        let resp = await readExact(sock, 2, timeoutMs);
+        if (resp[0] !== 0x05) throw new Error('SOCKS5 代理响应无效（版本不符）');
+        const method = resp[1];
+        if (method === 0xff) throw new Error('SOCKS5 代理拒绝了所有认证方式');
+        if (method === 0x02) {
+          // ② 用户名密码认证（RFC 1929）。endpoint.auth 这里只有 base64，需还原。
+          const { user, pass } = decodeBasicAuth(endpoint.auth);
+          const u = Buffer.from(user, 'utf8');
+          const p = Buffer.from(pass, 'utf8');
+          sock.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]));
+          const authResp = await readExact(sock, 2, timeoutMs);
+          if (authResp[1] !== 0x00) throw new Error('SOCKS5 代理认证失败（用户名或密码不对）');
+        } else if (method !== 0x00) {
+          throw new Error(`SOCKS5 代理要求不支持的认证方式：0x${method.toString(16)}`);
+        }
+        // ③ CONNECT 请求：域名交给代理端解析（0x03），IP 直接给（0x01/0x04）
+        const host = String(target.host || '');
+        const ipVer = net.isIP(host);
+        let addrPart;
+        if (ipVer === 4) addrPart = Buffer.concat([Buffer.from([0x01]), Buffer.from(host.split('.').map(Number))]);
+        else if (ipVer === 6) addrPart = Buffer.concat([Buffer.from([0x04]), Buffer.from(expandIpv6(host))]);
+        else {
+          const hb = Buffer.from(host, 'utf8');
+          // ⚠️ SOCKS5 的域名长度只有 1 字节 ⇒ 超过 255 字节只能拒绝（不静默截断）
+          if (hb.length > 255) throw new Error(`SOCKS5 目标域名过长：${host}`);
+          addrPart = Buffer.concat([Buffer.from([0x03, hb.length]), hb]);
+        }
+        const portBuf = Buffer.alloc(2);
+        portBuf.writeUInt16BE(Number(target.port) || 443, 0);
+        sock.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00]), addrPart, portBuf]));
+        const head = await readExact(sock, 4, timeoutMs);
+        if (head[1] !== 0x00) throw new Error(`SOCKS5 代理拒绝连接（${socks5ErrorText(head[1])}）`);
+        // ④ 吃掉绑定地址（长度由 ATYP 决定）
+        const atyp = head[3];
+        const addrLen = atyp === 0x01 ? 4 : atyp === 0x04 ? 16 : atyp === 0x03 ? (await readExact(sock, 1, timeoutMs))[0] : 0;
+        if (addrLen) await readExact(sock, addrLen + 2, timeoutMs);
+        sock.setTimeout(0);
+        resolve(sock);
+      } catch (error) {
+        try { sock.destroy(); } catch { /* ignore */ }
+        reject(error);
+      }
+    });
+    sock.once('error', reject);
+  });
+}
+
+/** 精确读 n 字节（SOCKS5 是定长协议，不能像 HTTP 那样等分隔符）。 */
+function readExact(sock, n, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buf = Buffer.alloc(0);
+    const onData = (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (buf.length >= n) { cleanup(); resolve(buf.subarray(0, n)); }
+    };
+    const onErr = (err) => { cleanup(); reject(err); };
+    const cleanup = () => {
+      sock.off('data', onData); sock.off('error', onErr);
+      if (timer) clearTimeout(timer);
+    };
+    const timer = timeoutMs ? setTimeout(() => { cleanup(); reject(new Error('SOCKS5 代理响应超时')); }, timeoutMs) : null;
+    sock.on('data', onData); sock.once('error', onErr);
+  });
+}
+
+function decodeBasicAuth(authHeader) {
+  const m = /^Basic\s+(.+)$/i.exec(String(authHeader || ''));
+  if (!m) return { user: '', pass: '' };
+  const raw = Buffer.from(m[1], 'base64').toString('utf8');
+  const i = raw.indexOf(':');
+  return i < 0 ? { user: raw, pass: '' } : { user: raw.slice(0, i), pass: raw.slice(i + 1) };
+}
+
+const SOCKS5_ERRORS = {
+  1: '通用失败', 2: '规则不允许', 3: '网络不可达', 4: '主机不可达',
+  5: '连接被拒', 6: 'TTL 超时', 7: '命令不支持', 8: '地址类型不支持'
+};
+function socks5ErrorText(code) { return SOCKS5_ERRORS[Number(code)] || `错误码 ${code}`; }
+
+/** 把 `::1` 之类展开成 16 字节（SOCKS5 的 IPv6 地址形态）。 */
+function expandIpv6(addr) {
+  const h = String(addr || '');
+  const [headPart, tailPart] = h.includes('::') ? h.split('::') : [h, null];
+  const head = headPart ? headPart.split(':').filter(Boolean) : [];
+  const tail = tailPart ? tailPart.split(':').filter(Boolean) : [];
+  const groups = [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail];
+  const out = Buffer.alloc(16);
+  groups.slice(0, 8).forEach((g, i) => out.writeUInt16BE(parseInt(g || '0', 16) || 0, i * 2));
+  return out;
+}
+
+/**
+ * 按目标 URL 决定这次的连接方式。返回 `null`（直连）或
+ * `{ socket, host, port, path, hostHeader, servername }`。
+ *
+ * 🔴 **两种形态**（这是 HTTP 代理的两条标准语义，别混）：
+ *   · **HTTPS 目标** ⇒ `CONNECT host:443` 建隧道，然后在隧道里自己 TLS。
+ *   · **HTTP 目标**  ⇒ **不建隧道**：直接连上代理，把"绝对地址"写进请求行
+ *     （`GET http://host/path HTTP/1.1`），由代理转发。域名由**代理端**解析。
+ *   ⚠️ 第一版把两者都写成了"先 CONNECT" —— 对 HTTP 目标那是**错的**：
+ *      代理收到的第一条是 `CONNECT`，而它会回一句"No connection established"
+ *      之类（判据当场抓到：解析响应头时炸在 `head.split is not a function`）。
+ *
+ * 🔴 **`validateFetchUrl` 的调用方仍然是逐跳调用的**（见各入口函数）——
+ *    本函数**不做**任何安全校验，它只决定"从哪个 socket 出去"。
+ *    ⛔ 别把校验挪进来：那样"代理开着时少查一次"会变成一个静默的口子。
+ */
+async function buildTunnelOptions(url, ip, timeoutMs = 20000) {
+  const hit = resolveProxyFor(url.hostname);
+  if (!hit) return null;
+  const endpoint = hit.endpoint;
+  const targetHost = url.hostname;
+  const targetPort = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+  if (url.protocol !== 'https:') {
+    // HTTP 目标：连代理本身，请求行写绝对地址（代理侧解析域名）。
+    return {
+      socket: await connectToProxy(endpoint, timeoutMs),
+      host: endpoint.hostname,
+      port: endpoint.port,
+      path: url.href,
+      hostHeader: url.host,
+      servername: undefined
+    };
+  }
+  const socket = await openProxyTunnel(endpoint, { host: targetHost, port: targetPort }, timeoutMs);
+  return {
+    socket,
+    // HTTPS 走隧道后由我们自己 TLS：hostname 用**目标域名**（不是代理、也不是 IP）
+    // ⇒ SNI 与证书校验都指向真实目标，与直连时的行为一致。
+    host: targetHost,
+    port: targetPort,
+    path: url.pathname + url.search,
+    hostHeader: url.host,
+    servername: targetHost
+  };
+}
+
+/** 统一的请求参数构造（保证"直连"与"走代理"除连接方式外**逐字段相同**）。 */
+function buildRequestOptions(url, ip, tunnel, headers, timeout) {
+  const direct = {
+    hostname: ip,
+    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    path: url.pathname + url.search,
+    method: 'GET',
+    headers: { ...headers, host: url.host },
+    timeout
+  };
+  if (!tunnel) {
+    return { ...direct, servername: url.protocol === 'https:' ? url.hostname : undefined, rejectUnauthorized: url.protocol === 'https:' };
+  }
+  if (url.protocol === 'https:') {
+    // 隧道 socket 由 https.request 自己包 TLS（createConnection 给的就是裸连接）
+    return { ...direct, createConnection: () => tunnel.socket, servername: tunnel.servername, rejectUnauthorized: true };
+  }
+  // HTTP 目标走 HTTP 代理：请求行必须是**绝对地址**（`tunnel.path` 已经是 url.href），
+  // 域名由代理端解析。⚠️ Host 头仍是目标域名（给目标服务器看），代理看的是请求行 —— 两者都对。
+  return { ...direct, hostname: tunnel.host, port: tunnel.port, path: tunnel.path, createConnection: () => tunnel.socket };
 }
 
 // ── 受限请求 ────────────────────────────────────────────────────────────
@@ -303,32 +637,35 @@ function buildHeaders(overrides) {
   return headers;
 }
 
-function requestOnce(url, ip, { asBinary = false, maxBytes = 50000, headers: headerOverrides = null } = {}) {
+function requestOnce(url, ip, { asBinary = false, maxBytes = 50000, headers: headerOverrides = null, tunnel = null } = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
-    const port = url.port || (url.protocol === 'https:' ? 443 : 80);
-    const req = mod.request({
-      hostname: ip,
-      port,
-      path: url.pathname + url.search,
-      method: 'GET',
-      headers: { ...buildHeaders(headerOverrides), host: url.host },
-      servername: url.protocol === 'https:' ? url.hostname : undefined,
-      rejectUnauthorized: url.protocol === 'https:',
-      timeout: 20000
-    }, (res) => {
-      const statusCode = res.statusCode || 0;
-      if ([301, 302, 303, 307, 308].includes(statusCode)) {
-        res.resume();
-        resolve({ statusCode, redirect: String(res.headers.location || '') });
-        return;
-      }
-      readBounded(res, maxBytes, !asBinary)
-        .then((body) => resolve({ statusCode, body, contentType: String(res.headers['content-type'] || '') }))
-        .catch(reject);
-    });
+    // 🔴 2026-10-05 补的**总时长上限**（真机/判据都抓到过挂住）：
+    //    原来只有 `timeout`（= **socket 空闲**超时）。当隧道已建好、但对面**握手后什么都不回**
+    //    （VPN 半死、代理吃掉连接、目标挂起）时，socket 上**一个字节都没来过**，
+    //    "空闲超时"在某些路径上不会触发 ⇒ 请求**无限期挂着**。
+    //    真机上的形态就是"点了「测试连接」一直转圈、既不通也不报错"（本项目最忌的那一类）。
+    //    ⇒ 加一个硬上限：到点就 destroy 成 `请求超时`，**必出声**。
+    let settledOnce = false;
+    const done = (fn, v) => { if (settledOnce) return; settledOnce = true; clearTimeout(hardTimer); fn(v); };
+    const hardTimer = setTimeout(() => {
+      try { req.destroy(new Error(`请求超时（总时长 30 秒）：${url.hostname}`)); } catch { /* ignore */ }
+    }, 30000);
+    const req = mod.request(
+      buildRequestOptions(url, ip, tunnel, buildHeaders(headerOverrides), 20000),
+      (res) => {
+        const statusCode = res.statusCode || 0;
+        if ([301, 302, 303, 307, 308].includes(statusCode)) {
+          res.resume();
+          done(resolve, { statusCode, redirect: String(res.headers.location || '') });
+          return;
+        }
+        readBounded(res, maxBytes, !asBinary)
+          .then((body) => done(resolve, { statusCode, body, contentType: String(res.headers['content-type'] || '') }))
+          .catch((e) => done(reject, e));
+      });
     req.on('timeout', () => req.destroy(new Error(`请求超时：${url.hostname}`)));
-    req.on('error', reject);
+    req.on('error', (e) => done(reject, e));
     req.end();
   });
 }
@@ -339,8 +676,33 @@ const MAX_REDIRECTS = 5;
 export const DEFAULT_TEXT_MAX_BYTES = 50000;
 
 /**
- * 抓取网页文本，SSRF 全防护（不做内网例外）。
+ * 统一管理"这次请求的隧道 socket 生命周期"。
+ *
+ * ⚠️ 为什么必须显式销毁：隧道 socket 是**我们自己建的**，不是 http.Agent 池里的，
+ *    而 `buildRequestOptions` 用 `createConnection` 把它交给了请求 ——
+ *    用完后没人回收就会一直挂着（真机上的形态是"跑几百次之后句柄数不降"）。
+ *    ⇒ 请求 settle 之后统一 destroy；出任何错也 destroy（⛔ 不留半开的连接）。
+ */
+async function withTunnel(url, ip, fn) {
+  let tunnel = null;
+  try {
+    tunnel = await buildTunnelOptions(url, ip);
+  } catch (error) {
+    throw error;   // 代理建不起来 = 出声（约束②），⛔ 不退化成直连
+  }
+  const noop = () => {};
+  if (tunnel) tunnel.socket.on('error', noop);   // 销毁时的 ECONNRESET 不该炸进程
+  try {
+    return await fn(tunnel);
+  } finally {
+    if (tunnel) { try { tunnel.socket.destroy(); } catch { /* ignore */ } }
+  }
+}
+
+/**
+ * 抓取网页文本，SSRF 防护。
  *  `browseLocked: true` 时额外受 `security.browseLock` 域名白名单约束（逐跳校验）。
+ *  `security.allowPrivateImageHosts: true` 时放行内网/本机地址（默认 false —— 见 allowPrivateHosts()）。
  *
  * @param {number} [opts.maxBytes=50000] 正文读取上限（默认 5 万）。
  *
@@ -360,14 +722,15 @@ export async function safeFetch(urlString, { browseLocked = false, maxBytes = DE
     ? Math.floor(Number(maxBytes))
     : DEFAULT_TEXT_MAX_BYTES;
   assertBrowseLock(urlString, { browseLocked });
-  let { url, ip } = await validateFetchUrl(urlString);
+  const allowPrivate = allowPrivateHosts();
+  let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, { asBinary: false, maxBytes: limit, headers });
+    const result = await withTunnel(url, ip, (tunnel) => requestOnce(url, ip, { asBinary: false, maxBytes: limit, headers, tunnel }));
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
       assertBrowseLock(next, { browseLocked, what: '重定向目标' });
-      ({ url, ip } = await validateFetchUrl(next));
+      ({ url, ip } = await validateFetchUrl(next, { allowPrivate }));
       continue;
     }
     const body = result.body || '';
@@ -383,7 +746,7 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, { 
   const allowPrivate = getConfig().security?.allowPrivateImageHosts === true;
   let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnce(url, ip, { asBinary: true, maxBytes });
+    const result = await withTunnel(url, ip, (tunnel) => requestOnce(url, ip, { asBinary: true, maxBytes, tunnel }));
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
@@ -406,27 +769,17 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, { 
 //   绝不把截断文件留给调用方 —— 调用方往往按"文件存在"判定成功。
 
 /** 把一次响应流式写入 dest（200 时）；重定向只取 Location，响应体直接排空丢弃。 */
-function requestToFile(url, ip, dest, { limit = Infinity, timeoutMs = 30000 } = {}) {
+function requestToFile(url, ip, dest, { limit = Infinity, timeoutMs = 30000, tunnel = null } = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
-    const port = url.port || (url.protocol === 'https:' ? 443 : 80);
-    const req = mod.request({
-      hostname: ip,
-      port,
-      path: url.pathname + url.search,
-      method: 'GET',
-      headers: {
-        host: url.host,
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,image/avif,image/webp,image/*;q=0.8',
-        'accept-language': 'zh-CN,zh;q=0.9'
-      },
-      servername: url.protocol === 'https:' ? url.hostname : undefined,
-      rejectUnauthorized: url.protocol === 'https:',
-      // 大文件下载：这是 socket 空闲超时而非总时长上限 —— 数据持续流动时不触发，
-      // 卡死的连接才会被掐掉（与 requestOnce 一致，只是上限放宽到 timeoutMs）
-      timeout: timeoutMs
-    }, (res) => {
+    // 大文件下载：这是 socket 空闲超时而非总时长上限 —— 数据持续流动时不触发，
+    // 卡死的连接才会被掐掉（与 requestOnce 一致，只是上限放宽到 timeoutMs）
+    const opts = buildRequestOptions(url, ip, tunnel, {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,image/avif,image/webp,image/*;q=0.8',
+      'accept-language': 'zh-CN,zh;q=0.9'
+    }, timeoutMs);
+    const req = mod.request(opts, (res) => {
       const statusCode = res.statusCode || 0;
       const contentType = String(res.headers['content-type'] || '');
       if ([301, 302, 303, 307, 308].includes(statusCode)) {
@@ -498,7 +851,7 @@ export async function safeFetchBinaryToFile(urlString, destPath, maxBytes, { tim
   try {
     let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
     for (let i = 0; i <= MAX_REDIRECTS; i++) {
-      const r = await requestToFile(url, ip, dest, { limit, timeoutMs });
+      const r = await withTunnel(url, ip, (tunnel) => requestToFile(url, ip, dest, { limit, timeoutMs, tunnel }));
       if (r.redirect !== undefined) {
         if (!r.redirect) throw new Error(`重定向缺少 Location: ${r.statusCode}`);
         const next = new URL(r.redirect, url).toString();

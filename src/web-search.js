@@ -1,8 +1,43 @@
 // 联网搜索（移植自原版 bingSearch）：Bing 中文搜索，无需 API key。
 // 搜索请求本身用普通 fetch（搜索 URL 是管理端配置的可信地址，只需清洗查询词）；
 // 对外抓取网页正文一律走 safe-fetch（web_fetch 工具）。
+//
+// ── 代理支持（2026-10-04 第四十一对话 · 内置代理批 A 的"路径③"）──────────────
+// 本文件的 6 处 `fetch` 打的是各家**搜索 API**（DeepSeek / 智谱 / 博查 / 百度千帆 /
+// 秘塔）与 Bing —— 它们**都在国内可达**，默认**不该**走代理（回执 §四 须知 4 的白名单制）。
+// 但"不该默认走"≠"永远不该走"：所有者可能想把某一家也纳入 `proxy.rules`。
+// ⇒ 统一走下面的 `proxiedFetch`：
+//     · 目标**没命中** `proxy.rules`（含"代理没启用"）⇒ **原样用全局 `fetch`**
+//       —— 这一条是"没配代理时逐字节等价于现在"的实现方式（连 fetch 实现都没换）；
+//     · 命中 ⇒ 换用 **undici 自带的 `fetch` + `ProxyAgent`**。
+//       ⚠️ 为什么不能继续用全局 fetch 而只传 `dispatcher`：那是 undici 的私有选项，
+//          Node 内建的 fetch **不认**（实测：全局 fetch 的签名里没有它，传了等于没传）。
+//       ⇒ 必须显式用 undici 那个 fetch；`undici@6.28.0` 已是本 app 的既有依赖（零新增）。
 import { getConfig } from './config.js';
 import { safeFetch } from './safe-fetch.js';
+import { initProxyConfig, resolveProxyFor } from './proxy.js';
+
+// 🔴 必须注入（与 safe-fetch.js 同一个理由）：不注入 ⇒ proxyEnabled() 恒 false
+//    ⇒ 用户把某家搜索 API 写进 rules 也不会生效，且**没有任何报错**。
+initProxyConfig(getConfig);
+
+/** 按 `proxy.rules` 决定这次请求用哪个 fetch 实现（见文件头注释）。 */
+export async function proxiedFetch(url, options) {
+  const hit = resolveProxyFor(typeof url === 'string' ? url : String(url?.href ?? url));
+  if (!hit) return fetch(url, options);           // 未命中 ⇒ 一个字都不变
+  const { fetch: undiciFetch, ProxyAgent } = await import('undici');
+  const endpoint = hit.endpoint;
+  const agent = new ProxyAgent({
+    uri: `${endpoint.protocol}//${endpoint.hostname}:${endpoint.port}`,
+    ...(endpoint.auth ? { token: endpoint.auth } : {})   // ⚠️ 凭据只进 agent，不进日志
+  });
+  try {
+    return await undiciFetch(url, { ...options, dispatcher: agent });
+  } finally {
+    // Agent 持有一批连接 ⇒ 用完就关，否则每次搜索都漏一批句柄
+    try { await agent.close(); } catch { /* ignore */ }
+  }
+}
 
 /** 查询词清洗：去 CQ 码、控制字符、超长截断。 */
 export function sanitizeQuery(query) {
@@ -78,7 +113,7 @@ export async function bingSearch(query) {
   const maxResults = Math.max(1, Math.min(10, Number(cfg.maxResults) || 6));
   const url = new URL(searchUrl);
   url.searchParams.set('q', query);
-  const res = await fetch(url, {
+  const res = await proxiedFetch(url, {
     headers: {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
       'accept-language': 'zh-CN,zh;q=0.9'
@@ -123,7 +158,7 @@ export async function deepSeekSearch(query) {
   const baseUrl = String(cfg.baseUrl || 'https://api.deepseek.com/responses').replace(/\/+$/, '');
   const model = String(cfg.model || 'deepseek-v4-flash');
 
-  const res = await fetch(baseUrl, {
+  const res = await proxiedFetch(baseUrl, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -179,7 +214,7 @@ export async function zhipuSearch(query) {
   const engine = String(cfg.engine || 'search_std');
   const count = Math.min(50, Math.max(1, Number(cfg.count) || 10));
 
-  const res = await fetch(endpoint, {
+  const res = await proxiedFetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -214,7 +249,7 @@ export async function bochaSearch(query) {
   const endpoint = String(cfg.baseUrl || 'https://api.bochaai.com/v1/web-search').replace(/\/+$/, '');
   const count = Math.min(50, Math.max(1, Number(cfg.count) || 10));
 
-  const res = await fetch(endpoint, {
+  const res = await proxiedFetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -252,7 +287,7 @@ export async function baiduSearch(query) {
   const endpoint = String(cfg.baseUrl || 'https://qianfan.baidubce.com/v2/ai_search/web_search').replace(/\/+$/, '');
   const topK = Math.min(10, Math.max(1, Number(cfg.count) || 6));
 
-  const res = await fetch(endpoint, {
+  const res = await proxiedFetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -292,7 +327,7 @@ export async function metasoSearch(query) {
   const apiKey = String(cfg.apiKey || process.env.METASO_API_KEY || '').trim();
   const endpoint = String(cfg.baseUrl || 'https://metaso.cn/api/open/v1/search').replace(/\/+$/, '');
 
-  const res = await fetch(endpoint, {
+  const res = await proxiedFetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -378,7 +413,7 @@ export async function customSearch(query, providerId = null) {
     body.messages = [{ role: 'user', content: query }];
   }
 
-  const res = await fetch(endpoint, {
+  const res = await proxiedFetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -423,7 +458,7 @@ async function bingSearchWithUrl(query, searchUrl) {
   const maxResults = Math.max(1, Math.min(10, Number(cfg.maxResults) || 6));
   const target = new URL(url);
   target.searchParams.set('q', query);
-  const res = await fetch(target, {
+  const res = await proxiedFetch(target, {
     headers: {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
       'accept-language': 'zh-CN,zh;q=0.9'
