@@ -135,4 +135,89 @@ export function pendingCount() {
   return load().items.filter((x) => x.status === 'pending').length;
 }
 
-export { FILE as PROPOSALS_FILE, KIND_LABEL };
+// ═══════════════════════════════════════════════════════════════════════════
+// 「你提过的那件事有回复了」—— **每会话**一个高水位（🆕 2026-10-04 第四十对话 · 批 2，方案 §4.2）
+//
+// ── 为什么要有它 ────────────────────────────────────────────────────────
+// `reviewNote` 后端早就收了（`reviewProposal`），她也能用 `get_my_proposals` 读到 ——
+// 但她**不知道有人回复过**：实测全窗口只调过 7 次、近 7 天 0 次、7 次里 0 次带检索词
+// （见交接 §6-164 的口径：只数 `tool_calls`）。⇒ 要在**唤醒时**主动跟她说一声。
+//
+// ── 为什么高水位住在**独立 sidecar** 而不是提案条目里 ────────────────────
+//   ① 提案是**全局**的（一份 proposals.json 服务所有会话），而"提醒到哪了"是**每会话**的状态；
+//   ② `test-提案队列.mjs` 有一张**字段白名单**（`src/proposals.js` 的条目形状是数据契约）
+//      —— 往条目里加字段必红，而那条判据是对的：界面状态不该污染数据形状。
+//   ⇒ 形状照抄 `store.js` 的 `trim-marks.json`（模块级导出 + 取走即清 + 只写 `.tmp` 再 rename）。
+//
+// ── 口径（与 `swept` / 毛边同一套）─────────────────────────────────────
+//   · **首次**（这个 chatKey 还没记录）⇒ **不播报**，只记下当前 `max(reviewedAt)` 当天花板。
+//     ⛔ 否则她一进新会话就被 22 条历史一次性刷屏。
+//   · 只有 `status ∈ {accepted, rejected, done}` 才算"有回复"（`pending` = 还没人看过）。
+//   · 取走即把高水位推到当前天花板；`reviewedAt` 早于高水位的不算。
+// ═══════════════════════════════════════════════════════════════════════════
+const REPLY_SEEN_FILE = path.join(DATA_DIR, 'proposal-reply-seen.json');
+/** 最多记多少个会话的高水位（与 trim-marks 同一条思路：防"再也没醒过的会话"把文件撑大）。 */
+const REPLY_SEEN_MAX_CHATS = 200;
+/** 哪些状态算"有人回复过"。 */
+export const REPLIED_STATUSES = ['accepted', 'rejected', 'done'];
+
+function loadReplySeen() {
+  try {
+    const j = JSON.parse(fs.readFileSync(REPLY_SEEN_FILE, 'utf8'));
+    return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
+  } catch { return {}; }        // 还没有过提醒 / 文件坏了 ⇒ 当成空（坏文件不该让唤醒失败）
+}
+
+function saveReplySeen(all) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = `${REPLY_SEEN_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(all), 'utf8');
+    fs.renameSync(tmp, REPLY_SEEN_FILE);   // 先写 tmp 再 rename：半截文件比不写更糟
+  } catch (error) {
+    // 提醒记不下来**不能**拖垮唤醒（与 trim-marks 同一条纪律）⇒ 只记日志
+    console.error('[proposals] 回复提醒高水位落盘失败：', error?.message ?? error);
+  }
+}
+
+/**
+ * 取走"你提过的提案有回复了"的提醒（**只读一次**，取走即把高水位推上去）。
+ * @param {string} chatKey
+ * @returns {{count:number, lastAt:number}|null} 没有新回复 / 首次 ⇒ null
+ */
+export function takeProposalReplyNotice(chatKey) {
+  const key = String(chatKey || '');
+  if (!key) return null;
+  const replied = load().items
+    .filter((x) => REPLIED_STATUSES.includes(String(x.status)) && Number(x.reviewedAt) > 0);
+  const top = replied.reduce((m, x) => Math.max(m, Number(x.reviewedAt) || 0), 0);
+  const all = loadReplySeen();
+  if (!Object.prototype.hasOwnProperty.call(all, key)) {
+    // 首次：只把天花板记下来，**不播报**（否则新会话会被历史一次性刷屏）。
+    // 🔴 **天花板是 0 也要写**（第一版判据当场抓到我差点漏掉的东西）：
+    //    若"没有已回复"时**不写**，那么等一下真来了第一条回复，这个会话仍然是"首次"
+    //    ⇒ 那一条回复的提醒会被当成"历史"吞掉，**永远播报不出来**。
+    //    代价只是 sidecar 里多一条 0 —— 换来"这个会话我见过了"这个事实。
+    all[key] = top;
+    trimReplySeen(all);
+    saveReplySeen(all);
+    return null;
+  }
+  const prev = Number(all[key]) || 0;
+  const fresh = replied.filter((x) => Number(x.reviewedAt) > prev);
+  if (!fresh.length) return null;
+  all[key] = top;
+  trimReplySeen(all);
+  saveReplySeen(all);
+  return { count: fresh.length, lastAt: Math.max(...fresh.map((x) => Number(x.reviewedAt) || 0)) };
+}
+
+/** 按"最后提醒时间"留最新的一批（与 trim-marks 的 TRIM_MAX_CHATS 同一套）。 */
+function trimReplySeen(all) {
+  const keys = Object.keys(all);
+  if (keys.length <= REPLY_SEEN_MAX_CHATS) return;
+  keys.sort((a, b) => (Number(all[b]) || 0) - (Number(all[a]) || 0));
+  for (const k of keys.slice(REPLY_SEEN_MAX_CHATS)) delete all[k];
+}
+
+export { FILE as PROPOSALS_FILE, KIND_LABEL, REPLY_SEEN_FILE };

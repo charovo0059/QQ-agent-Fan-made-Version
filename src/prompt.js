@@ -1136,6 +1136,18 @@ export function buildUserPrompt(ctx) {
     const what = String(trim.kind) === 'chat' ? `整个会话的 ${n} 条记录` : `这里 ${n} 条记录`;
     stateLines.push(`（提醒）你不在的这段时间里，${what}被撕走了（最后一次 ${agoMin === 0 ? '刚刚' : `${agoMin} 分钟前`}）—— 内容没有留下，只留下毛边。别以为自己记错了。`);
   }
+  // 🆕 2026-10-04（第四十对话 · 批 2，方案 §4.2）：「你提过的那件事，有回复了」。
+  //   她看不见管理端，而 `get_my_proposals` 实测全窗口只调过 7 次、近 7 天 0 次
+  //   ⇒ 有人回复过这件事**得在唤醒时告诉她**，否则等于没有。
+  //   ⚠️ 措辞三条纪律（与上面 swept / 毛边同源）：
+  //     ① 只说事实（几条、什么时候）；② **不是催促**（看不看、回不回由她）；
+  //     ③ 把入口给她（`get_my_proposals`），而不是把内容塞进提示词（内容很长，且该由她决定看不看）。
+  //   ⚠️ 每会话一条（高水位按 chatKey 分开）——这与 `trimInfo` / `sweptInfo` 的既有语义一致。
+  const replyInfo = ctx.proposalReplyInfo;
+  if (replyInfo && Number(replyInfo.count) > 0) {
+    const agoMin = Math.max(0, Math.round((now - (Number(replyInfo.lastAt) || now)) / 60000));
+    stateLines.push(`（提醒）你提过的改进提议有 ${Number(replyInfo.count)} 条被回复了（最近一次 ${agoMin === 0 ? '刚刚' : `${agoMin} 分钟前`}）。管理员说了什么用 \`get_my_proposals\` 就能看到 —— 想看就看，不想看也不用管。`);
+  }
   // 反锚点：短时间被反复念叨的词（2026-09-26 第二十五对话，提案 `a5fbf828`）。
   //
   // 她的原话：「群里连续几分钟围绕"睡觉/困了/低能耗"聊，我就容易顺着这个方向反复说睡觉，

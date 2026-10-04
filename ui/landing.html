@@ -244,6 +244,9 @@ const TOOL_META = {
   get_message_detail:  { name: '看消息详情', cat: '查看', icon: '🔍' },
   get_message_images:  { name: '看图片',     cat: '查看', icon: '🖼️' },
   get_active_members:  { name: '看活跃群友', cat: '查看', icon: '👥' },
+  // 🆕 2026-10-04 批 2：这三条**本来就只有程序内那份有**（副本漂了）—— 一并补上。
+  get_my_usage:        { name: '查自己用量', cat: '查看', icon: '📊' },
+  get_my_self_elsewhere: { name: '看别处的我', cat: '查看', icon: '🪞' },
   list_stickers:     { name: '列表情库',   cat: '表情',   icon: '📚' },
   get_sticker_image: { name: '看表情图',   cat: '表情',   icon: '🖼️' },
   collect_sticker:   { name: '收藏表情',   cat: '表情',   icon: '⭐' },
@@ -251,8 +254,21 @@ const TOOL_META = {
   memory_append:     { name: '记一条',     cat: '记忆',   icon: '🧠' },
   memory_query:      { name: '查记忆',     cat: '记忆',   icon: '🧠' },
   memory_remove:     { name: '删记忆',     cat: '记忆',   icon: '🧹' },
+  // 🆕 2026-10-04 第四十对话 · 批 2（方案 §5.5 / 回执 Q8）：与程序内 `ui/app/01-utils.js`
+  //    那份**逐条一致**（判据 `test-工具可见性体检.mjs` 第 8 节核对两份的键集合）。
+  read_forward:        { name: '看合并转发', cat: '查看', icon: '📨' },
+  search_images:       { name: '找图',       cat: '联网', icon: '🔎' },
+  send_image:          { name: '发图片',     cat: '发言', icon: '🖼️' },
+  save_core_memory:    { name: '存核心记忆', cat: '记忆', icon: '📸' },
+  list_core_memories:  { name: '列核心记忆', cat: '记忆', icon: '🗂️' },
+  read_core_memory:    { name: '读核心记忆', cat: '记忆', icon: '📖' },
+  delete_core_memory:  { name: '删核心记忆', cat: '记忆', icon: '🗑️' },
+  dream_recall:        { name: '翻自己的梦', cat: '记忆', icon: '🌙' },
+  submit_proposal:     { name: '提改进提议', cat: '其他', icon: '💡' },
+  get_my_proposals:    { name: '查提议进度', cat: '其他', icon: '📌' },
   web_search:        { name: '联网搜索',   cat: '联网',   icon: '🌐' },
   web_fetch:         { name: '抓网页',     cat: '联网',   icon: '🔗' },
+  search_image_source: { name: '以图搜图', cat: '联网',   icon: '🖼️' },
   report_feedback:   { name: '汇报反馈',   cat: '其他',   icon: '📣' },
   finish:            { name: '结束本次',   cat: '其他',   icon: '🏁' }
 };

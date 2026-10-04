@@ -1721,15 +1721,19 @@ export function buildToolDefs() {
             const p = (x) => String(x).padStart(2, '0');
             return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
           };
-          const items = picked.slice(0, 50).map((x) => ({
+          const items = picked.slice(0, 50).map((x, i) => ({
             id: x.id,
             title: x.title,
             kindLabel: x.kindLabel,
             statusLabel: PROPOSAL_STATUS_LABEL[x.status] || x.status,
             submittedAt: when(x.at),
             reviewedAt: when(x.reviewedAt),
-            // 管理员留的话只在她点进某一条时给全；列表态截断，省上下文
-            reviewNote: id ? String(x.reviewNote || '') : String(x.reviewNote || '').slice(0, 160)
+            // 管理员留的话：**单查**（带 id）给全文；**列表态最近 5 条也给全文**
+            // （2026-10-04 第四十对话 · 批 2，回执 Q7：她最需要看的正是最近的几条，
+            //   截 160 字会把"该怎么办"那半句掐掉）；更早的仍截断，省上下文。
+            reviewNote: (id || i < 5)
+              ? String(x.reviewNote || '')
+              : String(x.reviewNote || '').slice(0, 160)
           }));
           const count = (s) => all.filter((x) => x.status === s).length;
           return ok({
