@@ -449,16 +449,51 @@ async function buildTunnelOptions(url, ip, timeoutMs = 20000) {
     };
   }
   const socket = await openProxyTunnel(endpoint, { host: targetHost, port: targetPort }, timeoutMs);
+  // 🔴 必须**自己**把隧道包成 TLS（见 wrapTlsOverTunnel 的注释：给 createConnection 时
+  //    Node 不会替你包 ⇒ 不包就是"明文 HTTP 发进 HTTPS 隧道"）。
+  const tlsSocket = await wrapTlsOverTunnel(socket, targetHost, timeoutMs);
   return {
-    socket,
-    // HTTPS 走隧道后由我们自己 TLS：hostname 用**目标域名**（不是代理、也不是 IP）
-    // ⇒ SNI 与证书校验都指向真实目标，与直连时的行为一致。
+    socket: tlsSocket,
+    // 包完 TLS 之后，https.request 拿到的已经是 TLSSocket：
+    //   · `servername` / `rejectUnauthorized` 在 tls.connect 那一步就生效了（SNI 与证书校验指向真实目标）；
+    //   · 这里仍然带上，是为了与直连时的参数**逐字段一致**（判据钉"除连接方式外一字不差"）。
     host: targetHost,
     port: targetPort,
     path: url.pathname + url.search,
     hostHeader: url.host,
     servername: targetHost
   };
+}
+
+/**
+ * 把隧道 socket 包成 TLS 连接（**HTTPS 走代理时必须自己做这一步**）。
+ *
+ * 🔴 2026-10-05 真机 + 最小对照双证的一个真 bug（**本轮最严重的一个**，如实记）：
+ *   原来我写的是 `https.request({ createConnection: () => tunnel.socket, servername, ... })`，
+ *    以为"给了裸 socket，https.request 会自己包 TLS"。**错** —— 实测：给 `createConnection`
+ *    时 Node **不再做 TLS 包装**，于是**明文 HTTP 被发进 HTTPS 隧道**，
+ *    服务端回 `400 The plain HTTP request was sent to HTTPS port`。
+ *    最小对照（`_探-最小对照-createConnection.mjs`）：
+ *      A. `createConnection: () => net.connect(...)`  ⇒ 首包 `474554202f...`（明文 "GET "）
+ *      B. `createConnection: () => tls.connect(...)`  ⇒ 首包 `160301...`（TLS ClientHello）
+ *      C. 不给 createConnection（直连）               ⇒ 首包 `160301...`（Node 自己包了）
+ *    ⇒ 结论：**必须自己 `tls.connect({ socket })`**。另注 `net.Socket` 与 `TLSSocket` 不兼容
+ *      （"The first argument must be of type string"），⛔ 别用 `new tls.TLSSocket(...)` 那条路。
+ *
+ * ⚠️ 为什么离线判据没抓到：假代理只**转发字节**，不校验"隧道里是不是 TLS" ⇒ 明文请求照样能被
+ *    转给目标站（对 HTTP 目标恰好还能用），所以只有**真机打 pixiv** 才暴露。
+ *    ⇒ 判据已补：`_探-抓隧道里的字节.mjs` 那套断言（首包必须是 `0x16 0x03`）进了正式判据。
+ */
+function wrapTlsOverTunnel(socket, servername, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const tlsSocket = tls.connect(
+      { socket, servername, rejectUnauthorized: true },
+      () => { tlsSocket.setTimeout(0); resolve(tlsSocket); }
+    );
+    tlsSocket.once('error', reject);
+    // 隧道里握手也可能卡住 ⇒ 与建隧道同一个上限，⛔ 不无限期等
+    if (timeoutMs) tlsSocket.setTimeout(timeoutMs, () => tlsSocket.destroy(new Error(`TLS 握手超时（${timeoutMs}ms）：${servername}`)));
+  });
 }
 
 /** 统一的请求参数构造（保证"直连"与"走代理"除连接方式外**逐字段相同**）。 */
@@ -475,11 +510,11 @@ function buildRequestOptions(url, ip, tunnel, headers, timeout) {
     return { ...direct, servername: url.protocol === 'https:' ? url.hostname : undefined, rejectUnauthorized: url.protocol === 'https:' };
   }
   if (url.protocol === 'https:') {
-    // 隧道 socket 由 https.request 自己包 TLS（createConnection 给的就是裸连接）
+    // 🔴 `tunnel.socket` 已经是**包好 TLS 的** TLSSocket（见 wrapTlsOverTunnel 的注释）
     return { ...direct, createConnection: () => tunnel.socket, servername: tunnel.servername, rejectUnauthorized: true };
   }
   // HTTP 目标走 HTTP 代理：请求行必须是**绝对地址**（`tunnel.path` 已经是 url.href），
-  // 域名由代理端解析。⚠️ Host 头仍是目标域名（给目标服务器看），代理看的是请求行 —— 两者都对。
+  // 域名由代理端解析。⚠️ Host 头仍是目标域名（给目标服务器看），代理看的是 request-line —— 两者都对。
   return { ...direct, hostname: tunnel.host, port: tunnel.port, path: tunnel.path, createConnection: () => tunnel.socket };
 }
 
