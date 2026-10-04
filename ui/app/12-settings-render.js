@@ -9,6 +9,8 @@ function renderSettingsSection(c) {
     memory: () => renderMemorySettingsSection(c),
     persona: () => renderPersonaSection(c),
     allow: () => renderAllowSection(c),
+    // 🆕 2026-10-04（第四十对话 · 批 3）：新小节「她的能力」—— 见 renderAbilitiesSection 的注释
+    abilities: () => renderAbilitiesSection(c),
     wechat: () => renderWechatContactsSection(c),
     chat: () => renderChatSection(c),
     security: () => renderSecuritySection(c),
@@ -924,6 +926,71 @@ function renderAllowSection(c) {
       '微信联系人在「设置 → 微信联系人」里勾选，勾上就是把人加进这里的好友名单 —— 两边是同一份 allow.private，'
       + '在哪边改都生效。名单里的数字：群号来自 QQ 群；微信好友的 id 是从收到的微信消息里学到的派生数字，'
       + '所以别手填，去「微信联系人」页点选。')}`;
+}
+
+/**
+ * 「她的能力」（2026-10-04 第四十对话 · 批 3，方案 §1.2 / 用户拍板 Q5）
+ *
+ * 为什么单开一节：原来"她能不能用某个只读工具"散落在各处（用量自检在「用量与成本」页、
+ * 搜图在「搜索服务」页…），用户要给她开/关一个能力得先猜它在哪一页。
+ * ⇒ 这一节是**以后这类开关的统一落点**（第一个住进来的是「别处的我」）。
+ *
+ * ⚠️ 三条纪律（改这一节之前先读）：
+ *   ① 开关样式**复用**现有的 `.checkbox-row` / `.field select` / `.field input`，
+ *      ⛔ 不新造样式（这一页里"长得不一样"的东西越少，越不容易显得像两个产品）。
+ *   ② 保存走**通用的保存按钮**（`saveConfig()` 里按 `state.settingsSection === 'abilities'`
+ *      收这三项），⛔ 不在这里自己 POST —— 与本页其它分区保持同一条路径。
+ *   ③ `ownerIds` **本轮不暴露输入框**（用户拍板 Q6：先不填号），所以这里要**如实写清**
+ *      "还没填号 ⇒ 现在等于任何私聊" —— 否则用户选了「只认管理员」会以为已经收紧了。
+ */
+function renderAbilitiesSection(c) {
+  const se = c.selfElsewhere || {};
+  const enabled = se.enabled !== false;
+  const who = String(se.whoCanAsk || 'private');
+  const ownerIds = Array.isArray(se.ownerIds) ? se.ownerIds.filter(Boolean) : [];
+  // ⚠️ 这一节**一个新 `.hint` 都不许加**：`test-设置页说明小字分层.mjs` 有一条棘轮
+  //    （`class="hint"` 计数 ≤ 44，"本轮只减不增"）。所以说明一律走既有的两级载体：
+  //      · 一行常显 / 一句要点 ⇒ `hintLine(…)`（= `.ihint-line` + ⓘ）
+  //      · 细节 ⇒ 原生 `<details class="hint-more">` + `.hint-more-body`
+  //    ⛔ 也别自己写折叠/样式（"折叠长什么样"只有一处定义）。
+  return `
+    <h3>她的能力</h3>
+    ${hintLine('她能用哪些「只能看、不会改」的能力。关掉立刻生效（不用重启）。',
+      '关掉一个能力时，提示词里教她怎么用的那句话会一起消失 —— 不会出现"提示词让她调一个不存在的工具"。')}
+
+    <div class="form-panel">
+      <h4 style="margin-top:0">看自己在别的会话里什么样</h4>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-selfelsewhere" ${enabled ? 'checked' : ''} />
+        <label for="cfg-selfelsewhere">启用 get_my_self_elsewhere（只读）</label></div>
+      ${hintLine('给她的是"别处还有几个会话活着、活不活跃、你最近开过几次口、最后一次是几号几点"这类大概印象。',
+        '刻意不给会话名、不给任何人的话、也不给聊天内容 —— 这条边界在代码层做死（返回里连 chatKey 都没有），不是靠提示词求她自觉。'
+        + '只在私聊里能用：群里连调都调不到 —— 在群里报出别处的事，正是这个项目最忌讳的那一类。')}
+
+      <div class="field-row">
+        <div class="field"><label>谁能问</label>
+          <select id="cfg-selfelsewhere-who" ${enabled ? '' : 'disabled'}>
+            <option value="private" ${who !== 'ownerOnly' ? 'selected' : ''}>任何私聊（默认）</option>
+            <option value="ownerOnly" ${who === 'ownerOnly' ? 'selected' : ''}>只认管理员本人（要填号）</option>
+          </select>
+          ${ownerIds.length
+            ? hintLine(`已填 ${ownerIds.length} 个管理员号。`, '它们在 config.json 的 selfElsewhere.ownerIds 里。')
+            : hintLine('⚠️ 还没填号 ⇒ 现在等于任何私聊；选了「只认管理员本人」也不会真的收紧。',
+              '要收紧就去 config.json 里把 selfElsewhere.ownerIds 填上（这一页故意不给输入框：还没定填哪个号）。')}</div>
+        <div class="field"><label>默认看最近几天</label>
+          <input type="number" id="cfg-selfelsewhere-days" min="1" max="30" value="${esc(se.days ?? 7)}" ${enabled ? '' : 'disabled'} />
+          ${hintLine('1~30 天。她自己调用时传的天数优先。',
+            '配置里写了超范围的值也会被钳回 1~30（界面、工具、后端三道都不互相信任）。')}</div>
+      </div>
+      <details class="hint-more">
+        <summary>这一节是给谁用的、以后还会住什么</summary>
+        <div class="hint-more-body">
+          这一节的定位是<b>「她能不能用某个只读工具」的统一落点</b> —— 以后这类开关都住这里，
+          不必再去「用量与成本」或「搜索服务」页里找。<br>
+          「别处的我」是她自己的提案（<code>789584d1</code>）后半条：她想确认"我在别的会话里也是我"，
+          但<b>不该</b>因此把别处的事拿到这里说 —— 所以能力给到"大概印象"就停手。
+        </div>
+      </details>
+    </div>`;
 }
 
 /**

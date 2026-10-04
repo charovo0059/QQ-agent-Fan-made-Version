@@ -595,6 +595,10 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
     // 🆕 2026-09-26 第二十五对话（提案 c7486672）：核心记忆是**默认开**的（她提的、已采纳），
     //    所以判定是 `!== false` —— 与上面那条默认关的写法**有意相反**，两边都别改错方向。
     if (CORE_MEMORY_TOOLS.has(d.name) && cfg?.coreMemory?.enabled === false) return false;
+    // 🆕 2026-10-04（第四十对话 · 批 3，方案 §3.2）：「别处的我」是**默认开**的开关
+    //    ⇒ 判定写 `=== false`（与上面 usage 那条**有意相反**，别改错方向）。
+    //    ⚠️ 提示词里那一句跟着这个开关走（见 `prompt.js` 的 memoryRules）—— 关掉工具就不能再提它。
+    if (d.name === 'get_my_self_elsewhere' && cfg?.selfElsewhere?.enabled === false) return false;
     return true;
   });
 }
@@ -1787,7 +1791,31 @@ export function buildToolDefs() {
           if (!ctx.store || typeof ctx.store.listChats !== 'function') {
             return err('读不到会话存档（本次运行的调用点没接上）。别猜，直接说现在看不到。');
           }
-          const days = Math.min(30, Math.max(1, Number(args?.days) || 7));
+          // 🆕 2026-10-04（第四十对话 · 批 3，方案 §3.2）：给谁看 / 看几天 —— 从配置读，仅此两处新增。
+          const cfgSelf = getConfig()?.selfElsewhere || {};
+          // 问的人是谁：私聊的 chatKey 就是 `private:<QQ号>` ⇒ 现取，⛔ 不新增 ctx 字段。
+          const askerId = String(ctx.chatKey || '').startsWith('private:')
+            ? String(ctx.chatKey).slice('private:'.length)
+            : '';
+          const ownerIds = (Array.isArray(cfgSelf.ownerIds) ? cfgSelf.ownerIds : [])
+            .map((x) => String(x ?? '').trim()).filter(Boolean);
+          // 🔴 `whoCanAsk='ownerOnly'` 但 `ownerIds` 是空的 ⇒ **如实退回 private**：
+          //    不然"还没填号"会静默变成"谁都调不到"（那种坏法在界面上完全看不出来）。
+          const ownerOnly = String(cfgSelf.whoCanAsk || 'private') === 'ownerOnly' && ownerIds.length > 0;
+          if (ownerOnly && !ownerIds.includes(askerId)) {
+            return err('这个只有管理员本人能看（config.selfElsewhere.whoCanAsk=ownerOnly）。'
+              + '别猜，直接说这个能力对当前这位不开放。');
+          }
+          // 🆕 单轮次数上限（内部护栏，**不出现在配置里**）：它每次要遍历 listChats() 并对
+          //    活跃会话各读 300 条消息 ⇒ 给个上限，防她被诱导反复刷同一件事。
+          const callCap = 3;
+          const used = Number(ctx.__selfElsewhereCalls) || 0;
+          if (used >= callCap) {
+            return err(`这一轮已经查过 ${used} 次了（上限 ${callCap} 次）。拿手上已有的印象回答，别反复查。`);
+          }
+          ctx.__selfElsewhereCalls = used + 1;
+          // 天数优先级：**工具入参 > 配置 > 7**，两边都钳 1~30。
+          const days = Math.min(30, Math.max(1, Number(args?.days) || Number(cfgSelf.days) || 7));
           const since = Date.now() - days * 86400000;
           const rows = [];
           let groups = 0; let privates = 0;
