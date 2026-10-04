@@ -334,6 +334,21 @@ async function saveConfig({ quiet = false } = {}) {
     //       —— 典型的"界面看着没事、数据被改掉"。
   }
 
+  // 🆕 2026-10-04（第四十对话 · 批 3，方案 §3.2 / 用户拍板 Q5）：设置页新小节「她的能力」。
+  //   ⚠️ `ownerIds` **这一个键不在这里收** —— 本轮界面故意不给输入框（用户拍板 Q6：先不填号）。
+  //      `...c.selfElsewhere` 那行展开就是为了**保住已有值**：不展开的话每次点保存都会把它清成 undefined，
+  //      而"点一下保存就把用户手填的号抹掉"正是本项目最忌的那一类静默破坏。
+  if (sec === 'abilities') {
+    // ⚠️ 别用 `intIn` —— 它是上面 `if (sec === 'search')` 块里的**局部函数**，这里取不到（会 ReferenceError）。
+    const daysRaw = Math.round(Number(val('#cfg-selfelsewhere-days', c.selfElsewhere?.days ?? 7)));
+    patch.selfElsewhere = {
+      ...(c.selfElsewhere || {}),
+      enabled: chk('#cfg-selfelsewhere', c.selfElsewhere?.enabled !== false),
+      whoCanAsk: val('#cfg-selfelsewhere-who', c.selfElsewhere?.whoCanAsk || 'private') === 'ownerOnly' ? 'ownerOnly' : 'private',
+      days: Number.isFinite(daysRaw) ? Math.min(30, Math.max(1, daysRaw)) : 7
+    };
+  }
+
   if (sec === 'persona') {
     patch.persona = {
       botName: val('#cfg-botname', c.persona.botName).trim() || '小鲸鱼',
