@@ -11,6 +11,8 @@ function renderSettingsSection(c) {
     allow: () => renderAllowSection(c),
     // 🆕 2026-10-04（第四十对话 · 批 3）：新小节「她的能力」—— 见 renderAbilitiesSection 的注释
     abilities: () => renderAbilitiesSection(c),
+    // 🆕 2026-10-04（第四十一对话 · 内置代理批 A，回执 V7）：新小节「网络」
+    network: () => renderNetworkSection(c),
     wechat: () => renderWechatContactsSection(c),
     chat: () => renderChatSection(c),
     security: () => renderSecuritySection(c),
@@ -1423,6 +1425,112 @@ return `
  *   · `security.allowPrivateImageHosts`（允许内网图床）：同样只在 config.json 里。
  * 与上一轮补 `api.videoMode` 输入框是同一类坑：**键是真的、界面没有 ⇒ 用户摸不到**。
  */
+/**
+ * 「网络」（2026-10-04 第四十一对话 · 内置代理批 A，回执 V4+V7）
+ *
+ * 为什么**单开一节**而不是并进「她的能力」（回执 V7 的原文理由）：
+ *   「她的能力」是**她**的能力，代理是**所有者**的基础设施 —— 混在一起就会回到
+ *   "开关散落各处、要开一个功能得先猜它在哪一页"那个老问题。
+ *
+ * 三条纪律（与「她的能力」同款，改这一节之前先读）：
+ *   ① 控件**复用**既有样式：`.checkbox-row` / `.field select` / `.field input`，
+ *      ⛔ 不新造样式；
+ *   ② 保存走**通用保存按钮**（`saveConfig()` 里按 `sec === 'network'` 收）；
+ *   ③ 🔴 **一个新 `.hint` 都不许加** —— `test-设置页说明小字分层.mjs` 有一条棘轮
+ *      （`class="hint"` 计数 ≤ 44、"只减不增"）。说明一律走既有的两级载体：
+ *      一行常显 ⇒ `hintLine(…)`；细节 ⇒ `<details class="hint-more">`。
+ *
+ * 🔴 这一节**刻意不做**的事（回执 V4/V5/V6，⛔ 别顺手加回来）：
+ *   · 不做订阅解析 / 节点 URI（`vmess://` 之类）；
+ *   · 不做内核管理（起停/配置生成）—— 那是 L1，本轮拍板不做；
+ *   · 不做 TUN（L3）；不碰 karing 的任何设置（**并存**：它继续由用户手动管）。
+ */
+function renderNetworkSection(c) {
+  const p = c.proxy || {};
+  const byRule = String(p.mode || 'off') === 'byRule';
+  const raw = String(p.http || '').trim();
+  // 把已存的 `http://127.0.0.1:3067` 拆进"地址 / 端口"两格（用户可能手改过 config.json，
+  // 所以这里要能解析任意合法形态，而不是只认默认值）。
+  let addr = '127.0.0.1', port = '3067';
+  if (raw) {
+    try {
+      const u = new URL(raw.includes('://') ? raw : `http://${raw}`);
+      addr = u.hostname || addr;
+      port = u.port || (u.protocol === 'https:' ? '443' : '80');
+    } catch { addr = raw; }
+  }
+  const rules = Array.isArray(p.rules) ? p.rules.filter(Boolean).join('\n') : '';
+  const hasPassword = p.hasPassword === true || Boolean(p.password);
+  return `
+    <h3>代理</h3>
+    ${hintLine('只让本应用自己的出网请求走代理；不影响系统、不影响别的软件。',
+      '这是"路线 C"的前置：pixiv / dlsite 这类站本机直连不通，走代理之后插画路才能拿到'
+      + '真 R-18 与"最新/热门"排序。它<b>不是</b>整机 VPN —— 浏览器和别的软件照旧走直连。')}
+
+    <div class="form-panel">
+      <div class="field"><label>模式</label>
+        <select id="cfg-proxy-mode">
+          <option value="off" ${byRule ? '' : 'selected'}>不启用（默认）</option>
+          <option value="byRule" ${byRule ? 'selected' : ''}>按规则走代理（只代理下面名单里的站）</option>
+        </select>
+        ${hintLine('默认「不启用」—— 这一页不动的话，联网行为与以前一模一样。',
+          '按规则走代理是<b>白名单制</b>：只有命中「代理哪些站」名单的目标才走代理，'
+          + '其余一律直连。⛔ 刻意<b>不做</b>"全局代理 + 排除名单" —— 那会把模型 API、'
+          + '本机搜索服务、QQ/微信通道一起塞进代理，故障起来看不出原因。')}</div>
+
+      <div class="field-row">
+        <div class="field"><label>代理地址</label>
+          <input type="text" id="cfg-proxy-addr" value="${esc(addr)}" placeholder="127.0.0.1" />
+          ${hintLine('一般是本机（127.0.0.1）—— 也就是 karing 那种本地代理客户端。',
+            '这里<b>不要</b>写用户名密码（会被拒掉）：认证走右边那两格。')}</div>
+        <div class="field"><label>端口</label>
+          <input type="number" id="cfg-proxy-port" min="1" max="65535" value="${esc(port)}" />
+          ${hintLine('karing 默认：基于规则 3067 · 全代理 3066 · 全直连 3065。',
+            '先用 3067（让 karing 自己决定哪些流量出国）。若"测试连接"报不通，'
+            + '多半是 karing 的规则把 pixiv 判成直连了 ⇒ 换 3066（全代理）再测一次。')}</div>
+      </div>
+
+      <div class="field-row">
+        <div class="field"><label>用户名（多数本地代理不需要）</label>
+          <input type="text" id="cfg-proxy-user" value="${esc(p.user || '')}" placeholder="留空 = 不要认证" /></div>
+        <div class="field"><label>密码</label>
+          <input type="password" id="cfg-proxy-pass" value="${hasPassword ? '******' : ''}" placeholder="留空 = 不要认证" />
+          ${hintLine(hasPassword ? '已保存密码（输入框里显示的是占位符）。想改就直接覆盖输入，留空并保存 = 取消认证。' : '留空即可（本机代理一般不校验）。',
+            '密码<b>不会</b>被下发到界面：读取配置时它只回一个"有没有填"的布尔值，'
+            + '所以这里显示的是占位符而不是真密码。')}</div>
+      </div>
+
+      <div class="field"><label>代理哪些站（一行一个；填 example.com 时它的子域也走代理）</label>
+        <textarea id="cfg-proxy-rules" rows="6" placeholder="每行一个域名，例如&#10;www.pixiv.net&#10;i.pximg.net" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${esc(rules)}</textarea>
+        ${hintLine('名单空 = 谁都不走代理（改了模式也等于没开）。',
+          '支持子域：写 <code>pixiv.net</code> 时 <code>www.pixiv.net</code>、<code>i.pximg.net</code>… 都算命中；'
+          + '但 <code>pixiv.net.evil.com</code> 这种"把名单域名当前缀"的<b>不算</b>。'
+          + '写法 <code>*.pixiv.net</code> 与 <code>pixiv.net</code> 等价。')}</div>
+
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-small" id="proxy-test-btn" type="button">测试连接</button>
+        <span id="proxy-test-result" class="muted"></span>
+      </div>
+      ${hintLine('「测试连接」打的是我们真正的联网层（不是浏览器那套），所以它报通就是真的通。',
+        '测的是 pixiv 首页。⚠️ 它按<b>当前界面上填的</b>值测（不用先保存），'
+        + '所以可以边改端口边试；测通之后再点上面的「保存设置」。'
+        + '⚠️ 前提是 <b>karing 得开着</b> —— 本应用不会去启动它，也不会改它的任何设置。'
+        + '⚠️ 代理<b>密码</b>这一项：测试用的始终是<b>已保存</b>的那份 —— 改了密码要先点「保存设置」再测。')}
+
+      <details class="hint-more">
+        <summary>它到底管哪几条路、不管哪几条</summary>
+        <div class="hint-more-body">
+          管的是<b>我们自己的三种出网方式</b>：① 手写的 https 客户端（搜索、抓网页、插画路）·
+          ② 以图搜图那几个套 Cloudflare 的站 · ③ 零散的普通请求。<br>
+          <b>不管</b>：浏览器的流量、别的软件、系统路由 —— 那些仍然直连。<br>
+          🔴 一条<b>如实说明</b>（别指望它做到做不到的事）：走代理之后，目标域名是<b>代理端</b>解析的，
+          所以「解析出内网地址就拒绝」那一层只对<b>直连</b>生效，对代理连接是<b>有意识地交给代理端</b>；
+          而<b>域名级</b>的校验（协议、禁止的域名形态、逐跳重定向重校验）<b>一个字都没松</b>。
+        </div>
+      </details>
+    </div>`;
+}
+
 function renderSecuritySection(c) {
   const lock = c.security?.browseLock || {};
   const hosts = Array.isArray(lock.hosts) ? lock.hosts.join('\n') : '';

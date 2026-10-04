@@ -2,6 +2,12 @@
 // （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
 import { sanitizeUserText, escapeCqText, toFileUri, fmtBytes } from './util.js';
+import { getConfig } from './config.js';
+import { initProxyConfig, resolveProxyFor } from './proxy.js';
+
+// 🔴 注入（同 safe-fetch/web-search/cf-fetch）：不注入 ⇒ 代理判定恒 false ⇒
+//    pximg 那条"有代理就走原链"的优先级会静默失效（退回一律加反代，看不出区别）。
+initProxyConfig(getConfig);
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
@@ -518,9 +524,16 @@ export function annotateMagnetLinks(text) {
  * ⚠️ 只换 **host**：路径与查询**逐字保留**。⛔ 不用 `new URL()` 拼回去 —— 它会对
  *    路径做一遍百分号编码，把"逐字保留"变成"大多数时候保留"（那种模糊的保证没法判据）。
  *
- * @returns {string} 反代地址；不是 `i.pximg.net` 的链接返回空串（原样不动）
+ * 🔴 2026-10-04（第四十一对话 · 内置代理批 A，回执 §四 须知 5）：**它降级为"没配代理时的备用路径"**。
+ *    有了代理之后 pximg **本来就能直连**（那正是这批改动要解锁的东西）⇒ 那时再给一条
+ *    `i.pixiv.re` 反而是把人往一个多余的第三方反代上引。
+ *    ⇒ 优先级：**有代理走原链**（本函数返回空串 = 调用方原样不动）；**没代理才用反代**。
+ *    ⛔ 别把这条判断删掉改回"一律加反代"——那会让"代理生效了"这件事在用户眼里看不出区别。
+ *
+ * @returns {string} 反代地址；不是 `i.pximg.net` 的链接、或**代理已启用**时返回空串（原样不动）
  */
 export function pixivProxyUrl(url) {
+  if (resolveProxyFor('i.pximg.net')) return '';   // 有代理 ⇒ 原链可直连，不再引第三方反代
   const m = /^https?:\/\/i\.pximg\.net(\/[^\s]*)?$/i.exec(String(url ?? '').trim());
   return m ? `https://i.pixiv.re${m[1] || ''}` : '';
 }

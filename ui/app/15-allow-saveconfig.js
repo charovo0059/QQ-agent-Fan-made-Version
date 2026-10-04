@@ -442,6 +442,59 @@ async function saveConfig({ quiet = false } = {}) {
     }
   }
 
+  // 🆕 2026-10-04（第四十一对话 · 内置代理批 A，回执 V4+V7）：设置页新小节「网络」。
+  //
+  // 🔴 三条纪律（都有代价，别简化）：
+  //   ① **不暴露的键要展开原值**：`mode`/`http`/`user`/`rules` 之外的键（例如以后加的字段）
+  //      必须靠 `...c.proxy` 保住 —— 不展开的话"打开设置页点一下保存"就把它抹掉。
+  //   ② 🔴 **密码绝不回显真值**：GET /api/config 只回 `hasPassword` 布尔（见 app.js 的
+  //      SECRET_KEY_PATTERN，`password` 命中它）。所以这里：
+  //        · 界面值还是占位符 `******` ⇒ **不写这个键**（深合并保留服务端原值）；
+  //        · 用户填了真的新密码 ⇒ 才写；
+  //        · 用户**清空**了它 ⇒ 写空串（= 明确要取消认证）。
+  //      ⚠️ 别写成"空值就不写"——那会让"清空密码"永远生效不了（用户会遇到"删了却还在用"）。
+  //   ③ 地址与端口**合成一个 URL** 存进 `proxy.http`（后端只认一个字符串）；
+  //      模式不是 byRule 时地址**照实保存**（用户只是先关掉开关、不想丢配置）。
+  if (sec === 'network') {
+    const mode = val('#cfg-proxy-mode', 'off') === 'byRule' ? 'byRule' : 'off';
+    // 端口钳到合法区间；地址去协议前缀与路径（用户可能整条粘进来）。
+    let addr = String(val('#cfg-proxy-addr', '') || '').trim()
+      .replace(/^[a-z]+:\/\//i, '').split('/')[0].split('?')[0].trim();
+    // 从地址格里认出一个显式端口（`host:7890`）——**它优先于端口那一格**：
+    //   "整条 URL 粘进来"是最常见的用法，那时端口格里的旧值（默认 3067）会把它悄悄改掉。
+    //   ⚠️ 两处坑（第一版都踩了，判据当场抓到）：
+    //     ① 原来写成 `addr.split(':')[0]`，第一刀切在**协议那个冒号**上 ⇒ 整条留下；
+    //     ② IPv6 字面量（`[::1]:7890`）不能按第一个冒号切（会留下 `[`）。
+    let pastedPort = '';
+    {
+      const m = /^\[[^\]]+\]:(\d+)$/.exec(addr) || /^([^:]+):(\d+)$/.exec(addr);
+      if (m) { pastedPort = m[m.length - 1]; addr = m.length === 3 ? m[1] : addr; }
+    }
+    // 端口那格：**只认数字**（用户可能手打进来非数字 ⇒ 那一格等于没填）
+    const portStr = String(val('#cfg-proxy-port', '') ?? '').replace(/[^\d]/g, '');
+    const portRaw = Math.round(Number(pastedPort || portStr || 3067));
+    const port = Number.isFinite(portRaw) ? Math.min(65535, Math.max(1, portRaw)) : 3067;
+    const rulesRaw = String(val('#cfg-proxy-rules', '') || '');
+    const rules = [...new Set(rulesRaw
+      .split('\n')
+      .map((s) => s.trim().toLowerCase()
+        // 容错：连协议/路径一起粘进来 ⇒ 只留主机名（与浏览锁定那条同样的处理）
+        .replace(/^[a-z]+:\/\//i, '').split('/')[0].split('?')[0].split('#')[0]
+        .replace(/:\d+$/, '')
+        .replace(/^\.+/, ''))
+      .filter(Boolean))];
+    const enteredPass = String(val('#cfg-proxy-pass', '') || '');
+    patch.proxy = {
+      ...(c.proxy || {}),
+      mode,
+      http: addr ? `http://${addr}:${port}` : '',
+      user: String(val('#cfg-proxy-user', '') || '').trim(),
+      rules
+    };
+    // 见纪律②：只有"用户真的动了这一格"才写它（占位符 ****** = 没动）。
+    if (enteredPass !== '******') patch.proxy.password = enteredPass;
+  }
+
   // ── 安全与浏览（2026-09-25 第十八对话加）────────────────────────────────
   // ⚠️ 这一节的两个键**本来就在 config.js 里**（`security.browseLock` 是 2026-09-20
   //    吸收上游时接进 web_fetch 的），但**从来没有界面** ⇒ 用户明确说"在界面上找不到"。

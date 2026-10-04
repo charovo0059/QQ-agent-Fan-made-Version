@@ -7,11 +7,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { getConfig, updateConfig, ROOT, DATA_DIR } from './config.js';
+import { getConfig, updateConfig, setRuntimeConfig, loadConfig, ROOT, DATA_DIR } from './config.js';
 // 「新加进白名单的会话默认档位」（2026-10-03 第三十五对话，用户拍板）：
 // 私聊全响应 / 群聊仅艾特。⛔ 两个入口必须共用这一份（见该文件顶部）。
 import { applyNewChatDefaults } from './tier-defaults.js';
 import { customSearch } from './web-search.js';
+import { safeFetch, isPrivateIp } from './safe-fetch.js';
+import { describeProxy, hostMatchesRules, initProxyConfig } from './proxy.js';
+// 🔴 注入（与 safe-fetch/web-search/cf-fetch 同一个理由）：不注入 ⇒ proxyEnabled() 恒 false。
+// ⚠️ 用的是**上面第 10 行已经 import 进来的那个 `getConfig`** —— 别在这里再 import 一次
+//    （同一个模块 import 两遍会得到两个绑定，日后有人只改一处会很难发现）。
+initProxyConfig(getConfig);
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, fetchForward, forwardIdFromData } from './onebot.js';
 import { ensureStickerImage, buildToolDefs } from './tools.js';
 import { ChatStore } from './store.js';
@@ -1497,6 +1503,45 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     if (!token) return true;
     const url = new URL(req.url, 'http://127.0.0.1');
     return req.headers['x-console-token'] === token || url.searchParams.get('token') === token;
+  }
+
+  /**
+   * 从「测试连接」的请求体里拼一份**沙箱代理配置**（🆕 2026-10-04 第四十一对话 · 批 A）。
+   *
+   * 为什么要有沙箱这回事：回执要求那个按钮"按界面上填的值测"（可以边改端口边试、不必先保存）
+   *   ⇒ 就得允许请求体带一份候选配置。而它**只能改内存**（调用方用 setRuntimeConfig），
+   *      ⛔ 绝不落盘 —— 用户没点「保存设置」就不该生效（本项目的"未保存的值被写进线上配置"
+   *      那一族事故就是这么来的，见交接 §1 第 18 条）。
+   *
+   * @returns {null|{ready:boolean, error?:string, proxy?:object, rules?:string[]}}
+   *   `null` = 请求体没带配置 ⇒ 调用方按**已保存的**配置测（旧行为）。
+   */
+  function buildProxySandbox(body) {
+    if (!body || typeof body !== 'object' || body.mode === undefined) return null;
+    const mode = String(body.mode || 'off') === 'byRule' ? 'byRule' : 'off';
+    let http = String(body.http || '').trim();
+    if (mode !== 'off') {
+      if (!http) return { ready: false, error: '没填代理地址 —— 请在「代理地址 / 端口」两格填上（一般是 127.0.0.1）' };
+      if (!/^[a-z]+:\/\//i.test(http)) http = `http://${http}`;
+      let u;
+      try { u = new URL(http); } catch { return { ready: false, error: `代理地址无法解析：${http}` }; }
+      if (!['http:', 'https:'].includes(u.protocol)) return { ready: false, error: `代理协议只支持 http/https（收到 ${u.protocol}）` };
+      // 与 proxy.js 的 parseProxyEndpoint 同一条纪律：URL 里不许内嵌凭据
+      if (u.username || u.password) return { ready: false, error: '代理地址里不要写用户名/密码（用下面那两格）' };
+      const port = Number(u.port || 80);
+      if (!Number.isFinite(port) || port <= 0 || port > 65535) return { ready: false, error: `代理端口不合法：${u.port}` };
+      http = `${u.protocol}//${u.hostname}:${port}`;
+    }
+    const cur = getConfig().proxy || {};
+    const rules = Array.isArray(body.rules)
+      ? body.rules.map((x) => String(x ?? '').trim().toLowerCase()).filter(Boolean)
+      : (Array.isArray(cur.rules) ? cur.rules : []);
+    // 🔴 密码**只认已存的那份**（`getConfig().proxy.password`），⛔ 不读请求体里的 password。
+    //    理由：界面上的密码输入框显示的是占位符 `******`（服务端从不下发真密码），
+    //    而"占位符被当成真密码发过去"是一个**很容易犯、且表现为"认证失败"**的坑。
+    //    ⇒ 界面上填的新密码**先保存、再测**（这一页因此把"测完重新 loadSettings"也写进了交互）。
+    //    代价如实写在界面的小字里：改完密码要先点保存再测。
+    return { ready: true, proxy: { ...cur, mode, http, user: String(body.user ?? '').trim(), password: String(cur.password ?? ''), rules }, rules };
   }
 
   // ── 配置脱敏 ────────────────────────────────────────────────────────────
@@ -3222,6 +3267,87 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         // 注意：不要用手工逐字段列举——之前漏了 5 个搜索 Key 和 2 个 SnowLuma 令牌，
         // 加新 provider 时还会继续漏。这里按字段名模式统一处理。
         return json(res, 200, sanitizeConfig(cfgNow));
+      }
+
+      // 🆕 2026-10-04（第四十一对话 · 内置代理批 A）：代理状态与「测试连接」。
+      //    为什么要一个**后端**测试按钮、而不是前端直接打一个请求：
+      //    · 前端在渲染进程里 fetch 走的是 Chromium 通道，**与我们的代理层不是同一条路**
+      //      ⇒ 它通了也不能证明 safeFetch 通了（本项目最忌"看着通了其实是另一条路"）；
+      //    · 这里打的正是 `safeFetch` 本体 ⇒ 报"通"的时候，走的就是她平时联网那条路。
+      if (pathname === '/api/proxy/status' && method === 'GET') {
+        return json(res, 200, { ok: true, ...describeProxy() });
+      }
+
+      if (pathname === '/api/proxy/test' && method === 'POST') {
+        const body = await readBody(req);
+        const t0 = Date.now();
+
+        // ── 它按「界面上填的值」测（回执要求"可以边改端口边试、不必先保存"）──────
+        // 🔴 安全约束（缺一不可，否则这里就变成一个任意的"经代理发请求"口子）：
+        //   ① 目标必须是 http/https，且主机**必须命中代理名单**；
+        //   ② 只改**内存里的沙箱配置**，⛔ 一个字节都不落盘 —— 而且**测完必须恢复**（见下）。
+        //
+        // 🔴🔴 2026-10-05 真机抓到并修掉的一个真 bug（如实记）：
+        //   第一版把沙箱配置 `setRuntimeConfig(...)` 写进去之后、**成功/失败两条路都没有恢复**。
+        //   而它是**进程级**的运行时配置 ⇒ 一次「测试连接」会把**整个应用**的联网行为
+        //   改成"按界面上那个（可能根本没保存的）代理配置走"，**本进程自己**随后所有联网
+        //   （她回话时的搜索、抓网页、插画路）都被它影响，直到重启 —— 而界面上完全看不出来。
+        //   真机证据：测完再读 `/api/config` 得到 `mode:"byRule"` + 那个假代理端口，
+        //   而**盘上文件仍是 `mode:"off"`**（⇒ 落盘没变、只有内存被污染）。
+        //   ⇒ 修法：**先快照、放进 try/finally 无条件恢复**，并**校验恢复成功**；
+        //     万一恢复失败（不该发生），就从**盘上**重新加载一份，绝不留脏内存。
+        const snapshot = getConfig();
+        const sandbox = buildProxySandbox(body);
+        const target = String(body?.url || 'https://www.pixiv.net/').trim();
+        let targetHost = '';
+        try {
+          const u = new URL(target);
+          if (!['http:', 'https:'].includes(u.protocol)) throw new Error('只允许 http/https');
+          targetHost = u.hostname;
+        } catch (error) {
+          return json(res, 200, { ok: false, ms: 0, error: `测试目标不合法：${String(error?.message ?? error)}` });
+        }
+        // 先把"能不能测"判完，再动内存配置（⛔ 别在会被 return 掉的分支之后再改配置）
+        const effective = sandbox ? sandbox.proxy : snapshot.proxy;
+        if (sandbox && !sandbox.ready) return json(res, 200, { ok: false, ms: 0, error: sandbox.error });
+        if (String(effective?.mode || 'off') !== 'byRule') {
+          return json(res, 200, { ok: false, ms: 0, error: '代理没启用（模式是 off）—— 先选「按规则走代理」再测' });
+        }
+        const rules = sandbox ? sandbox.rules : (Array.isArray(effective?.rules) ? effective.rules : []);
+        if (!hostMatchesRules(targetHost, rules)) {
+          return json(res, 200, {
+            ok: false, ms: 0,
+            error: `测试目标 ${targetHost} 不在「代理哪些站」名单里 —— 按白名单制它本来就不走代理，测不出代理通不通（要测它就先把它加进名单）`
+          });
+        }
+        if (isPrivateIp(targetHost) || /^localhost$/i.test(targetHost)) {
+          return json(res, 200, {
+            ok: false, ms: 0,
+            error: `测试目标 ${targetHost} 是本机/内网地址 —— 联网层会（正确地）拒绝它，所以它证明不了代理通不通。`
+              + `默认打的是 pixiv 首页；换成公网站点再测。`
+          });
+        }
+        let result
+        try {
+          if (sandbox) setRuntimeConfig({ ...snapshot, proxy: sandbox.proxy });
+          // 用 safeFetch 本体：她平时联网走的就是它 ⇒ 这条判据才有意义。
+          const r = await safeFetch(target, { maxBytes: 4096 });
+          result = { ok: true, ms: Date.now() - t0, status: r.statusCode, url: r.url, endpoint: describeProxy().endpoint };
+        } catch (error) {
+          // 🔴 不通就**如实报**（含代理本身的错误原文）：⛔ 不静默、不吞掉、不返回 ok:true。
+          result = { ok: false, ms: Date.now() - t0, endpoint: describeProxy().endpoint, error: String(error?.message ?? error) };
+        } finally {
+          // 🔴 无条件恢复（见上面那段真机 bug）。只有动过才恢复，避免无谓写回。
+          if (sandbox) {
+            setRuntimeConfig(snapshot);
+            if (getConfig() !== snapshot) {
+              // 不该发生；真发生了就**重置成盘上那份**，⛔ 绝不留脏内存
+              console.error('[proxy] 沙箱配置恢复失败，已从磁盘重载');
+              setRuntimeConfig(loadConfig());
+            }
+          }
+        }
+        return json(res, 200, result);
       }
 
       if (pathname === '/api/config' && method === 'POST') {
