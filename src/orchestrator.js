@@ -21,6 +21,11 @@ import { currentProviders } from './providers.js';
 //    2026-10-03 第一版就是这么写错的：5 个用真 ChatStore 的 e2e 判据当场全炸
 //    （`this.store.takeTrimMark is not a function`），而**静态正则判据照样绿** —— 它把我写错的接收者一起钉死了。
 import { takeTrimMark } from './store.js';
+// 🆕 2026-10-04（第四十对话 · 批 2）：提案"有回复了"的高水位**也是模块级导出**
+//    （记号住在 `data/proposal-reply-seen.json`，与 takeTrimMark 同一族、同一条纪律：
+//    它不属于某个 chat 的 state）⇒ **直接调它**，⛔ 别写成 `this.store.takeProposalReplyNotice(...)`
+//    或 `this.proposals.xxx(...)` —— 那正是上面 takeTrimMark 那条注释记下的坑（坑 160 那一族）。
+import { takeProposalReplyNotice } from './proposals.js';
 
 // ── 主动开口的三道闸（纯函数，便于单测）──────────────────────────────────
 //
@@ -567,6 +572,10 @@ export class Orchestrator {
     //    记号住在 `data/trim-marks.json`（不在存档里）⇒ `deleteChat` 把存档整个删掉也留得住。
     //    ⚠️ 它是 `store.js` 的**模块级导出**，不是 store 实例的方法（见文件头那段 import 注释）。
     session.trimInfo = takeTrimMark(chatKey);
+    // 🆕 2026-10-04（第四十对话 · 批 2）：她提过的提案**有人回复了** ⇒ 也在这里取一次。
+    //    ⚠️ 同上：放在重试循环**之外**（循环内取会在第一次就清空，重试那轮看不到这条提醒）。
+    //    ⚠️ 首次不播报（只把天花板记下来）—— 见 `proposals.js` 里 `takeProposalReplyNotice` 的说明。
+    session.proposalReplyInfo = takeProposalReplyNotice(chatKey);
 
     // 同一轮上文：留痕，便于坐实"这次到底补了哪几条"（照 triggerText 的写法，都是小字符串）。
     // ⚠️ 只存 mid + 摘要，**不存条目本身** —— 存档瘦身（2026-09-17）刚把 inputMessages 剥掉，
@@ -767,7 +776,9 @@ export class Orchestrator {
       tierInfo,
       sweptInfo: session.sweptInfo || null,
       // 🆕 2026-10-03 第三十八对话（提案 d27c6e7c）：被删存档留下的"毛边"
-      trimInfo: session.trimInfo || null
+      trimInfo: session.trimInfo || null,
+      // 🆕 2026-10-04 第四十对话 · 批 2：她提过的提案"有回复了"（每会话一次，取走即清）
+      proposalReplyInfo: session.proposalReplyInfo || null
     });
 
     // 主动唤醒时，真正发给模型的 user 消息会多一句引导语。

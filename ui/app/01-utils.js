@@ -54,6 +54,21 @@ const TOOL_META = {
   memory_append:     { name: '记一条',     cat: '记忆',   icon: '🧠' },
   memory_query:      { name: '查记忆',     cat: '记忆',   icon: '🧠' },
   memory_remove:     { name: '删记忆',     cat: '记忆',   icon: '🧹' },
+  // 🆕 2026-10-04 第四十对话 · 批 2（方案 §5.5 / 回执 Q8）：补齐缺的 10 个。
+  //    此前这张表 21 条、缺 10 个工具 ⇒ 「调用明细」里它们只显示英文原名（`TOOL_META[key]`
+  //    取不到就回落成 `{name: key, cat:'其他'}`）——"工具对她/对你可不可见"的另一半。
+  //    🔴 它与 `ui/landing.html` 里那份副本**必须逐条一致**（那边是官网的实时总览），
+  //       判据 `test-工具可见性体检.mjs` 第 8 节会核对两份的键集合 + 覆盖到每个原生工具。
+  read_forward:        { name: '看合并转发', cat: '查看', icon: '📨' },
+  search_images:       { name: '找图',       cat: '联网', icon: '🔎' },
+  send_image:          { name: '发图片',     cat: '发言', icon: '🖼️' },
+  save_core_memory:    { name: '存核心记忆', cat: '记忆', icon: '📸' },
+  list_core_memories:  { name: '列核心记忆', cat: '记忆', icon: '🗂️' },
+  read_core_memory:    { name: '读核心记忆', cat: '记忆', icon: '📖' },
+  delete_core_memory:  { name: '删核心记忆', cat: '记忆', icon: '🗑️' },
+  dream_recall:        { name: '翻自己的梦', cat: '记忆', icon: '🌙' },
+  submit_proposal:     { name: '提改进提议', cat: '其他', icon: '💡' },
+  get_my_proposals:    { name: '查提议进度', cat: '其他', icon: '📌' },
   // 联网
   web_search:        { name: '联网搜索',   cat: '联网',   icon: '🌐' },
   web_fetch:         { name: '抓网页',     cat: '联网',   icon: '🔗' },

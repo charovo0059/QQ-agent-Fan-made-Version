@@ -57,13 +57,22 @@ function renderProposalReview() {
   const pending = counts.pending ?? items.length;
 
   const kindCls = { memory: 'ok', persona: 'warn', feature: 'info', code: 'err', other: '' };
-  // 卡片。⚠️ accepted 的卡片去掉"采纳"按钮（已经采纳了），换成"标记已实现" ——
-  //    否则那一栏永远越积越长，而且看不出哪条真的做完了。
+  // 🆕 2026-10-04（第四十对话 · 批 2，方案 §4.2 ④-1）：每张卡带一个**备注输入框**。
+  //   起因：后端 `reviewProposal(id,{status,note})` 早就收 note、`POST /api/proposals/<id>`
+  //   也早就转发 `body?.note`，而这里三个按钮只发 `{status}` ⇒ 管理员点"采纳"时备注**必然是空的**，
+  //   而且她留的备注（`reviewNote`）在界面上**一个字都看不见**。补齐这两头就闭环了。
+  //   ⚠️ 取值一律用 `?.`（坑 162）：`test-改进提议页.mjs` 的假 DOM harness **只造了按钮**，
+  //     硬取兄弟节点会**崩在半路**，而外面只看到"解析不出来"。
+  //   ⚠️ 输入框的值**不参与轮询**（这一页只在切页签/点刷新时重建）⇒ 不存在"边打字边被冲掉"。
   const card = (p, isAccepted) => {
     const when = p.at ? new Date(p.at).toLocaleString('zh-CN', { hour12: false }) : '';
     const from = p.fromChat ? `　来自 ${esc(p.fromChat)}` : '';
     const reviewed = isAccepted && p.reviewedAt
       ? `<span class="muted" style="font-size:11px">　采纳于 ${esc(new Date(p.reviewedAt).toLocaleString('zh-CN', { hour12: false }))}</span>`
+      : '';
+    // 上次跟她说过什么 —— 页面上看得见（否则"我上次是不是说过了"只能靠记忆）
+    const lastNote = String(p.reviewNote || '').trim()
+      ? `<div class="hint" style="margin:2px 0 0">上次留给她的话：${esc(p.reviewNote)}</div>`
       : '';
     return `<div class="proposal-card${isAccepted ? ' proposal-card--accepted' : ''}" data-id="${esc(p.id)}">
       <div class="proposal-card__head">
@@ -75,6 +84,12 @@ function renderProposalReview() {
       <div class="proposal-card__detail">${esc(p.detail)}</div>
       ${p.rationale ? `<div class="hint">理由：${esc(p.rationale)}</div>` : ''}
       ${reviewed}
+      ${lastNote}
+      <div class="field" style="margin-top:6px">
+        <label for="proposal-note-${esc(p.id)}">给她的备注（可空；点右边的按钮时会一起留给她）</label>
+        <textarea id="proposal-note-${esc(p.id)}" data-note-id="${esc(p.id)}" maxlength="500" rows="2"
+          placeholder="为什么要采纳/不采纳，或者下一步怎么做 —— 她下次会读到">${esc(p.reviewNote || '')}</textarea>
+      </div>
       <div class="proposal-card__foot">
         <span class="hint" style="margin:0">${isAccepted ? '已列入待办，改动由人来做' : '提案只是文字，勾选不会执行任何改动'}</span>
         <span class="spacer"></span>
@@ -122,11 +137,13 @@ function renderProposalReview() {
   $$('#proposal-review [data-proposal]').forEach((b) => {
     b.addEventListener('click', async () => {
       const status = b.dataset.proposal;
+      // 🔴 备注从**这张卡**的输入框取；取不到就当空（坑 162：假 DOM 只造按钮 ⇒ 一律 `?.`）
+      const note = String($(`[data-note-id="${b.dataset.id}"]`)?.value ?? '');
       b.disabled = true;
       try {
         await api(`/api/proposals/${encodeURIComponent(b.dataset.id)}`, {
           method: 'POST',
-          body: JSON.stringify({ status })
+          body: JSON.stringify({ status, note })
         });
         await loadProposals();
         renderProposalReview();
