@@ -656,13 +656,29 @@ function assertBrowseLockAlways(rawUrl, what = '地址') {
  */
 const ALLOWED_OVERRIDE_HEADERS = ['user-agent', 'accept', 'accept-language', 'referer'];
 
-function buildHeaders(overrides) {
+/**
+ * pixiv 的图床 **必须带 Referer**（防盗链）—— 🔴 实测（2026-10-04 第四十二对话）：
+ *   同一张 `i.pximg.net/img-original/.../258_p0.jpg`，**不带 Referer ⇒ HTTP 403**，
+ *   带 `referer: https://www.pixiv.net/` ⇒ 200 / 71KB。
+ *
+ * 为什么必须在这里补（而不是让调用方自己传）：
+ *   · 发送图片那条路是 `safeFetchBinary(url, maxBytes, { browseLocked })` —— **没有 headers 参数**，
+ *     它从来不传 Referer；
+ *   · 没有代理时这条链接**靠 `onebot.js` 的 `i.pixiv.re` 反代绕过去**（那个反代替我们加了 Referer）；
+ *   · 🔴 而**配了代理之后反代被刻意关掉**（走原链，见 `pixivProxyUrl`）⇒ 于是
+ *     "群里有人贴 i.pximg.net 的图链"从 09-27 起就变成**必然 403**，而界面上看不出原因。
+ *   ⇒ 这是**站点要求**、不是可选美化，所以按 host 自动补（调用方显式传的 referer 优先）。
+ */
+const PXIMG_REFERER = 'https://www.pixiv.net/';
+
+function buildHeaders(overrides, url = null) {
   const headers = {
     host: undefined,   // 下面按 url.host 填
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,image/avif,image/webp,image/*;q=0.8',
     'accept-language': 'zh-CN,zh;q=0.9'
   };
+  if (url && /(^|\.)pximg\.net$/i.test(String(url.hostname || ''))) headers.referer = PXIMG_REFERER;
   if (overrides && typeof overrides === 'object') {
     for (const k of ALLOWED_OVERRIDE_HEADERS) {
       const raw = overrides[k] ?? overrides[k.toLowerCase()];
@@ -687,7 +703,7 @@ function requestOnce(url, ip, { asBinary = false, maxBytes = 50000, headers: hea
       try { req.destroy(new Error(`请求超时（总时长 30 秒）：${url.hostname}`)); } catch { /* ignore */ }
     }, 30000);
     const req = mod.request(
-      buildRequestOptions(url, ip, tunnel, buildHeaders(headerOverrides), 20000),
+      buildRequestOptions(url, ip, tunnel, buildHeaders(headerOverrides, url), 20000),
       (res) => {
         const statusCode = res.statusCode || 0;
         if ([301, 302, 303, 307, 308].includes(statusCode)) {
@@ -809,11 +825,10 @@ function requestToFile(url, ip, dest, { limit = Infinity, timeoutMs = 30000, tun
     const mod = url.protocol === 'https:' ? https : http;
     // 大文件下载：这是 socket 空闲超时而非总时长上限 —— 数据持续流动时不触发，
     // 卡死的连接才会被掐掉（与 requestOnce 一致，只是上限放宽到 timeoutMs）
-    const opts = buildRequestOptions(url, ip, tunnel, {
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
-      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,image/avif,image/webp,image/*;q=0.8',
-      'accept-language': 'zh-CN,zh;q=0.9'
-    }, timeoutMs);
+    // ⚠️ 与 `requestOnce` 共用**同一个** `buildHeaders`（原来这里手抄了一份默认头）——
+    //    手抄的那份不会带上 `i.pximg.net` 的 Referer，于是"视频/大文件下载"那条路
+    //    会和"图片下载"那条路出现两种行为（同一族坑：默认值有两个真相源）。
+    const opts = buildRequestOptions(url, ip, tunnel, buildHeaders(null, url), timeoutMs);
     const req = mod.request(opts, (res) => {
       const statusCode = res.statusCode || 0;
       const contentType = String(res.headers['content-type'] || '');

@@ -312,7 +312,15 @@ function qqSceneRules(platform) {
         + 'Safebooru 上基本没有 explicit —— 真露骨的这条路给不了，搜不到就如实说。',
       '- 【插画搜到之后】要发出去才算发（send_image，url 或 sampleUrl 都行，一条一张）。'
         + '⚠️ size 里宽度或高度任一超过 3000、或 file_url 看着很大时**优先发 sampleUrl**（小图更稳）。'
-        + '⚠️ rating 如实标着（general / sensitive / questionable）：别把 questionable 的图发到群里。'
+        + '⚠️ rating 如实标着（general / sensitive / questionable）：别把 questionable 的图发到群里。',
+      // 🆕 2026-10-04（第四十二对话 · 调研 §1）：插画路的**两条来源**。
+      //   ⚠️ 同样只**追加**：上面三句一个字都没动（判据按整句钉着它们）。
+      '- 【插画的来源】插画路有两条来源：**pixiv**（要配代理；tag 直接吃中文/日文；'
+        + '**只有全年龄** —— 匿名拿不到 R-18；热度靠「N users入り」把池子收到"被 N 人收藏过"的作品上，'
+        + 'pixiv 官方那种"按热度排序"是**付费功能**，我们用的是免费替代）'
+        + '与 **Safebooru**（按英文/罗马字 tag，有 questionable）。不给 source 时内核自己选：'
+        + '配了代理先试 pixiv、没搜到才退 Safebooru；**用了哪条、有没有降档，返回里都写着** —— 照实说就行，'
+        + '别把"pixiv 的那批"说成"按热度排的"（那不是同一件事）。'
     );
   }
   // ⚠️ 这句**不需要**平台分支：本函数对微信在开头就 `return wechatSceneRules()` 了，

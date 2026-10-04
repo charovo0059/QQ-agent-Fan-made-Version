@@ -874,6 +874,46 @@ function deriveAllowModeUi(c) {
   return c.allowAllWhenEmpty === true ? 'allowAll' : 'denyAll';
 }
 
+/**
+ * 名单芯片（`.chipbox` / `.wchip`）标记的**唯一一处**生成 ——
+ * 聊天白名单（群 / 好友）与「她的能力」里的管理员号**共用同一套控件**
+ * （2026-10-04 第四十二对话 · 调研 §3：⛔ 不新造第二种输入）。
+ *
+ * 为什么能共用：增删接线是**容器级事件委托**，按 `data-chipinput` / `data-rm` 认盒子
+ *   （`bindAllowChips()`，15-allow-saveconfig.js）⇒ 多一种 `data-chipbox` 就自动可用，
+ *   不需要为「管理员号」再绑一套监听（再绑一套 = 第二个可能忘记绑的地方）。
+ *
+ * ⚠️ 三条不许改的细节：
+ *   ① 前缀与号码之间**必须留一个空格** —— `readAllowChips()` 靠"去掉第一个词"把号码抠回来
+ *      （正则 `^[^ ]+` 后面跟任意空白，见 `readAllowChips`）。前缀里再出现空格、
+ *      或者忘了这个空格，号码就会被切坏。
+ *      🔴 这条注释里**不许**把那句正则逐字抄进来：它含 `星号 + 斜杠` 这两个字符的相邻组合，
+ *        会把这段块注释**提前闭合**（实测 `node --check` 当场报 `Unexpected token ','`，
+ *        而页面在浏览器里直接整段坏掉）。
+ *   ② 前缀同时写进 `data-chiplabel` —— `setAllowChips()` 重建芯片时从**盒子自己**读标签，
+ *      标签只有一个真相源（盒子），不在渲染与保存两处各写一份默认值。
+ *   ③ 类名只有 `grp` / `frd` 两种（既有的两种配色）⇒ 管理员号沿用 `frd`，
+ *      ⛔ 不为它新加 CSS 类（这一页"长得不一样"的东西越少越好）。
+ */
+function chipHtml(kind, prefix, id) {
+  const cls = kind === 'groups' ? 'grp' : 'frd';
+  return `<span class="wchip ${cls}"
+      >${esc(prefix)} ${esc(id)}<span class="wchip-x" data-rm="${kind}" data-id="${esc(id)}" role="button" tabindex="0" title="移除">×</span></span>`;
+}
+
+/** 一个 `.field` 里的芯片盒（`ids` 是初始名单，可为空数组；`disabled` 只在能力关掉时给）。 */
+function chipBoxHtml(kind, prefix, label, placeholder, ids, disabled = false) {
+  return `
+    <div class="field">
+      <label>${esc(label)}</label>
+      <div class="chipbox" data-chipbox="${kind}" data-chiplabel="${esc(prefix)}">
+        ${(ids || []).map((id) => chipHtml(kind, prefix, id)).join('')}
+        <input type="text" inputmode="numeric" data-chipinput="${kind}" ${disabled ? 'disabled' : ''}
+               placeholder="${esc(placeholder)}" aria-label="${esc(label)}">
+      </div>
+    </div>`;
+}
+
 function renderAllowSection(c) {
   const mode = ['allowAll', 'denyAll', 'whitelist'].includes(c.allow?.mode)
     ? c.allow.mode
@@ -898,25 +938,14 @@ function renderAllowSection(c) {
   // 芯片输入：一个群一个芯片，点 × 删；回车或点「添加」加。
   // ⚠️ 前缀区分群与好友（方案要求）：`群 123456` / `好友 123456` —— 两类 id 都在同一个
   //    数字空间里，不标前缀的话用户分不清这个数字是群还是人。
-  const chip = (kind, id) => `<span class="wchip ${kind === 'groups' ? 'grp' : 'frd'}"
-      >${kind === 'groups' ? '群' : '好友'} ${esc(id)}<span class="wchip-x" data-rm="${kind}" data-id="${esc(id)}" role="button" tabindex="0" title="移除">×</span></span>`;
-
-  const box = (kind, label, placeholder) => `
-    <div class="field">
-      <label>${label}</label>
-      <div class="chipbox" data-chipbox="${kind}">
-        ${(kind === 'groups' ? groups : privates).map((id) => chip(kind, id)).join('')}
-        <input type="text" inputmode="numeric" data-chipinput="${kind}"
-               placeholder="${placeholder}" aria-label="${label}">
-      </div>
-    </div>`;
-
+  // 🆕 2026-10-04：标记生成搬进了 `chipBoxHtml()` —— 「她的能力」那节的管理员号用**同一份**
+  //    （原来这里有一份局部 `chip()`/`box()`，两份一模一样的东西迟早会漂）。
   return `
     <h3 id="settings-allow">聊天白名单</h3>
     <div class="modepick" id="allow-mode-pick">${MO.map(modeOpt).join('')}</div>
     <div class="field-row" style="margin-top:12px">
-      ${box('groups', '允许的群', '输入群号后回车')}
-      ${box('private', '允许的好友', '输入 QQ 号后回车')}
+      ${chipBoxHtml('groups', '群', '允许的群', '输入群号后回车', groups)}
+      ${chipBoxHtml('private', '好友', '允许的好友', '输入 QQ 号后回车', privates)}
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
       <button class="btn btn-small" id="pick-groups-btn">从 QQ 账号选群</button>
@@ -942,8 +971,10 @@ function renderAllowSection(c) {
  *      ⛔ 不新造样式（这一页里"长得不一样"的东西越少，越不容易显得像两个产品）。
  *   ② 保存走**通用的保存按钮**（`saveConfig()` 里按 `state.settingsSection === 'abilities'`
  *      收这三项），⛔ 不在这里自己 POST —— 与本页其它分区保持同一条路径。
- *   ③ `ownerIds` **本轮不暴露输入框**（用户拍板 Q6：先不填号），所以这里要**如实写清**
- *      "还没填号 ⇒ 现在等于任何私聊" —— 否则用户选了「只认管理员」会以为已经收紧了。
+ *   ③ 🆕 2026-10-04（第四十二对话 · 调研 §3）：`ownerIds` **现在有输入框了** —— 用户撤销了
+ *      第四十对话的 Q6「先不填号」。控件就是白名单那套芯片（`chipBoxHtml('owners', …)`），
+ *      ⛔ 没新造第二种输入。语义仍要**如实写清**：填了号**还要**把「谁能问」选成
+ *      「只认管理员本人」才真的收紧；号删光了会如实退回「任何私聊」（那条后端边界没动）。
  */
 function renderAbilitiesSection(c) {
   const se = c.selfElsewhere || {};
@@ -972,17 +1003,20 @@ function renderAbilitiesSection(c) {
         <div class="field"><label>谁能问</label>
           <select id="cfg-selfelsewhere-who" ${enabled ? '' : 'disabled'}>
             <option value="private" ${who !== 'ownerOnly' ? 'selected' : ''}>任何私聊（默认）</option>
-            <option value="ownerOnly" ${who === 'ownerOnly' ? 'selected' : ''}>只认管理员本人（要填号）</option>
+            <option value="ownerOnly" ${who === 'ownerOnly' ? 'selected' : ''}>只认管理员本人（要在下面填号）</option>
           </select>
           ${ownerIds.length
-            ? hintLine(`已填 ${ownerIds.length} 个管理员号。`, '它们在 config.json 的 selfElsewhere.ownerIds 里。')
+            ? hintLine(`已填 ${ownerIds.length} 个管理员号（号删光了会如实退回「任何私聊」）。`,
+              '它们只用来比对私聊的 QQ 号；要真的收紧，还得把「谁能问」选成「只认管理员本人」。')
             : hintLine('⚠️ 还没填号 ⇒ 现在等于任何私聊；选了「只认管理员本人」也不会真的收紧。',
-              '要收紧就去 config.json 里把 selfElsewhere.ownerIds 填上（这一页故意不给输入框：还没定填哪个号）。')}</div>
+              '把号填在下面那个框里（回车添加），再选「只认管理员本人」，才真的收紧。')}</div>
         <div class="field"><label>默认看最近几天</label>
           <input type="number" id="cfg-selfelsewhere-days" min="1" max="30" value="${esc(se.days ?? 7)}" ${enabled ? '' : 'disabled'} />
           ${hintLine('1~30 天。她自己调用时传的天数优先。',
             '配置里写了超范围的值也会被钳回 1~30（界面、工具、后端三道都不互相信任）。')}</div>
       </div>
+      ${chipBoxHtml('owners', '管理员', '管理员 QQ 号（「谁能问」选了「只认管理员本人」时才生效）',
+        '输入 QQ 号后回车', ownerIds, !enabled)}
       <details class="hint-more">
         <summary>这一节是给谁用的、以后还会住什么</summary>
         <div class="hint-more-body">
