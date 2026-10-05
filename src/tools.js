@@ -13,7 +13,7 @@ import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes } from './u
 import { estimateCost, cacheHitRate, resolveApiKey } from './llm.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint } from './web-search.js';
+import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint, illustrationCapabilityHint } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
@@ -610,26 +610,45 @@ export function pruneSeenImageUrls(all, kept, seen) {
  *      她仍可能挑错。**权威过滤必须在工具层**（代码拦，不是求她自觉）。
  *   ② 用户拍板的「群聊里也允许她搜/发擦边与 R-18」这个开关，此前**只改提示词、代码一个字没拦**
  *      （`illustrationGroupR18Hint()` 生成的说明）。群聊是**会影响别人**的场景 ⇒ 关掉时必须是硬闸。
+ *   🆕 ③（2026-10-05 第四十五对话）**管理端总开关**（`imageSearch.allowQuestionable`）也走这条路：
+ *      它原来只在"她没传 rating"时当缺省档 ⇒ 她显式传 `questionable` 就绕过去了（用户报障的根）。
+ *      现在它与群聊那一道**共用这一个硬闸**（`onlySafe`），区别只在 `safeGate` 的措辞。
  *
  * @param {Array} list 结果清单（每条带 `rating`（原站词）/ `level`（统一两档，可能还没加））
- * @param {{require?: 'safe'|'r18'|'any', onlySafe?: boolean}} o
- *   `require` = 她明确要哪一档；`onlySafe` = 群聊且开关关掉 ⇒ **无条件只要 safe**（压过 `require`）。
+ * @param {{require?: 'safe'|'r18'|'any', onlySafe?: boolean, safeGate?: 'config'|'group'|null}} o
+ *   `require` = 她明确要哪一档；`onlySafe` = 管理端不许 ⇒ **无条件只要 safe**（压过 `require`）；
+ *   `safeGate` = **哪一个开关把它关上的**（只影响下面 `reason` 的措辞）：
+ *     · `'config'` = 管理端总开关（`imageSearch.allowQuestionable=false`，私聊群聊都不许）
+ *     · `'group'`  = 群聊那一道（`imageSearch.allowR18InGroup=false`，只在群里生效）
+ *     · 不给 ⇒ 说一句**中性**的话（⛔ 不许默默当成"群聊"：那会在私聊里把归因说错）。
+ *   🔴 `safeGate` 是**用户要求**加的（2026-10-05 第四十五对话）："要让她知道是被管理端的开关限制了"
+ *      —— 两闸同时关着时**总开关先说话**（那时说"群聊里这个开关关着"是错的）。
+ *   🔴 **两个入参任一个成立就关闸**（`onlySafe || safeGate`）：见下面 ① 的说明 ——
+ *      光看 `onlySafe` 的话，调用方漏传/写错它就会**静默失效**。
  * @returns {{list: Array, dropped: number, fallback: boolean, reason: string}}
  *   `dropped` = 被剔掉的条数；`fallback` = 要 r18 但一条都没有 ⇒ 已如实退回；`reason` = 给人话用的原因。
  */
-export function refineIllustrationList(list, { require = 'any', onlySafe = false } = {}) {
+export function refineIllustrationList(list, { require = 'any', onlySafe = false, safeGate = null } = {}) {
   const arr = Array.isArray(list) ? list : [];
   const lv = (x) => x?.level ?? levelOfRating(x?.rating);
   if (!arr.length) return { list: arr, dropped: 0, fallback: false, reason: '' };
-  // ① 群聊硬闸：无条件只要 safe（**压过她传的 rating**）—— 这是"代码真的拦住了"那一层。
-  if (onlySafe) {
+  // ① 硬闸：无条件只要 safe（**压过她传的 rating**）—— 这是"代码真的拦住了"那一层。
+  // 🔴 守卫写成 `onlySafe || safeGate` 而不是只看 `onlySafe`（2026-10-05 第四十五对话，
+  //    设计复查时堵的一个洞）：`safeGate` 的语义就是"**有**一个开关把它关上了"，
+  //    所以它自己就足以开闸 —— 否则调用方哪天顺手把 `onlySafe` 写成别的值（或漏传），
+  //    闸会**静默失效**，而"清单里有没有 r18"这种离线断言**照样绿**（那种坏法本项目最忌）。
+  //    ⚠️ 反向的"说了是谁关的、其实没关"不可能出现：`safeGate` 非空 ⇒ 闸就是关的。
+  if (onlySafe || safeGate) {
     const kept = arr.filter((x) => lv(x) === 'safe');
     if (kept.length === arr.length) return { list: arr, dropped: 0, fallback: false, reason: '' };
-    // ⚠️ 全被剔光时**不退回**（与 ② 的取舍相反）：群聊里宁可"这次没图"，
-    //    也绝不能把擦边图发出去 —— 那是会影响别人的场景，空手比越界好。
+    // ⚠️ 全被剔光时**不退回**（与 ② 的取舍相反）：宁可"这次没图"，也绝不能把擦边图发出去。
+    // 🔴 归因必须说对：管理端总开关关着时**别**说成"群聊里那个开关"（私聊里也拦得一样死）。
+    const who = safeGate === 'config'
+      ? '管理端关掉了「允许她找擦边 / R-18 的图」'
+      : (safeGate === 'group' ? '群聊里这个开关关着' : '分级开关关着');
     return {
       list: kept, dropped: arr.length - kept.length, fallback: false,
-      reason: `群聊里这个开关关着 ⇒ 已剔掉 ${arr.length - kept.length} 张擦边/R-18`
+      reason: `${who} ⇒ 已剔掉 ${arr.length - kept.length} 张擦边/R-18`
     };
   }
   // ② 她明确要某一档 ⇒ 按档筛
@@ -1372,6 +1391,10 @@ export function buildToolDefs() {
             type: 'string',
             enum: ['safe', 'questionable', 'any'],
             description: '可选，仅插画路用：safe=只要全年龄；questionable=只要擦边/R-18；any=两者都可能有（默认）。'
+              // 🆕 2026-10-05（第四十五对话）：**管理端总开关的口径**也要在这里说（短版）。
+              //   🔴 此前这条参数说明**没有任何一句**提到 `allowQuestionable` —— 而它正是她挑档位的地方；
+              //      开关关掉之后提示词一个字没变，她既不知道被拦了、也不知道该改口。
+              + `⚠️${illustrationCapabilityHint(true)}。`
               // 🆕 2026-10-05（第四十三对话）：这句原来写死"⚠️ 群里请用 safe"，而**她是照着它做选择的**
               //    （存档里她的思考原文就是"group chat rule: 群里请用 safe rating"）⇒ 改成按开关现算。
               + `⚠️${illustrationGroupR18Hint()}。`
@@ -1427,9 +1450,15 @@ export function buildToolDefs() {
           if (kind === 'illustration') {
             const rating = ['safe', 'questionable', 'any'].includes(String(args.rating ?? '').toLowerCase())
               ? String(args.rating).toLowerCase()
-              // 默认值由配置决定（用户拍板 Q3：允许 questionable ⇒ 默认 any）。
-              // ⚠️ 判定用 `=== false`：这是"默认开"的开关，⛔ 别写反。
-              : (cfg.allowQuestionable === false ? 'safe' : 'any');
+              // 缺省档 = `any`（两者都可能）。
+              // 🔴🆕 2026-10-05（第四十五对话）：这句原来写的是
+              //    `cfg.allowQuestionable === false ? 'safe' : 'any'` —— 那正是用户报的
+              //    "第一个开关不起效"的**根**：它只决定"她**没传** rating 时用哪一档"，
+              //    而她每次要色图都会**显式传** `rating=questionable` ⇒ 开关一次都没参与判定
+              //    （线上实测：开关已是 false，她还是一趟拿到 12 张 r18 并全部发出去）。
+              //    ⇒ 现在这个开关**不再是缺省档**，而是下面那道**硬闸**（自己一条判定、压过她传的值）；
+              //      缺省档就老老实实是 `any`，⛔ 别再把两件事绑在一起。
+              : 'any';
             // tag→有没有图 的缓存在**本次运行内**（ctx 上）：同一轮里重复问同一个角色不重复打接口。
             if (!(ctx.__tagProbeCache instanceof Map)) ctx.__tagProbeCache = new Map();
             // 🆕 第四十二对话（调研 §1.7）：**来源**（auto/pixiv/safebooru）与**热度档**。
@@ -1443,9 +1472,18 @@ export function buildToolDefs() {
             //      关掉它只让她"被劝退"，代码并没拦住。群聊是**会影响别人**的场景
             //      ⇒ 关掉时这里**无条件只要 safe**（压过她传的 rating）。
             //   ⚠️ 判定 `=== false`（这是"默认开"的开关，写反的症状是"没动过它却关着"）。
+            // 🆕 2026-10-05（第四十五对话）：**两道闸各自有名字**（用户拍板"按乙方案落地"）——
+            //   · `allowQuestionable === false` = 管理端总开关 ⇒ **私聊群聊都不许**（更根本的那一道）
+            //   · 群聊 + `allowR18InGroup === false` = 群里那一道（私聊不受它影响）
+            //   🔴 两闸同时关着时**总开关先说话**：那时说"群聊里这个开关关着"是错的（私聊同样拿不到）。
+            //   🔴 `safeGate` 必须一路传到 `refineIllustrationList`：它决定"被剔了几张"那句话
+            //      说得对不对（说不出是哪个开关拦的，她就会以为是网络问题 —— 本项目的静默失败同一族）。
             const inGroup = String(ctx.chatKey || '').startsWith('group:');
-            const onlySafe = inGroup && cfg.allowR18InGroup === false;
-            // ⚠️ 群聊硬闸时不把 `requireLevel` 传成 safe：由**工具层**筛（见下面 refineIllustrationList），
+            const r18Off = cfg.allowQuestionable === false;
+            const groupR18Off = inGroup && cfg.allowR18InGroup === false;
+            const safeGate = r18Off ? 'config' : (groupR18Off ? 'group' : null);
+            const onlySafe = safeGate !== null;
+            // ⚠️ 硬闸时不把 `requireLevel` 传成 safe：由**工具层**筛（见下面 refineIllustrationList），
             //    这样"被拦了几张"这件事是我们自己数出来的，不依赖上游各条路各自实现。
             const r = await illustrationSearchAnySource(q, {
               source: wantSource,
@@ -1487,7 +1525,10 @@ export function buildToolDefs() {
             //      **仍然在白名单里**；群聊硬闸必须**同时**把白名单收窄，否则她还能拿它去 `send_image`。
             const refined = refineIllustrationList(images, {
               require: rating === 'questionable' ? 'r18' : (rating === 'safe' ? 'safe' : 'any'),
-              onlySafe
+              onlySafe,
+              // 🔴 哪个开关拦的（'config' = 管理端总开关 / 'group' = 群里那一道）——
+              //    只影响"被剔掉 N 张"那句话的措辞，但它决定她能不能**正确归因**。
+              safeGate
             });
             if (onlySafe && refined.dropped) {
               // 🔴 硬闸真的拦了东西 ⇒ ① 把被拦的那些**从发图白名单里撤掉**（否则等于没拦：

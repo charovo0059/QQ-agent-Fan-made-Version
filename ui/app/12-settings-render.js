@@ -1042,13 +1042,16 @@ function renderAbilitiesSection(c) {
            🔴 本段在**模板字符串里面** ⇒ ⛔ 一个字反引号都不许有。 -->
       <h4>图片的分级</h4>
       <div class="checkbox-row"><input type="checkbox" id="cfg-allowquestionable" ${img.allowQuestionable !== false ? 'checked' : ''} />
-        <label for="cfg-allowquestionable">允许她找擦边 / R-18 的图（关掉 ⇒ 默认检索退回全年龄）</label></div>
-      ${hintLine('关掉它，她搜插画时不给 rating 的那一档会从「两者都可能」退回「只要全年龄」。',
-        '私聊里明确要 R-18（rating=questionable）仍然可以 —— 这个开关管的是"不给 rating 时的默认档"。')}
+        <label for="cfg-allowquestionable">允许她找擦边 / R-18 的图（关掉 ⇒ 私聊群聊都拿不到）</label></div>
+      ${hintLine('关掉它就是硬拦：不管她要 safe / questionable / any，插画结果里只会剩全年龄；'
+        + '被拦掉的图也进不了"本轮可发"名单。',
+        '🔴 这条以前只管"她不给 rating 时用哪一档"，而她每次要这类图都会明确指定档位 ⇒ 关掉看着像没生效（2026-10-05 已改成硬拦）。'
+        + '她自己会在提示词里看到"管理端关掉了"，被拦时会如实告诉你原因，不会拿全年龄的图顶上去充数。')}
       <div class="checkbox-row"><input type="checkbox" id="cfg-allowr18ingroup" ${img.allowR18InGroup !== false ? 'checked' : ''} />
         <label for="cfg-allowr18ingroup">群聊里也允许她搜 / 发擦边与 R-18</label></div>
       ${hintLine('⚠️ 开着时，群里有人要图她也会去搜 R-18 —— 但 QQ 侧有概率把这类图拦掉、或让对方看不到（她会如实说，不会保证发得出去）。',
-        '关掉它，群里她只用全年龄档、也不会把擦边图发出去；私聊完全不受影响。这两个开关会跟着进她的提示词。')}
+        '关掉它，群里她只用全年龄档、也不会把擦边图发出去；私聊完全不受影响。'
+        + '这两个开关的口径都会进她的提示词，而且被拦时她会说清是哪一个开关拦的（总开关关着时不会赖到群聊上）。')}
     </div>
 
     <div class="form-panel">
