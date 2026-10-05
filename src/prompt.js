@@ -34,7 +34,7 @@ import { extractKeywords } from './memory.js';
 import { skillManager } from './skills/manager.js';
 // 🆕 2026-10-05（第四十三对话）：插画路"能不能给 R-18"那句话**只有一处真相源**
 //    （`illustrationR18Hint()` 按登录态现算）。⛔ 别在本文件里写死一份 —— 五处写死必然再漂。
-import { illustrationR18Hint, illustrationGroupR18Hint } from './web-search.js';
+import { illustrationR18Hint, illustrationGroupR18Hint, illustrationCapabilityHint } from './web-search.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
@@ -311,6 +311,13 @@ function qqSceneRules(platform) {
         + '（风景、美食、工具、实物）⇒ kind=\'real\'；拿不准就不给 kind。'
         + '插画路也能自己给 tags（多个，如 ["hatsune_miku","1girl"]）与 rating。',
       '- 【插画的分级】rating 三档：safe=不加分级过滤（它的默认检索）/ questionable=只要擦边 / any=两者都可能。'
+        // 🆕 2026-10-05（第四十五对话 · 用户报"第一个开关不起效"之后）：**管理端总开关**的口径。
+        //   🔴 此前这一段**一个字都没提** `allowQuestionable`（只说登录态与群聊那两道）⇒ 开关关掉
+        //      之后她的提示词纹丝不动，既不知道被硬拦了、也不知道该改口（而她每次要色图都会
+        //      显式传 rating=questionable ⇒ 那个开关当时连判定都不参与）。
+        //   ⚠️ 长版放这里（行为准则），短版在 tools.js 的 rating 参数说明里 —— 两处都必须有，
+        //      少一处就会"一半知道一半不知道"（与 illustrationGroupR18Hint 同一纪律）。
+        + `${illustrationCapabilityHint()}。`
         // 🆕 2026-10-05（第四十三对话）：这里原来写死"**群聊里用 safe，私聊随你**" ——
         //   存档里她的思考原文就是"group chat rule: 群里请用 safe rating" ⇒ **她自己把 rating 传成了 safe**，
         //   而代码一个字都没拦。⇒ 改成按 `imageSearch.allowR18InGroup` 现算（与另外三处同一真相源）。

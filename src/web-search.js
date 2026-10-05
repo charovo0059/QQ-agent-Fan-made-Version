@@ -1410,6 +1410,44 @@ export function illustrationGroupR18Hint(short = false) {
 }
 
 /**
+ * 「擦边/R-18 这个档位**管理端开没开**」那句话 —— **按 `imageSearch.allowQuestionable` 现算**。
+ *
+ * 🔴 为什么必须有它（2026-10-05 第四十五对话，**用户报障 + 会话存档查实**）：
+ *   用户把「她的能力 → 图片的分级」第一个开关关掉之后，在私聊里要色图 —— 她**照样**搜到 12 张 R-18
+ *   并一张张发了出去。查实两个原因叠在一起：
+ *     ① 🔴 **那个开关当时根本不是闸门**：`tools.js` 里它只出现在"她**没传** rating 时用哪一档"
+ *        那一条分支上（`cfg.allowQuestionable === false ? 'safe' : 'any'`），而她每次要色图都会
+ *        **显式传** `rating=questionable` ⇒ 开关一次都没参与判定（本轮已把它补成硬闸，见 tools.js）；
+ *     ② 🔴 **它连一句提示词都没有**：五处给模型看的文案里，说到"能不能要 R-18"的只有
+ *        `illustrationR18Hint()`（那是**登录态**，不是这个开关）—— 而它还在教她
+ *        "要 R-18 就明确给 rating=questionable"。⇒ 开关关掉之后，**提示词一个字都没变**，
+ *        她既不知道被拦了，也不知道该改口（对比群聊那个开关至少有四处文案跟着走）。
+ *
+ * ⇒ 与 `illustrationGroupR18Hint()` 同一形状、同一真相源（`getConfig()` 现读，改完不用重启）：
+ *    **两处载体**都必须调它 —— `tools.js` 的 rating 参数说明（她挑档位的地方）与
+ *    `prompt.js` 的【插画的分级】段（她的行为准则）。少一处就会出现"一半知道一半不知道"。
+ *    ⚠️ 关掉时的说法必须**同时**交代"这是硬拦（换什么 rating 都没用）"与"照实说、别反复换词重试" ——
+ *       只写"不许要"她会去试；只写"拿不到"她可能以为是网络问题（本项目的静默失败同一族）。
+ *
+ * @param {boolean} short 短版（给"同一条 tool 定义里已经出现过长版"的地方用，省 token）
+ */
+export function illustrationCapabilityHint(short = false) {
+  let allow = true;
+  try { allow = getConfig()?.imageSearch?.allowQuestionable !== false; } catch { allow = true; }
+  if (!allow) {
+    return short
+      ? '🔴 管理端**关掉了擦边/R-18** ⇒ 这个档位你一张都拿不到，照实说就行'
+      : '🔴 管理端**关掉了「允许她找擦边 / R-18 的图」** ⇒ 这是**代码层的硬拦**，压过你传的 rating：'
+        + '不管你要 safe / questionable / any，插画结果里只会剩全年龄。'
+        + '有人要擦边或 R-18，就照实说"管理端关着、我拿不到"，⛔ 别换词反复重试，'
+        + '也别拿全年龄的图顶上去充数';
+  }
+  return short
+    ? '擦边/R-18 这个档位**开着**（管理端允许）'
+    : '擦边/R-18 这个档位**开着**（管理端允许）—— 要那一档就给 rating=questionable，结果里会真的有 r18';
+}
+
+/**
  * 插画路的**来源路由**（第四十二对话 · 调研 §1.7）：`pixiv` / `safebooru` / `auto`。
  *
  * `auto` 的语义（用户拍板"并列、不是替换"）：
