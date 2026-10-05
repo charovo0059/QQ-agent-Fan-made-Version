@@ -733,7 +733,7 @@ function renderSettingsSidebar() {
       <div class="rs-row muted">${state.paused ? '⏸ 已暂停' : (s?.orchestrator?.model ? `模型：${s.orchestrator.model}` : '模型：未设置')}</div>
     </div>
     <div class="settings-menu">
-      ${menu.map(([id, label]) => `<button class="settings-menu-item ${state.settingsSection === id ? 'active' : ''}" data-section="${id}">${label}${id === 'desktop' && updateAvailable ? '<span class="update-dot" title="发现新版本"></span>' : ''}</button>`).join('')}
+      ${menu.map(([id, label]) => `<button class="settings-menu-item ${state.settingsSection === id ? 'active' : ''}" data-section="${id}">${label}</button>`).join('')}
       <button class="settings-menu-item egg-hot" id="qrcode-egg-btn">！？群群？！</button>
     </div>`;
   // 群二维码彩蛋：点一下弹出，再点屏幕任意位置关闭

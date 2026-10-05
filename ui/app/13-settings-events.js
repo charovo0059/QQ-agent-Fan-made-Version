@@ -738,28 +738,17 @@ function bindSettingsEvents(c) {
   const pickFriendsBtn = $('#pick-friends-btn');
   if (pickFriendsBtn) pickFriendsBtn.addEventListener('click', () => openWhitelistPicker('friends'));
 
-  // ── 检查更新（桌面端区块） ──
+  // ── 当前版本（桌面端区块）────────────────────────────────────────────
+  // 🆕 2026-10-05（第四十四对话 · 用户拍板 B4）：这里原来还有一个「检查更新」按钮
+  //   （手动 `runUpdateCheck()` 打 `/api/update-check`）。线上版本检查整个去掉了，
+  //   按钮与 `update-status-text` / `update-hint` 一起消失。
+  //   ⚠️ 这一段**留着**：`/api/version` 是**纯本地**读 package.json（不发任何网络请求），
+  //      "当前版本 vX.Y.Z"仍然要显示。
   const curVerEl = $('#update-current');
   if (curVerEl) {
     api('/api/version').then((d) => { curVerEl.textContent = `v${d.version || '?'}`; })
       .catch(() => { curVerEl.textContent = ''; });
   }
-  const checkUpdateBtn = $('#check-update-btn');
-  if (checkUpdateBtn) checkUpdateBtn.addEventListener('click', async () => {
-    const hint = $('#update-hint');
-    checkUpdateBtn.disabled = true;
-    if (hint) hint.textContent = '检查中…';
-    const data = await runUpdateCheck({ manual: true });   // 手动：即使关过浮窗也再弹一次
-    if (!data) {
-      if (hint) hint.textContent = '检查失败：网络不可达';
-    } else if (!data.ok) {
-      if (hint) hint.textContent = `检查失败：${data.error || '未知错误'}`;
-    } else if (data.hasUpdate) {
-      // 有新版：给下载链接。Electron 里 target=_blank 会被 main.js 转给系统浏览器。
-      if (hint) hint.innerHTML = `发现新版本 <b>v${esc(data.latest)}</b>（当前 v${esc(data.current)}） <a href="${esc(data.url)}" target="_blank" rel="noopener">去下载</a>`;
-    } else if (hint) hint.textContent = `已是最新（v${data.current}）`;
-    checkUpdateBtn.disabled = false;
-  });
 
   // ── OneBot 区块事件 ──
   const openSnowlumaBtn = $('#open-snowluma-btn');
