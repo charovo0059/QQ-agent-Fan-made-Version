@@ -118,8 +118,8 @@ function renderApiSection(c) {
         <button class="btn btn-small" id="test-provider-btn">测试连通性</button>
         <span id="provider-test-result" class="muted" style="align-self:center"></span>
       </div>
-      <div class="hint" id="provider-hint">${currentProvider ? `当前：${esc(currentProvider.displayName)} · ${esc(c.api.model || '未选模型')} @ ${esc(currentProvider.baseURL)}${currentProvider.hasKey ? ' · 已保存 API Key（不显示）' : ' · 未保存 API Key'}` : '尚未选择模型'}</div>
-      <div class="hint" id="model-vision-hint" style="margin-top:6px"></div>
+      <div class="hint status" id="provider-hint">${currentProvider ? `当前：${esc(currentProvider.displayName)} · ${esc(c.api.model || '未选模型')} @ ${esc(currentProvider.baseURL)}${currentProvider.hasKey ? ' · 已保存 API Key（不显示）' : ' · 未保存 API Key'}` : '尚未选择模型'}</div>
+      <div class="hint status" id="model-vision-hint" style="margin-top:6px"></div>
       <input type="hidden" id="cfg-provider" value="${esc(c.api.provider || '')}" />
       <input type="hidden" id="cfg-model" value="${esc(c.api.model || '')}" />
     </div>
@@ -140,8 +140,9 @@ function renderApiSection(c) {
       <div class="field"><label>单次运行最大工具轮数</label><input type="number" id="cfg-maxrounds" min="1" max="40" value="${esc(c.api.maxRounds)}" /></div>
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-vision" ${c.api.vision !== false ? 'checked' : ''} />
-      <label for="cfg-vision">图片输入（关闭则移除看图工具，模型只会看到 [图片] 占位符）</label>
+      <label for="cfg-vision">图片输入</label>
       <span id="vision-switch-hint" class="muted" style="font-size:12px;align-self:center"></span></div>
+    <div class="hint" style="margin-top:6px">关闭则移除看图工具，模型只会看到 [图片] 占位符。</div>
 
     <!-- ── 图片 / 视频专用模型 + 备选模型降级链（2026-09-25 · 第十七对话加）────────────
          这三个键**本来就在 config.js 里**（第十七对话补进 DEFAULT_CONFIG），但一直没有界面
@@ -171,14 +172,14 @@ function renderApiSection(c) {
           <option value="off" ${videoMode === 'off' ? 'selected' : ''}>off —— 只读元信息，不看画面</option>
         </select></div>
     </div>
-    <div class="hint" style="font-size:12px;margin:-4px 0 10px">只在<b>消息里真的出现了</b>图片 / 视频部件时才切过去，纯文本对话一律用主模型（不会白花贵模型的额度）。视频优先于图片。
-      视频那一路还要 <code>api.videoMode</code> 决定"原生发送 / 抽帧 / 只看元信息"：
-      <code>auto</code> 看上面「视频输入专用模型」填没填，<code>native</code> / <code>frames</code> 强行指定，
-      <code>off</code> 完全不喂画面。</div>
+    <details class="hint-more"><summary>这几种方式有什么区别？</summary>
+      <div class="hint-more-body">只在<b>消息里真的出现了</b>图片 / 视频部件时才切过去，纯文本对话一律用主模型（不会白花贵模型的额度）。视频优先于图片。视频那一路还要 <code>api.videoMode</code> 决定"原生发送 / 抽帧 / 只看元信息"：<code>auto</code> 看上面「视频输入专用模型」填没填，<code>native</code> / <code>frames</code> 强行指定，<code>off</code> 完全不喂画面。</div>
+    </details>
     <div class="field"><label>备选模型降级链（一行一个；主模型重试后仍失败时按顺序换）</label>
       <textarea id="cfg-fallback-models" rows="3" placeholder="每行一个：模型id　或　模型id @ 提供商id" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${esc(fallbackModelsText(c.api.fallbackModels))}</textarea>
-      <div class="hint" style="font-size:12px">一行一个。写 <code>模型id @ 提供商id</code> = 换到<b>那个提供商</b>的端点（跨提供商降级，用它的 baseUrl 与 Key）；不写 <code>@ 提供商</code> 则沿用主模型端点、只换模型 id。留空 = 不降级。
-        ⚠️ 降级发生时，本轮实际用的渠道会写进会话的 <code>vendor</code>（成本看板按它聚合）。</div>
+      <details class="hint-more"><summary>降级链怎么写、降级会发生什么？</summary>
+        <div class="hint-more-body">一行一个。写 <code>模型id @ 提供商id</code> = 换到<b>那个提供商</b>的端点（跨提供商降级，用它的 baseUrl 与 Key）；不写 <code>@ 提供商</code> 则沿用主模型端点、只换模型 id。留空 = 不降级。⚠️ 降级发生时，本轮实际用的渠道会写进会话的 <code>vendor</code>（成本看板按它聚合）。</div>
+      </details>
     </div>
     <div class="settings-divider"></div>
 
@@ -231,7 +232,9 @@ function renderApiSection(c) {
           <input type="text" id="new-baseurl" placeholder="https://api.deepseek.com/v1" />
           <button class="btn btn-small" id="fetch-models-btn" title="从上面的地址拉取可用模型，弹窗里勾选加入">获取列表</button>
         </div>
-        <div class="hint">支持 OpenAI 兼容接口，例如 <code>https://api.deepseek.com/v1</code>、<code>https://open.bigmodel.cn/api/paas/v4</code>。</div>
+        <details class="hint-more"><summary>支持哪些接口格式？</summary>
+          <div class="hint-more-body">支持 OpenAI 兼容接口，例如 <code>https://api.deepseek.com/v1</code>、<code>https://open.bigmodel.cn/api/paas/v4</code>。</div>
+        </details>
       </div>
 
       <div class="field"><label>API Key</label>
@@ -548,6 +551,7 @@ function renderSearchSection(c) {
          ⛔ 别把它们加回来：新位置与旧位置同时渲染 ⇒ 两个真相源。
          （⛔ 也别在这里写 id="cfg-websearch" 之类的字样 —— 判据是**按 id 在不在这个函数里**判的。）
          ⚠️ 留在这里的是"基础设施"一档：搜索提供方 / API Key / 图片体积上限 / CF 绕过 / 看图配额。 -->
+    <h3>看图与图片</h3>
     <div class="field">
       <label>看图（视觉）的体积上限</label>
       <div class="field-row">
@@ -565,7 +569,7 @@ function renderSearchSection(c) {
         <b>真正的代价是图片 token</b>：调得越大，它就越会真去看大图，每次看图都按输入 token 计费。
       </div>
       <details class="hint-more">
-        <summary>说明：700KB 这个默认值是怎么定的、调大会怎样</summary>
+        <summary>默认值是怎么定的、调大会怎样？</summary>
         <div class="hint-more-body">
           默认 700KB 是当初为了防网关 413 定的；实测网关 <b>32MB 能过、48MB 才 413</b>，所以往上调是安全的。
           「一次最多看几张」会写进工具描述，<b>改它等于换一次提示词前缀</b>（前缀缓存要重新热身一次，一次性成本）。
@@ -573,11 +577,14 @@ function renderSearchSection(c) {
       </details>
     </div>
     <div class="field-row">
-      <div class="field"><label>SauceNAO API Key（可选：注册 saucenao.com 账号免费获取；填了走官方 JSON API，更稳且不怕网页改版）</label>
-        <input type="password" id="cfg-saucenao-key" value="${esc(c.imageSearch?.hasSaucenaoApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" /></div>
+      <div class="field"><label>SauceNAO API Key（可选）</label>
+        <input type="password" id="cfg-saucenao-key" value="${esc(c.imageSearch?.hasSaucenaoApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" />
+        <details class="hint-more"><summary>这是干嘛的、去哪申请？</summary>
+          <div class="hint-more-body">注册 saucenao.com 账号免费获取；填了走官方 JSON API，更稳且不怕网页改版。</div>
+        </details></div>
       <!-- 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：pixiv 登录态。**由用户自己粘**（不经过任何人）。
            ⚠️ 它只在**配了代理**时才有意义（直连到不了 p 站）。 -->
-      <div class="field"><label>pixiv 会话 cookie（可选：登录 p 站后从浏览器复制，用来搜 R-18）</label>
+      <div class="field"><label>pixiv 会话 cookie（可选）</label>
         <input type="password" id="cfg-pixiv-cookie" value="${esc(c.imageSearch?.hasPixivCookie ? '******' : '')}" placeholder="粘贴 Cookie（至少含 PHPSESSID=…）；留空保持不变" autocomplete="new-password" /></div>
     </div>
     <!-- ⚠️ 这句是"代价如实说"，不是可选美化：掉线**不会自愈**，不说清楚就会变成静默失效。 -->
@@ -596,6 +603,7 @@ function renderSearchSection(c) {
       或<b>刚看过</b>（get_message_images）的图 —— 自己拼的、别处抄的一律拒绝，
       并强制过公网校验（挡内网地址）。这条是代码层，改不了。
     </div>
+    <h3>网页搜索</h3>
     <div class="field"><label>搜索提供方</label>
       <select id="cfg-searchprovider">
         <option value="bing" ${prov === 'bing' ? 'selected' : ''}>Bing 网页解析</option>
@@ -712,7 +720,7 @@ function renderMemorySettingsSection(c) {
         <input type="hidden" id="cfg-mem-model" value="${esc(mem.model || '')}" />
       </div>
     </div>
-    <div class="field"><label>整理冷却时间（毫秒）</label><input type="number" id="cfg-mem-interval" min="1800000" step="600000" value="${esc(mem.consolidateMinIntervalMs ?? 21600000)}" /></div>
+    <div class="field"><label>整理冷却时间（分钟）</label><input type="number" id="cfg-mem-interval" min="30" step="10" value="${esc(msToMin(mem.consolidateMinIntervalMs, 360))}" /></div>
     <div class="hint">两个条件<b>都</b>满足才整理：条数超过阈值，且距上次整理超过这个冷却时间。默认 6 小时。</div>`;
 }
 
@@ -1376,10 +1384,13 @@ function renderChatSection(c) {
 return `
     <h3>运行节奏</h3>
     <div class="field-row">
-      <div class="field"><label>防抖聚批窗口（毫秒）—— 等连发消息聚成一批再开运行</label><input type="number" id="cfg-wakedelay" min="0" value="${esc(c.wakeDelayMs)}" /></div>
-      <div class="field"><label>批次间隔（毫秒）—— 上轮结束到下轮处理的间隔</label><input type="number" id="cfg-draindelay" min="0" value="${esc(c.drainDelayMs)}" /></div>
+      <div class="field"><label>防抖聚批窗口（毫秒）</label><input type="number" id="cfg-wakedelay" min="0" value="${esc(c.wakeDelayMs)}" /></div>
+      <div class="field"><label>批次间隔（毫秒）</label><input type="number" id="cfg-draindelay" min="0" value="${esc(c.drainDelayMs)}" /></div>
       <div class="field"><label>同时处理几个会话</label><input type="number" id="cfg-maxruns" min="1" max="8" value="${esc(c.maxConcurrentRuns)}" /></div>
     </div>
+    <details class="hint-more"><summary>运行节奏这些参数都什么意思？</summary>
+      <div class="hint-more-body"><b>防抖聚批窗口</b>：等连发消息聚成一批再开运行。<br><b>批次间隔</b>：上轮结束到下轮处理的间隔。</div>
+    </details>
 
     <h3>发送保护</h3>
     <div class="field-row">
@@ -1407,20 +1418,17 @@ return `
            就是界面没有"（dedupeWindowMs 挂了 7 天才补上界面，见上面那段注释）。
            ⚠️ 只给**图片**那一档：文字/查询类仍是 onebot.js 里的 15000（那个值刻意不做界面，
               因为把探测类调用也拖慢是这个项目明确不要的行为）。 -->
-      <div class="field"><label>发图超时（毫秒）—— 图片要协议端收下再上传，比发文字慢得多</label><input type="number" id="cfg-imgtimeout" min="1000" step="1000" value="${esc(c.send.imageTimeoutMs ?? 60000)}" /></div>
+      <div class="field"><label>发图超时（毫秒）</label><input type="number" id="cfg-imgtimeout" min="1000" step="1000" value="${esc(c.send.imageTimeoutMs ?? 60000)}" /></div>
     </div>
-    <div class="hint" style="font-size:12px;margin:-6px 0 10px">
-      同一会话里、<b>发出去的纯文本完全一样</b>的两条，在这个窗口内只发第一条。防的是模型重复调用发送、
-      或超时看起来失败而上层重试 —— 用户会看到两条一模一样的。默认 <b>8000</b>（8 秒），填 <b>0</b> 关掉。
-      ⚠️ 只拦<b>完全相同</b>的文本（<b>粗体</b>与 粗体 视为相同）；<b>发失败不记账</b>（合法重试不会被误杀）；
-      窗口按会话各算各的；不管表情包与拍一拍（那两条各有自己的限频）。
-    </div>
+    <details class="hint-more"><summary>发送去重与发图超时都怎么算？</summary>
+      <div class="hint-more-body">同一会话里、<b>发出去的纯文本完全一样</b>的两条，在这个窗口内只发第一条。防的是模型重复调用发送、或超时看起来失败而上层重试 —— 用户会看到两条一模一样的。默认 <b>8000</b>（8 秒），填 <b>0</b> 关掉。<br>⚠️ 只拦<b>完全相同</b>的文本（<b>粗体</b>与 粗体 视为相同）；<b>发失败不记账</b>（合法重试不会被误杀）；窗口按会话各算各的；不管表情包与拍一拍（那两条各有自己的限频）。<br>发图超时：图片要协议端收下再上传，比发文字慢得多。</div>
+    </details>
 
     <h3>主动开话题</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-proactive" ${c.proactive.enabled ? 'checked' : ''} />
       <label for="cfg-proactive">冷场时按概率主动开话题</label></div>
     <!-- 实时状态：把六道闸摊开，回答"现在会不会开口、为什么"。数据来自 GET /api/proactive（只读） -->
-    <div id="proactive-status" class="hint" style="margin:-2px 0 10px">（正在读当前状态…）</div>
+    <div id="proactive-status" class="hint status" style="margin:-2px 0 10px">（正在读当前状态…）</div>
     <!-- ⚠️ 界面用**分钟**，存储仍是**毫秒**（proactive.checkIntervalMinMs/MaxMs）。
            为什么不改存储单位：那几个键的名字里就带 Ms、值也一直是毫秒；改成分钟会让键名与值不符，
            而且已有配置文件里存的是毫秒，会被按"分钟"读成天文数字（1800000 分钟 ≈ 3.4 年）—— 静默出错。
@@ -1440,11 +1448,10 @@ return `
       <!-- 连发上限：没人理最多连开几次。⚠️ 超过它之后的"退避"见下面只读那一行 -->
       <div class="field"><label>没人理最多连开（次）</label><input type="number" id="cfg-pro-maxconsec" min="1" max="10" step="1" value="${esc(Number(c.proactive.maxConsecutive ?? 2))}" /></div>
     </div>
-    <div class="hint" style="margin:-4px 0 10px">
-      间隔是"隔多久检查一次冷场"，不是"多久必说一次" —— 每次检查还要过安静时段、并发、掷骰子、冷场阈值、连发上限/退避。
-      超过连发上限后不再无限开口，只在等够退避时间后允许"再戳一次"：
-      <span id="proactive-reengage">…</span>
-    </div>
+    <details class="hint-more"><summary>冷场判定规则详解</summary>
+      <div class="hint-more-body">间隔是"隔多久检查一次冷场"，不是"多久必说一次" —— 每次检查还要过安静时段、并发、掷骰子、冷场阈值、连发上限/退避。超过连发上限后不再无限开口，只在等够退避时间后允许"再戳一次"。</div>
+    </details>
+    <div class="hint status" style="margin:6px 0 10px">退避状态：<span id="proactive-reengage">…</span></div>
 
     <h3>表情包</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-sticker" ${c.sticker.enabled ? 'checked' : ''} />
@@ -1465,7 +1472,8 @@ return `
     <h3>响应档位</h3>
 
     <div class="checkbox-row"><input type="checkbox" id="cfg-unifiedtier" ${st.unifiedTier !== false ? 'checked' : ''} />
-      <label for="cfg-unifiedtier">统一设置全部响应档位（关掉就能给白名单里的每个群聊 / 私聊单独拖档位）</label></div>
+      <label for="cfg-unifiedtier">统一设置全部响应档位</label></div>
+    <div class="hint" style="margin:-4px 0 10px">关掉就能给白名单里的每个群聊 / 私聊单独拖档位。</div>
 
     <!-- 统一模式：一个滑条管所有会话（原行为） -->
     <div id="tier-unified-wrap"${st.unifiedTier === false ? ' style="display:none"' : ''}>
@@ -1706,7 +1714,7 @@ function renderDesktopSection(c) {
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-showvision" ${c.ui?.showVision !== false ? 'checked' : ''} />
       <label for="cfg-showvision">模型目录显示“支持图片输入/不支持图片输入”徽标</label></div>
-    <div class="field"><label>界面刷新间隔（毫秒）</label><input type="number" id="cfg-refreshms" min="1000" step="1000" value="${esc(c.ui?.refreshMs ?? 15000)}" /></div>
+    <div class="field"><label>界面刷新间隔（秒）</label><input type="number" id="cfg-refreshms" min="1" step="1" value="${esc(Math.round((c.ui?.refreshMs ?? 15000) / 1000))}" /></div>
     <h3>版本</h3>
     <div class="field"><label>当前版本 <b id="update-current">…</b></label></div>`;
 }
