@@ -543,10 +543,12 @@ function renderSearchSection(c) {
     </div>
 
     <h3 id="settings-search">搜索服务</h3>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-websearch" ${c.webSearch?.enabled !== false ? 'checked' : ''} />
-      <label for="cfg-websearch">联网搜索：启用 web_search / web_fetch 工具</label></div>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-imagesearch" ${c.imageSearch?.enabled !== false ? 'checked' : ''} />
-      <label for="cfg-imagesearch">以图搜图：启用 search_image_source 工具（trace.moe / SauceNAO / iqdb / 搜图 bot，均免 Key）</label></div>
+    <!-- 🆕 2026-10-05（第四十三对话 · 交接 §3-105 / 调研-能力开关归位）：两个**能力开关**
+         （联网搜索、以图搜图）**已搬去「她的能力」那一节** —— 用户拍板"都搬"，
+         理由是"她能不能用某个能力"散在各页时，用户要给她开关得先猜它在哪一页。
+         ⛔ 别把它们加回来：新位置与旧位置同时渲染 ⇒ 两个真相源。
+         （⛔ 也别在这里写 id="cfg-websearch" 之类的字样 —— 判据是**按 id 在不在这个函数里**判的。）
+         ⚠️ 留在这里的是"基础设施"一档：搜索提供方 / API Key / 图片体积上限 / CF 绕过 / 看图配额。 -->
     <div class="field">
       <label>看图（视觉）的体积上限</label>
       <div class="field-row">
@@ -572,44 +574,13 @@ function renderSearchSection(c) {
       </details>
     </div>
     <div class="field-row">
-      <div class="field"><label>搜图触发策略</label>
-        <select id="cfg-imagesearch-policy">
-          <option value="asked" ${(c.imageSearch?.policy || 'asked') === 'asked' ? 'selected' : ''}>只在有人问出处 / 要图时才搜（推荐）</option>
-          <option value="free" ${c.imageSearch?.policy === 'free' ? 'selected' : ''}>交给模型自己判断（容易看到图就搜）</option>
-        </select>
-        <div class="hint">「只在被要求时」是<b>代码层拦截</b>，不只靠提示词。<b>这一个开关同时管两条路</b>：按图查出处、按关键词找图（找图后会发出去）。</div>
-        <details class="hint-more">
-          <summary>说明：什么算"被要求"</summary>
-          <div class="hint-more-body">
-            两条路各有一套判据（"求出处 / 什么番 / 画师"和"来张图 / 发张看看"），
-            但都由这里这<b>一个开关</b>控制。判据会看<b>最近几条别人发的消息</b>（15 分钟内），
-            不只看触发这一句 —— 所以「来张小猫图片」之后再说「再试试」不会被误拦。<br>
-            都没匹配上时，工具会直接拒绝，并提示模型先问一句"要我找张图吗"再搜。
-          </div>
-        </details>
-      </div>
-      <div class="field"><label>单次运行最多真搜几次</label>
-        <input type="number" id="cfg-imagesearch-max" min="1" max="10" value="${esc(c.imageSearch?.maxPerRun ?? 2)}" />
-        <div class="hint">上限只统计<b>真正打到引擎</b>的次数，参数写错不占额度。</div>
-        <details class="hint-more">
-          <summary>说明：为什么要设这个上限</summary>
-          <div class="hint-more-body">
-            实测一次运行会把多个引擎挨个试一遍（同一张图搜 5 次），又慢又费 SauceNAO 额度。
-          </div>
-        </details>
-      </div>
+      <div class="field"><label>SauceNAO API Key（可选：注册 saucenao.com 账号免费获取；填了走官方 JSON API，更稳且不怕网页改版）</label>
+        <input type="password" id="cfg-saucenao-key" value="${esc(c.imageSearch?.hasSaucenaoApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" /></div>
     </div>
-    <div class="field"><label>SauceNAO API Key（可选：注册 saucenao.com 账号免费获取；填了走官方 JSON API，更稳且不怕网页改版）</label>
-      <input type="password" id="cfg-saucenao-key" value="${esc(c.imageSearch?.hasSaucenaoApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" /></div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-cfbypass" ${c.imageSearch?.cfBypass !== false ? 'checked' : ''} />
       <label for="cfg-cfbypass">Cloudflare 验证自动绕过（被拦截时用内置浏览器自动完成验证，仅限搜图引擎域名）</label></div>
-
-    <div class="field-row">
-      <div class="field"><label>单次运行最多找几次图</label>
-        <input type="number" id="cfg-imagesearch-keyword-max" min="1" max="10" value="${esc(c.imageSearch?.keywordMaxPerRun ?? 2)}" />
-        <div class="hint">与上面「单次运行最多真搜几次」<b>各算各的</b>：一次运行里"查出处的图"和"找新图"是两件事。</div>
-      </div>
-    </div>
+    <!-- 🆕 2026-10-05（第四十三对话 · 交接 §3-105）：搜图触发策略 / 两个"单次运行上限"与两个
+         能力开关一起搬去了「她的能力」。留在这里的是基础设施（提供方 / Key / 体积配额 / CF 绕过）。 -->
     <div class="hint" style="font-size:12px;margin:-4px 0 10px">
       ⚠️ <b>发出去的图片链接有硬边界</b>：只允许发<b>本轮她自己找回来</b>（search_images）
       或<b>刚看过</b>（get_message_images）的图 —— 自己拼的、别处抄的一律拒绝，
@@ -981,6 +952,11 @@ function renderAbilitiesSection(c) {
   const enabled = se.enabled !== false;
   const who = String(se.whoCanAsk || 'private');
   const ownerIds = Array.isArray(se.ownerIds) ? se.ownerIds.filter(Boolean) : [];
+  // 🆕 2026-10-05（第四十三对话 · 交接 §3-105 / 调研-能力开关归位）：从「搜索服务」搬来的
+  //    那几个能力开关要读的值。⚠️ 默认方向**原样保留**：两个 enabled 都是 `!== false`（默认开），
+  //    ⛔ 不许在搬家路上写成 `=== true`（那会把"默认开"静默变成"默认关"）。
+  const web = c.webSearch || {};
+  const img = c.imageSearch || {};
   // ⚠️ 这一节**一个新 `.hint` 都不许加**：`test-设置页说明小字分层.mjs` 有一条棘轮
   //    （`class="hint"` 计数 ≤ 44，"本轮只减不增"）。所以说明一律走既有的两级载体：
   //      · 一行常显 / 一句要点 ⇒ `hintLine(…)`（= `.ihint-line` + ⓘ）
@@ -990,6 +966,48 @@ function renderAbilitiesSection(c) {
     <h3>她的能力</h3>
     ${hintLine('她能用哪些「只能看、不会改」的能力。关掉立刻生效（不用重启）。',
       '关掉一个能力时，提示词里教她怎么用的那句话会一起消失 —— 不会出现"提示词让她调一个不存在的工具"。')}
+
+    <div class="form-panel">
+      <h4 style="margin-top:0">搜索与找图</h4>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-websearch" ${web.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-websearch">联网搜索：启用 web_search / web_fetch 工具</label></div>
+      ${hintLine('关掉它，她就没有联网搜索与抓网页这两个能力。',
+        '搜索提供方、API Key、搜索地址这些"基础设施"仍留在「搜索服务」页 —— 这里只管"她能不能用这个能力"。')}
+      <div class="checkbox-row"><input type="checkbox" id="cfg-imagesearch" ${img.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-imagesearch">以图搜图：启用 search_image_source 工具（trace.moe / SauceNAO / iqdb / 搜图 bot，均免 Key）</label></div>
+      <div class="field-row">
+        <div class="field"><label>搜图触发策略</label>
+          <select id="cfg-imagesearch-policy">
+            <option value="asked" ${(img.policy || 'asked') === 'asked' ? 'selected' : ''}>只在有人问出处 / 要图时才搜（推荐）</option>
+            <option value="free" ${img.policy === 'free' ? 'selected' : ''}>交给模型自己判断（容易看到图就搜）</option>
+          </select>
+          ${hintLine('「只在被要求时」是代码层拦截，不只靠提示词；这一个开关同时管两条路：按图查出处、按关键词找图（找图后会发出去）。')}
+          <details class="hint-more">
+            <summary>说明：什么算"被要求"</summary>
+            <div class="hint-more-body">
+              两条路各有一套判据（"求出处 / 什么番 / 画师"和"来张图 / 发张看看"），
+              但都由这里这<b>一个开关</b>控制。判据会看<b>最近几条别人发的消息</b>（15 分钟内），
+              不只看触发这一句 —— 所以「来张小猫图片」之后再说「再试试」不会被误拦。<br>
+              都没匹配上时，工具会直接拒绝，并提示模型先问一句"要我找张图吗"再搜。
+            </div>
+          </details>
+        </div>
+        <div class="field"><label>单次运行最多真搜几次</label>
+          <input type="number" id="cfg-imagesearch-max" min="1" max="10" value="${esc(img.maxPerRun ?? 2)}" />
+          ${hintLine('上限只统计真正打到引擎的次数，参数写错不占额度。')}
+          <details class="hint-more">
+            <summary>说明：为什么要设这个上限</summary>
+            <div class="hint-more-body">
+              实测一次运行会把多个引擎挨个试一遍（同一张图搜 5 次），又慢又费 SauceNAO 额度。
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="field"><label>单次运行最多找几次图</label>
+        <input type="number" id="cfg-imagesearch-keyword-max" min="1" max="10" value="${esc(img.keywordMaxPerRun ?? 2)}" />
+        ${hintLine('与上面「单次运行最多真搜几次」各算各的：一次运行里"查出处的图"和"找新图"是两件事。')}
+      </div>
+    </div>
 
     <div class="form-panel">
       <h4 style="margin-top:0">看自己在别的会话里什么样</h4>
