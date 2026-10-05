@@ -1233,7 +1233,9 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
   overflow: hidden;
   display: flex; flex-direction: column;
 }
-.settings-pane h3 { margin: 22px 0 12px; font-size: 14px; color: var(--accent-strong); }
+/* 2026-10-06（第四十六对话 · 第四阶段 条目 2，用户拍板 **B 版**）：h3 保留蓝色但降饱和
+   —— `accent-strong` → `accent`。⛔ 别改成 A 版（`var(--text)`）：那是被用户否掉的那一版。 */
+.settings-pane h3 { margin: 22px 0 12px; font-size: 14px; color: var(--accent); }
 .settings-pane h3:first-child { margin-top: 0; }
 .settings-divider { border: none; border-top: 1px dashed var(--border); margin: 22px 0; }
 .persona-save-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
@@ -1344,7 +1346,10 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .model-modal-foot { display: flex; gap: 10px; justify-content: flex-end; }
 .field-row { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
 .field { flex: 1; min-width: 220px; }
-.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+/* 2026-10-06（第四十六对话 · 第四阶段 条目 1）：label 升层 —— 标签不再与说明同色。
+   只改 color / font-weight，**字号不动**（12px）。依据：设置页原来 label = hint = 折叠 = 状态
+   四级同一视觉（全是 12px --muted），"哪句是字段名"读不出来。12 个分区全局生效。 */
+.field label { display: block; font-size: 12px; color: var(--text); font-weight: 500; margin-bottom: 4px; }
 .field input[type=text], .field input[type=password], .field input[type=number], .field select, .field textarea {
   width: 100%;
   background: var(--bg-2);
@@ -1359,6 +1364,11 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }
 .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+/* 2026-10-06（第四十六对话 · 第四阶段 条目 8）：**动态状态文本**（"尚未选择模型"/"当前：…"/
+   "（正在读当前状态…）"）与静态说明分层 —— 用户原来分不清"这是提示"还是"这是现在的值"。
+   ⚠️ 只加 class，**id 一个都不许动**（事件逻辑按 id 回写：provider-hint / model-vision-hint /
+   proactive-status 等）。⛔ 别把 `.hint` 整条改掉 —— 静态说明仍要灰。 */
+.hint.status { color: var(--text); font-weight: 500; }
 /* 设置页**内容滚动区**（2026-10-01 调整方案 · 改动 3）—— 保存条改置顶后，滚动从 `.settings-pane` 挪到这里。
    🔴 **为什么必须"把内容包一层"再改 flex**：直接把 `.settings-pane` 改成 flex 而不包，所有内容都会变成
       flex 项 ⇒ **相邻兄弟的 margin 不再折叠**（`.form-panel` 的 14px 与 `h3` 的 22px 会从"折叠成 22px"
@@ -1444,9 +1454,13 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
    整段铺在表单里就成了"密密麻麻"。约定改为：
      · 只把**结论 / 会踩的坑 / 代价**留在外面（.hint，1~2 行）；
      · 实测数据、实现原理、边界细节收进 <details>，想看再点开。
-   用原生 <details> 而不是自己写折叠：无 JS、天然可访问、Ctrl+F 仍能搜到内容。 */
+   用原生 <details> 而不是自己写折叠：无 JS、天然可访问、Ctrl+F 仍能搜到内容。
+   🆕 2026-10-06（第四十六对话 · 第四阶段 条目 6）：summary 做成"次级按钮"观感（**在既有两个
+   规则块里加属性**，⛔ 不新建选择器块 —— 判据 test-设置页说明小字分层.mjs 要求折叠样式由既有
+   `details.hint-more` 提供）。起因：原来是裸灰字 + 10px ▸，收起的折叠与一行普通说明**视觉上
+   无法区分** ⇒ 收编了也白收编。⚠️ `summary::before` 的 ▸ 与它的 rotate 动效**没动**。 */
 details.hint-more {
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 12px;
   color: var(--muted);
   line-height: 1.55;
@@ -1456,8 +1470,14 @@ details.hint-more > summary {
   list-style: none;                 /* 去掉默认三角，自绘更贴合风格 */
   display: inline-flex; align-items: center; gap: 4px;
   color: var(--muted);
-  border-bottom: 1px dashed transparent;
-  transition: color var(--dur-base) var(--ease-in-out);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  padding: 3px 10px;
+  border-radius: 6px;
+  width: fit-content;
+  transition: color var(--dur-base) var(--ease-in-out),
+              border-color var(--dur-base) var(--ease-in-out),
+              background-color var(--dur-base) var(--ease-in-out);
 }
 details.hint-more > summary::-webkit-details-marker { display: none; }
 details.hint-more > summary::before {
@@ -1466,7 +1486,7 @@ details.hint-more > summary::before {
   transition: transform var(--dur-base) var(--ease-in-out);
 }
 details.hint-more[open] > summary::before { transform: rotate(90deg); }
-details.hint-more > summary:hover { color: var(--text); border-bottom-color: var(--border); }
+details.hint-more > summary:hover { color: var(--text); border-color: var(--accent); background: var(--bg-3); }
 details.hint-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 details.hint-more > .hint-more-body {
   margin: 6px 0 2px;

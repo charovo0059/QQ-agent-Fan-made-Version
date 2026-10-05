@@ -215,7 +215,10 @@ async function saveConfig({ quiet = false } = {}) {
       useChatModel: chk('#cfg-mem-usechat', c.memory?.useChatModel !== false),
       provider: val('#cfg-mem-provider', c.memory?.provider || '').trim(),
       model: val('#cfg-mem-model', c.memory?.model || '').trim(),
-      consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000
+      // 2026-10-06（第四十六对话 · 第四阶段 条目 7）：界面改成**分钟** ⇒ 存盘前 ×60000 换回毫秒。
+      // ⚠️ 存储单位永远是毫秒（键名带 Ms），只在渲染（12-settings-render.js）与这里两处换算 ——
+      //    标准范本见本文件 639 行 proactive 那三行。空/非法值 ⇒ minToMs 回落到 30 分钟（= 控件 min）。
+      consolidateMinIntervalMs: minToMs(val('#cfg-mem-interval', msToMin(c.memory?.consolidateMinIntervalMs, 360)), 1800000)
     };
   }
 
@@ -710,7 +713,10 @@ async function saveConfig({ quiet = false } = {}) {
       // 主题在点选项时就已应用并写入 localStorage，这里把它一并存到后端以便跨设备保留
       theme: getThemePref(),
       showVision: chk('#cfg-showvision', c.ui?.showVision !== false),
-      refreshMs: Number(val('#cfg-refreshms', c.ui?.refreshMs ?? 15000)) || 15000
+      // 2026-10-06（第四十六对话 · 第四阶段 条目 7）：界面改成**秒** ⇒ 存盘前 ×1000 换回毫秒。
+      // ⚠️ 存储仍是毫秒（ui.refreshMs），只在渲染与这里两处换算。空值 ⇒ 落到控件下限 1 秒（min="1"）；
+      //    非数字 ⇒ 15000（`|| ` 那一支）。⛔ 别写成 `Number(val(...)) || 15000` —— 那样 1 秒会被当成 0 丢掉。
+      refreshMs: Math.max(1000, Math.round(Number(val('#cfg-refreshms', Math.round((c.ui?.refreshMs ?? 15000) / 1000))) * 1000)) || 15000
     };
     patch.memberNotes = {
       ...(c.memberNotes || {})
