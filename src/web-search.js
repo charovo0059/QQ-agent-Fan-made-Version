@@ -1110,10 +1110,17 @@ export function pixivRowToItem(row) {
  */
 export async function pixivIllustrationSearch(query, {
   tags = [], heat = PIXIV_DEFAULT_HEAT, limit = 8, browseLocked = false,
+  rating = 'any',
   maxBytes = PIXIV_TEXT_MAX_BYTES, fetcher = safeFetch, pagesFetcher = null
 } = {}) {
   // 没有代理 ⇒ 直连 pixiv 必失败。**在发请求之前**就如实说清楚（省一次必然失败的等待）。
   if (!resolveProxyFor('www.pixiv.net')) return { ok: false, reason: 'no-proxy', tried: [] };
+
+  // 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：登录态下，`rating='questionable'`
+  //    才真的去要 R-18（匿名要了也会被忽略），并**保留**结果（下面那道过滤会放过它们）。
+  const loggedIn = pixivLoggedIn();
+  const mode = pixivModeForRating(rating, loggedIn);
+  const keepR18 = loggedIn && mode === 'r18';
 
   const query_ = String(query ?? '').trim();
   const words = [query_, ...(Array.isArray(tags) ? tags : [tags]).map((x) => String(x ?? '').trim())]
@@ -1127,7 +1134,7 @@ export async function pixivIllustrationSearch(query, {
   for (const word of words) {
     for (const step of pixivHeatChain(heat)) {
       const w = pixivHeatWord(word, step);
-      const { body } = await fetcher(pixivSearchUrl(w), { browseLocked, maxBytes, headers: PIXIV_HEADERS });
+      const { body } = await fetcher(pixivSearchUrl(w, { mode }), { browseLocked, maxBytes, headers: PIXIV_HEADERS });
       const { rows, popular } = parsePixivSearch(body);
       tried.push({ word: w, heat: step, count: rows.length, popular: popular.length });
       if (rows.length || popular.length) { used = { word: w, heat: step, rows, popular }; break; }
@@ -1148,8 +1155,11 @@ export async function pixivIllustrationSearch(query, {
   for (const row of used.popular) push(row, true);
   for (const row of used.rows) push(row, false);
 
-  const allowed = merged.filter((x) => !(Number(x.row?.xRestrict) > 0));   // ⛔ 匿名拿不到的一律不给
-  const r18Dropped = merged.length - allowed.length;
+  // ⛔ 匿名拿不到 R-18（`mode=r18` 会被忽略）⇒ 真出现了也只能剔掉，别装作拿到了。
+  //    登录态**明确要了** `r18` 时则保留 —— 这是"R-18 也要发"那条用户要求落地的位置。
+  const allowed = keepR18 ? merged : merged.filter((x) => !(Number(x.row?.xRestrict) > 0));
+  const r18Dropped = keepR18 ? 0 : (merged.length - allowed.length);
+  const r18Kept = keepR18 ? allowed.filter((x) => Number(x.row?.xRestrict) > 0).length : 0;
   const chosen = allowed.slice(0, n);
 
   const list = await Promise.all(chosen.map(async ({ row, hot }) => {
@@ -1174,12 +1184,17 @@ export async function pixivIllustrationSearch(query, {
     word: used.word,
     heat: used.heat,
     downgraded: used.heat !== askedHeat,
+    // 🆕 §3-113：这次到底按哪个 mode 去要的（匿名恒 'all'）—— 带上它，"为什么没搜到 R-18"
+    //    才能被如实解释成"没登录 / 登录态过期"，而不是"这个站没有这类图"。
+    mode,
+    loggedIn,
     list,
     tried,
     popularCount: used.popular.length,
     hotCount: list.filter((x) => x.hot).length,
     fullSizeMiss: list.filter((x) => !x.fullSize).length,
-    r18Dropped
+    r18Dropped,
+    r18Kept
   };
 }
 
@@ -1189,10 +1204,38 @@ export function pixivRouted() {
 }
 
 /**
+ * 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：pixiv 现在**是不是登录态**。
+ *
+ * 判据只有一个：配置里有没有那份会话 cookie（`imageSearch.pixivCookie`，由用户在设置页自己粘）。
+ * ⛔ 不许"猜"、也不许拿别的东西（比如"能不能取到某个需登录的接口"）当代理信号 ——
+ *    那会变成一次额外请求，而且失败原因会被混进"没登录"里。
+ *
+ * ⚠️ 它**不等于**"cookie 还有效"：会过期，而过期之后 pixiv 多半只是**静默当匿名**处理
+ *    （R-18 搜不到、`xRestrict` 又是 0）。所以调用方必须把 `mode=r18` 这件事**如实报上去**，
+ *    让"明明配了却搜不到 R-18"看起来像**登录态过期**，而不是"这个站没有这类图"。
+ */
+export function pixivLoggedIn() {
+  let raw;
+  try { raw = getConfig()?.imageSearch?.pixivCookie; } catch { raw = ''; }
+  return String(raw ?? '').trim().length > 0;
+}
+
+/**
+ * 「要 questionable」在 pixiv 这边该用哪个 `mode`。
+ *
+ * 实测（2026-10-04 第四十二对话）：**匿名下 `mode=r18` 会被静默忽略**（`xRestrict` 恒为 0）。
+ * ⇒ 只有**登录态**才敢用它；没登录时老老实实 `all`（多要一次也是白要）。
+ */
+export function pixivModeForRating(rating, loggedIn = pixivLoggedIn()) {
+  return (loggedIn && String(rating) === 'questionable') ? 'r18' : 'all';
+}
+
+/**
  * 插画路的**来源路由**（第四十二对话 · 调研 §1.7）：`pixiv` / `safebooru` / `auto`。
  *
  * `auto` 的语义（用户拍板"并列、不是替换"）：
- *   · 要 `questionable` ⇒ **直接 Safebooru**（pixiv 匿名只有全年龄，过去也是白跑）；
+ *   · 要 `questionable` **且没配 pixiv 登录态** ⇒ **直接 Safebooru**（匿名只有全年龄，过去也是白跑）；
+ *     🆕 §3-113：**配了登录态就去 pixiv 要 `mode=r18`** —— 用户要的 R-18 本来就在那边。
  *   · 没配代理 ⇒ pixiv 走不通 ⇒ **直接 Safebooru**（连一次 pixiv 请求都不发）；
  *   · 配了代理 ⇒ **先 pixiv**，没搜到/出错才退 Safebooru；
  *   · 无论走哪条，**用了哪条 + 为什么**都写进 `source` / `notes` 带回去。
@@ -1208,14 +1251,19 @@ export async function illustrationSearchAnySource(query, {
   const wantPixiv = src === 'pixiv' || src === 'auto';
   const wantBooru = src === 'safebooru' || src === 'auto';
 
-  if (wantPixiv && String(rating) === 'questionable') {
-    notes.push('要 questionable ⇒ 这次没走 pixiv（匿名只有全年龄，而且匿名下 `mode=r18` 会被忽略）');
+  // 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：这条分支的判据从"要 questionable"改成
+  //    "要 questionable **且没登录**" —— 用户在设置页粘了 pixiv 会话 cookie 之后，
+  //    pixiv 这条路**也能**给 R-18（`mode=r18`），再一律退 Safebooru 就是白白丢掉用户要的东西。
+  //    ⚠️ 没登录时行为**逐字节不变**（仍然直接退 Safebooru，连一次 pixiv 请求都不发）。
+  if (wantPixiv && String(rating) === 'questionable' && !pixivLoggedIn()) {
+    notes.push('要 questionable，但没配 pixiv 登录态 ⇒ 这次没走 pixiv（匿名只有全年龄，而且匿名下 `mode=r18` 会被忽略）');
   } else if (wantPixiv && !pixivRouted()) {
     notes.push('没配代理 ⇒ pixiv 这条路走不通，这次走 Safebooru');
   } else if (wantPixiv) {
     try {
       const p = await pixivIllustrationSearch(query, {
-        tags, heat, limit, browseLocked, maxBytes: PIXIV_TEXT_MAX_BYTES, fetcher, pagesFetcher: pixivPagesFetcher
+        tags, heat, limit, browseLocked, rating,
+        maxBytes: PIXIV_TEXT_MAX_BYTES, fetcher, pagesFetcher: pixivPagesFetcher
       });
       if (p.ok) {
         if (p.downgraded) {
@@ -1224,12 +1272,19 @@ export async function illustrationSearchAnySource(query, {
         }
         if (p.fullSizeMiss) notes.push(`有 ${p.fullSizeMiss} 张没拿到原图接口的全尺寸，给的是缩略图`);
         if (p.r18Dropped) notes.push(`有 ${p.r18Dropped} 张是 R-18（匿名拿不到，已剔掉）`);
+        // 🆕 §3-113：登录态下真的拿到了 R-18 ⇒ 如实说"这次是按登录态要的"。
+        //    ⛔ 别写成"放心发" —— 能不能发出去是 QQ 那边的事（概率失败由提示词交代）。
+        if (p.r18Kept) notes.push(`按登录态要了 R-18（mode=r18），这批里有 ${p.r18Kept} 张是 R-18`);
+        if (p.loggedIn && p.mode === 'r18' && !p.r18Kept) {
+          notes.push('配了 pixiv 登录态、也按 mode=r18 要了，但这批里一张 R-18 都没有（也可能是登录态已经过期）');
+        }
         return {
           ok: true, source: 'pixiv', tag: p.word, heat: p.heat, downgraded: p.downgraded,
           list: p.list, tried: p.tried, notes,
           // 这几个计数也带回去：它们是"这批图是怎么来的"的事实（工具层可以照实说）
           popularCount: p.popularCount, hotCount: p.hotCount,
-          fullSizeMiss: p.fullSizeMiss, r18Dropped: p.r18Dropped
+          fullSizeMiss: p.fullSizeMiss, r18Dropped: p.r18Dropped, r18Kept: p.r18Kept,
+          mode: p.mode, loggedIn: p.loggedIn
         };
       }
       notes.push(p.reason === 'no-result'

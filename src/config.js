@@ -151,6 +151,23 @@ export const DEFAULT_CONFIG = {
     // 可选：SauceNAO 官方 API Key（注册 saucenao.com 账号免费获取）。
     // 填了走官方 JSON API（稳定、免费额度约 200 次/天）；留空走匿名网页抓取兜底。
     saucenaoApiKey: '',
+    // ── 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：pixiv **登录态的会话 cookie** ──────
+    //   为什么要它：匿名访问 pixiv 时 `mode=r18` 会被**静默忽略**（2026-10-04 真机实测
+    //   `xRestrict` 恒为 0）⇒ 想搜到 R-18 **必须**带登录态。用户已拍板"用备用号，封了无所谓"。
+    //
+    //   🔴 怎么给：**你自己在「设置 → 搜索服务」里粘**（界面上那一格），别写进源码或交接文档。
+    //      格式就是浏览器里那串（至少要有 `PHPSESSID=…`；要完整的话把 Cookie 头整串粘进来）。
+    //      ⛔ 它**不会**出现在 `GET /api/config` 的返回里 —— `cookie` 命中 app.js 的
+    //      SECRET_KEY_PATTERN ⇒ 服务端删字段、只回一个 `hasPixivCookie` 布尔（与 API Key 同一套）。
+    //
+    //   🔴 它**只发给 `*.pixiv.net` / `*.pximg.net`**（`safe-fetch.js` 的 `isPixivHost()` 按 host 注入）：
+    //      `cookie` **不在** `ALLOWED_OVERRIDE_HEADERS` 里 ⇒ 调用方**永远**没法自己指定它，
+    //      也就不可能把这份凭据带到别的站（防 SSRF / 串站，那条纪律一个字没动）。
+    //
+    //   ⚠️ 维护成本（如实写在这儿）：登录态是 **cookie 会话**，会过期；pixiv 登录流带
+    //      reCAPTCHA（可能还有 2FA）⇒ **自动重登基本不可行，掉线只能你本人手动重贴一次**。
+    //      ⛔ 别把它做成"看起来会自动续期"的样子 —— 那正是本项目最忌的静默失效。
+    pixivCookie: '',
     // Cloudflare 自动绕过：被弹人机验证时，先用内置 Chromium 网络栈重试，
     // 仍被拦则开隐藏窗口自动完成 JS 验证（仅限搜图引擎域名白名单）。
     cfBypass: true
