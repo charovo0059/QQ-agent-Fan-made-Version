@@ -379,52 +379,23 @@ function openSite() {
   window.open('https://kondius.cn/qq-agent', '_blank', 'noopener');
 }
 
-// ── 自动检查更新 ──
-// 节奏：启动时一次 + 之后每小时一次（version.json 作者手动改，这个频率足够）。
-// 有更新 → 弹浮窗引导下载；用户手动关掉浮窗 → 本次启动内不再弹（重启恢复）。
-// 但只要检测到新版，设置侧栏「桌面端」右侧就一直挂红点，直到版本追平。
-let updateAvailable = false;
-let updateToastDismissed = false;   // 本次启动内用户关过更新浮窗
-
-function renderUpdateDot() {
-  // 侧栏菜单每次重渲染都会重建（菜单 HTML 里已按 updateAvailable 画了点）；
-  // 这里兜底处理"侧栏已渲染完、检测结果刚到"的情况。
-  const item = document.querySelector('.settings-menu-item[data-section="desktop"]');
-  if (!item) return;
-  let dot = item.querySelector('.update-dot');
-  if (updateAvailable && !dot) {
-    dot = document.createElement('span');
-    dot.className = 'update-dot';
-    item.appendChild(dot);
-  } else if (!updateAvailable && dot) {
-    dot.remove();
-  }
-  // 桌面端页签的版本文案同步：有新版时"检查线上是否有新版本"→"发现新版本"
-  const st = document.getElementById('update-status-text');
-  if (st) {
-    st.innerHTML = updateAvailable ? '<b style="color:var(--warn)">；发现新版本</b>' : '；检查线上是否有新版本';
-  }
-}
-
-async function runUpdateCheck({ manual = false } = {}) {
-  try {
-    const data = await api('/api/update-check');
-    if (!data?.ok) return data;   // 网络/服务器错误原样返回，手动检查要显示原因
-    updateLatest = data;
-    updateAvailable = !!data.hasUpdate;
-    renderUpdateDot();
-    // 自动检查弹浮窗；本次启动内被用户关过就不再弹（手动点「检查更新」除外）
-    if (updateAvailable && (!updateToastDismissed || manual)) {
-      showUploadToast(
-        `发现新版本 v${data.latest}（当前 v${data.current}）`,
-        data.url,
-        { onClose: () => { updateToastDismissed = true; } }
-      );
-    }
-    return data;
-  } catch { return null; }
-}
-let updateLatest = null;
+// ── 版本检查：已移除（2026-10-05 第四十四对话 · 用户拍板 B4）────────────────
+// 原来这里是一整套"启动时查 kondius.cn 上的 version.json → 有新版就弹浮窗 + 侧栏挂红点"：
+// `updateAvailable` / `updateToastDismissed` / `renderUpdateDot()` / `runUpdateCheck()`。
+// 用户拍板**去掉这个检查**（顺带少一次对外请求）⇒ 四个东西一起删干净。
+//
+// 🔴 删的时候连带清了这些**只服务于它**的下游：
+//   · `ui/app/17-init.js` 的启动调用 + 每小时 setInterval；
+//   · `ui/app/10-settings-load.js` 侧栏菜单里的 `update-dot` 红点；
+//   · `ui/app/12-settings-render.js` 桌面端那节「版本更新」整块（含 `update-status-text` / 检查按钮）；
+//   · `ui/app/13-settings-events.js` 的「检查更新」按钮监听；
+//   · `src/app.js` 的 `/api/update-check` 路由 + `UPDATE_INFO_URL` + `compareSemver()`；
+//   · `ui/style.css` 的 `.update-dot` 样式。
+//
+// ⛔ **`/api/version`（纯本地读 package.json）留着** —— 桌面端那节仍显示"当前版本 vX.Y.Z"，
+//    它一个网络请求都不发，与本次要去的"线上检查"是两件事。
+// ⛔ **`showUploadToast()` 也留着**（本文件上面就是它）：它现在服务的是「意见收集 / 金句上传」
+//    那两个**用户要保留**的功能，⛔ 别跟着本次清理一起删。
 
 // ── 金句上传 ──
 state.quoteMode = false;

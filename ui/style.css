@@ -1218,8 +1218,8 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .settings-menu-item.egg-hot { background: var(--accent); color: var(--on-accent); font-weight: 700; text-align: center; margin-top: 10px; }
 .settings-menu-item.egg-hot:hover { background: var(--accent); color: var(--on-accent); filter: brightness(1.15); }
 
-/* 有新版本时侧栏「桌面端」右侧的红点 */
-.update-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e5534b; margin-left: 6px; vertical-align: middle; }
+/* （原有「有新版本时侧栏『桌面端』右侧的红点」`.update-dot` 样式随版本检查一起去掉了
+   —— 2026-10-05 第四十四对话 · 用户拍板 B4。） */
 
 /* ⚠️ 这里是**外壳**，它不再滚动（2026-10-01 调整方案 · 保存条改置顶）：
    用户要求"保存条一直置顶、而且**不浮在文字上**" ⇒ 只能让条与滚动区**在结构上分开**

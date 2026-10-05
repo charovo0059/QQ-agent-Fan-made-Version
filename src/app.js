@@ -187,27 +187,19 @@ function deriveAllowMode(cfg) {
   return cfg?.allowAllWhenEmpty === true ? 'allowAll' : 'denyAll';
 }
 
-// ── 版本更新检查 ─────────────────────────────────────────────────────
-// 线上版本信息只有一份：kondius.cn/qq-agent/version.json（发版时手动改）。
-// 由后端代取而不是前端直连：绕过 CORS，且失败信息能统一回给 UI。
-const UPDATE_INFO_URL = 'https://kondius.cn/qq-agent/version.json';
-
+// ── 版本号（本地） ───────────────────────────────────────────────────
+// 🆕 2026-10-05（第四十四对话 · 用户拍板 B4）：原来这里还有一条"线上版本检查" ——
+//   `UPDATE_INFO_URL = 'https://kondius.cn/qq-agent/version.json'` + `compareSemver()`
+//   + `/api/update-check` 路由（启动时与每小时各打一次）。用户拍板**去掉这个检查**。
+//   ⇒ 连带删掉了那三样；⛔ 别再加回来。
+//   ⚠️ `/api/version`（下面那个路由）**留着**：纯本地读 package.json，不发网络请求 ——
+//      设置页「版本 → 当前版本」就是它喂的。
+//   ⛔ 同域名的「意见收集 / 金句上传」是另一个功能（用户要保留），与这里无关。
 function localVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
     return String(pkg.version || '0.0.0');
   } catch { return '0.0.0'; }
-}
-
-/** x.y.z 三段数字比较；返回 1 / 0 / -1。非数字段按 0 处理，够用。 */
-function compareSemver(a, b) {
-  const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
-  const pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-  }
-  return 0;
 }
 
 /**
@@ -3381,28 +3373,14 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       }
 
       if (pathname === '/api/version' && method === 'GET') {
-        // 纯本地读取，无网络依赖：设置页"当前版本"展示用
+        // 纯本地读取，无网络依赖：设置页「版本 → 当前版本」展示用
         return json(res, 200, { version: localVersion() });
       }
 
-      if (pathname === '/api/update-check' && method === 'GET') {
-        const current = localVersion();
-        try {
-          const r = await fetch(UPDATE_INFO_URL, { signal: AbortSignal.timeout(8000), cache: 'no-store' });
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const info = await r.json();
-          const latest = String(info.version || '');
-          if (!latest) throw new Error('version.json 缺少 version 字段');
-          return json(res, 200, {
-            ok: true, current, latest,
-            hasUpdate: compareSemver(latest, current) > 0,
-            url: String(info.url || 'https://kondius.cn/qq-agent'),
-            notes: String(info.notes || '')
-          });
-        } catch (error) {
-          return json(res, 200, { ok: false, current, error: String(error?.message ?? error) });
-        }
-      }
+      // 🆕 2026-10-05（第四十四对话 · 用户拍板 B4）：`/api/update-check` 路由**已删除**。
+      //   它做的事是后端代取 `kondius.cn/qq-agent/version.json` 再比版本号（前端启动时 + 每小时各一次）。
+      //   用户拍板去掉这个检查 ⇒ 路由、`UPDATE_INFO_URL`、`compareSemver()` 一起清掉，
+      //   少一次对外请求。⛔ 别把它加回来（前端已无任何调用点）。
 
       if (pathname === '/api/models' && method === 'GET') {
         try {

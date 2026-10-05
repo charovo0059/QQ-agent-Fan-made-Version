@@ -25,8 +25,12 @@ $$('.tab').forEach((tab) => {
   // 启动 loading：先等 HTTP 服务可用（页面可能先于服务打开）
   setLoadingStatus('正在启动 QQ Agent 服务…');
   await bootLoop();
-  runUpdateCheck();                                 // 启动时静默查一次（失败不打扰）
-  setInterval(() => runUpdateCheck(), 3600_000);    // 之后每小时查一次
+  // 🆕 2026-10-05（第四十四对话 · 用户拍板 B4）：**启动时的线上版本检查已移除** ——
+  //   原先这里有一句 `runUpdateCheck()` + 每小时一次 `setInterval`，会去
+  //   `kondius.cn/qq-agent/version.json` 取最新版本号。用户决定不要这个检查（顺带少一次对外请求）。
+  //   ⛔ 别把"检查更新"整件事加回来：同域名的「意见收集 / 金句上传」是**要保留**的另一个功能，
+  //      与这里无关（它们由前端直接打 kondius.cn/qq-agent/api 的 `/comment`、`/holyshits`，
+  //      见 `16-misc.js`）。
 
   // 主题：以后端配置为准（跨设备同步），仅当后端确实存过才覆盖本地
   try {
