@@ -4,10 +4,18 @@
 // - Markdown → 纯文本、QQ 硬长度切分、CQ 转义
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
 import { getConfig, DEFAULT_CONFIG } from './config.js';
-import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from './util.js';
+import { sleep, randInt, createSendChain, escapeCqText, formatClockTime, toFileUri } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { resolveFreshImageUrl } from './onebot.js';
 import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+// 🆕 2026-10-05（第四十三对话 · 交接 §3-112）：出站图片先在**我们这边**落成文件
+//    （下载要带 Referer、要能压体积），见下面 `stageOutboundImage` 的大段注释。
+import { safeFetchBinary } from './safe-fetch.js';
+import { compressImage } from './image-compress.js';
+import { detectImageType, mimeToExt } from './image-type.js';
 // ⚠️ 只为拿本地表情缓存的路径（cachedStickerFilePath）。tools.js 不 import sender.js
 //    ⇒ 不构成循环依赖（本轮实测确认过）。
 // 🆕 2026-09-29（第三十对话）再加 `ensureStickerImage`：发送侧**自己补缓存**（见 sendSticker 的注释）。
@@ -39,6 +47,100 @@ export function stickerFillTimeout() { return stickerFillTimeoutMs; }
 /** 只给判据用：改这个值。生产路径不会调它。 */
 export function __setStickerFillTimeoutForTest(ms) {
   stickerFillTimeoutMs = Math.max(1, Number(ms) || STICKER_FILL_TIMEOUT_MS);
+}
+
+// ── 出站图片：先落到本地，再交给协议端（2026-10-05 第四十三对话 · 交接 §3-112）────
+//
+// 🔴 为什么必须改（两个病一次治，证据链见 `分析-搜图发图超时与R18登录-20261005.md` §1/§2）：
+//   ① **协议端下载没有 Referer**：`i.pximg.net` 不带 Referer 一律 403，而这个 Referer
+//      **只有我们自己的 `safe-fetch` 会补**（`buildHeaders` 按 host 补，交接 §2.2 第 1 条）。
+//      原来 `send_image` 是把 **URL 交给协议端**去下载的 ⇒ 她发 pximg 链接**必然失败**，
+//      而界面上只看到一句"超时"（403 被协议端吞成了"卡住"）。
+//   ② **15 秒来不及**（§3-111 已把这一档放宽到 60 秒，但让它少传几倍体积更根本）：
+//      协议端要"先下载、再上传到 QQ"两段网络，1.9MB 原图必然超时。
+//   ⇒ 形状：我们自己下（带 Referer）→ 必要时压 → **`file://` 交给协议端**（它只读盘、不出网）。
+//
+// ⚠️ 四条纪律（都别改回去）：
+//   ① **下载失败就不发**（⛔ 别"退回把 URL 交给协议端"）—— 那正是要修的那条路，
+//      退回去等于把"看得见的失败"换成"看不见的失败"。
+//   ② **动图（GIF）不压**：`compressImage` 走 ffmpeg 重编码，动图会被拍成一张静图，
+//      而那是**静默降级**（她以为发的是动图，对面看到的是静止的）。宁可原样发、慢一点。
+//   ③ **临时文件发完就删**（`cleanup`，成功失败都删）：不留垃圾，也不让上一次的残图
+//      被下一次读到。⚠️ 删的时机是"协议端返回之后" —— 那时的语义是"它已经把文件读走了"。
+//   ④ **只压"确实需要压"的**：`compressImage` 自己会在 ≤512KB 时直接放过；
+//      加上 `maxBytes`/`maxDim` 两道判据 ⇒ 小图**一个字节都不动**（不做"能压就顺手压一下"）。
+//
+// ⚠️ 顺带一句（别误读）：微信那条通道的桥（`工具-中继`）目前只对 `file`/`video` 段解析
+//    `file://`，**图片段只认 `base64://` 与附件目录里的文件名** ⇒ 微信发图**本来就发不出去**
+//    （它收到 http 链接也一样找不到文件）。这次改动**没有让它更坏**，但也没修好它；
+//    要修得动中继的 `ob_protocol.py`（另一件事，已记进交接的待办）。
+const OUTBOUND_IMAGE_MAX_BYTES = 24 * 1024 * 1024;      // 我们自己下载的字节上限
+const OUTBOUND_COMPRESS_TARGET_BYTES = 2 * 1024 * 1024; // 超过它才压
+const OUTBOUND_COMPRESS_MAX_DIM = 2048;                 // 压缩时的最长边（QQ 自己也会再缩一次）
+
+/**
+ * 把一张**远程图**先落成协议端能直接读的本地文件。
+ *
+ * @param {string} url 已经过公网校验的 http(s) 图片地址
+ * @returns {Promise<{uri:string, bytes:number, originalBytes:number, compressed:boolean, cleanup:Function}>}
+ *   `uri` 是 `file://…`；`cleanup()` 删临时文件（幂等）。
+ * @throws 下载/写盘/路径任一环失败都抛错，**且消息里写明"没有发出去"**（交给模型如实回报）。
+ */
+export async function stageOutboundImage(url) {
+  let buffer;
+  let contentType;
+  try {
+    ({ buffer, contentType } = await safeFetchBinary(url, OUTBOUND_IMAGE_MAX_BYTES));
+  } catch (error) {
+    throw new Error(`发图前我们自己下载失败（这张图**没有**发出去）：${error?.message ?? error}`);
+  }
+  if (!buffer || !buffer.length) {
+    throw new Error('发图前我们自己下载失败（这张图**没有**发出去）：内容是空的');
+  }
+  const sniffed = detectImageType(buffer);
+  let out = buffer;
+  let outMime = sniffed?.mime || String(contentType || 'image/jpeg').split(';')[0];
+  let compressed = false;
+  if (outMime !== 'image/gif') {   // 纪律②：动图不压
+    const r = await compressImage(buffer, {
+      maxDim: OUTBOUND_COMPRESS_MAX_DIM,
+      maxBytes: OUTBOUND_COMPRESS_TARGET_BYTES,
+      quality: 4
+    });
+    if (r?.compressed && r.buffer?.length && r.buffer.length < buffer.length) {
+      out = r.buffer;
+      outMime = r.mime || 'image/jpeg';
+      compressed = true;
+    }
+  }
+  const file = path.join(os.tmpdir(),
+    `qqa_sendimg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}${mimeToExt(outMime)}`);
+  const cleanup = () => { try { fs.unlinkSync(file); } catch { /* 已经不在了就当删过 */ } };
+  try {
+    fs.writeFileSync(file, out);
+  } catch (error) {
+    cleanup();
+    throw new Error(`发图前写本地临时文件失败（这张图**没有**发出去）：${error?.message ?? error}`);
+  }
+  const uri = toFileUri(file);
+  if (!uri) {
+    cleanup();
+    throw new Error('发图前生成的本地路径不合法（这张图**没有**发出去）');
+  }
+  return { uri, bytes: out.length, originalBytes: buffer.length, compressed, cleanup };
+}
+
+let outboundImageStager = stageOutboundImage;
+
+/**
+ * 只给判据用：替换"下载 + 压缩 + 落临时文件"这一步。
+ *
+ * 为什么需要这个缝：那一步**要出网**（判据里不能连真图站），而它恰恰是本轮要钉住的
+ * 那一步。与 `__setStickerFillTimeoutForTest` 同一套做法（生产路径不会调它）。
+ * 传非函数 = 还原成真的实现（判据之间互不串味）。
+ */
+export function __setOutboundImageStagerForTest(fn) {
+  outboundImageStager = typeof fn === 'function' ? fn : stageOutboundImage;
 }
 
 export class SendQueue {
@@ -280,7 +382,14 @@ export class SendQueue {
    *    （`sendTextBatch` 那边是"先限频后去重"，因为文字那条路要先把间隔算出来；这里没有间隔，
    *      顺序按"先判要不要发"更合理。）
    *
-   * @param {string} imageUrl 公网 http(s) 链接，或 `file://` 本地路径（调用方负责合法性校验）
+   * 🆕 2026-10-05（第四十三对话 · 交接 §3-112）：**交给协议端的不再是这个 URL，而是一个 `file://`**
+   *    —— 我们先自己下下来（`safeFetchBinary` 会补 `i.pximg.net` 要的 Referer）、
+   *    必要时压一下、落成临时文件。理由与四条纪律见 `stageOutboundImage` 上面那一大段。
+   *    ⚠️ 去重仍按**原始 URL**记账（`dedupeKey`），而且排在下载**之前**：被判重的那条
+   *    一次网络都不该发生。`onSent.image` 也仍然是原始 URL（"她发的是这张图的哪个地址"）。
+   *
+   * @param {string} imageUrl 公网 http(s) 链接（内部会落成本地文件再发），**或** `file://` 本地路径
+   *   （调用方负责合法性校验；本地路径直接交给协议端，不再下载）
    * @param {object} options { note, replyToMessageId, atUserId }
    */
   sendImage(chatKey, imageUrl, options = {}) {
@@ -297,17 +406,38 @@ export class SendQueue {
         return { message_id: null, deduped: true };
       }
       this.#checkRate(chatKey);
-      await sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
-      const data = await client.sendImage(kind, id, url, {
-        replyToMessageId: options.replyToMessageId ?? null,
-        atUserId: options.atUserId ?? null
-      });
-      this.#markSent(chatKey, dedupeKey);   // 只有协议端成功返回后才记账
-      const ts = Date.now();
-      const note = options.note ? `:${String(options.note).slice(0, 40)}` : '';
-      this.store.appendSelf(chatKey, { text: `[图片${note}]`, ts, mid: data?.message_id ?? null });
-      this.onSent?.({ chatKey, text: `[图片${note}]`, messageId: data?.message_id ?? null, image: url });
-      return { message_id: data?.message_id ?? null };
+      // 🔴 先落本地（下载 → 必要时压 → 临时文件）。失败会抛，**不会**退回"把 URL 交给协议端"。
+      // ⚠️ 但**调用方直接给本地路径**时不再下载 —— 本函数的文档一直写着
+      //    "公网 http(s) 链接，**或 `file://` 本地路径**"，本次改动**不该把它收窄**。
+      //    （真机第一次跑就踩到：探针把 stage 好的 `file://` 又喂了进来，报的是
+      //     "下载失败：仅允许 http/https" —— 而那张图其实已经好好地在本机了，
+      //     那句话会把人引到完全错误的方向。）
+      const alreadyLocal = /^file:/i.test(url);
+      const staged = alreadyLocal
+        ? { uri: url, bytes: null, originalBytes: null, compressed: false, cleanup() {} }
+        : await outboundImageStager(url);
+      try {
+        await sleep(randInt(500, 1300));   // 发图前真人式的短暂停顿
+        const data = await client.sendImage(kind, id, staged.uri, {
+          replyToMessageId: options.replyToMessageId ?? null,
+          atUserId: options.atUserId ?? null
+        });
+        this.#markSent(chatKey, dedupeKey);   // 只有协议端成功返回后才记账
+        const ts = Date.now();
+        const note = options.note ? `:${String(options.note).slice(0, 40)}` : '';
+        this.store.appendSelf(chatKey, { text: `[图片${note}]`, ts, mid: data?.message_id ?? null });
+        this.onSent?.({ chatKey, text: `[图片${note}]`, messageId: data?.message_id ?? null, image: url });
+        return {
+          message_id: data?.message_id ?? null,
+          // 如实带上"发出去的那份有多大"（工具层据此告诉她"这张图被压过"，见 tools.js 的 send_image）
+          sentBytes: Number(staged.bytes) || null,
+          originalBytes: Number(staged.originalBytes) || null,
+          compressed: staged.compressed === true
+        };
+      } finally {
+        // 协议端已经返回 ⇒ 它把文件读走了 ⇒ 删掉（失败路径同样删，不留残图）
+        try { staged.cleanup?.(); } catch { /* 删不掉不该影响发送结果 */ }
+      }
     });
   }
 

@@ -568,7 +568,12 @@ async function saveConfig({ quiet = false } = {}) {
       byLengthMs: Number(val('#cfg-bylength', c.send?.byLengthMs)) || 20,
       hardSplitAt: Number(val('#cfg-hardsplit', c.send?.hardSplitAt)) || 0,
       // 🆕 2026-09-25（第二十一对话，交接 §3 待办 4）：发送去重窗口的界面接线。
-      dedupeWindowMs: normalizeDedupeWindowMs(val('#cfg-dedupewindow', c.send?.dedupeWindowMs ?? 8000))
+      dedupeWindowMs: normalizeDedupeWindowMs(val('#cfg-dedupewindow', c.send?.dedupeWindowMs ?? 8000)),
+      // 🆕 2026-10-05（第四十三对话 · 交接 §3-111）：发图那一档的超时。
+      // ⚠️ 回退值必须与 config.js 的 DEFAULT_CONFIG.send.imageTimeoutMs 一致（60000），
+      //    而 onebot.js 的 imageSendTimeoutMs() **不读这个输入框**（它读配置）⇒ 两处默认值
+      //    由 `测试-现行\test-发图先落本地与超时.mjs` 钉住一致。
+      imageTimeoutMs: Number(val('#cfg-imgtimeout', c.send?.imageTimeoutMs)) || 60000
     };
     patch.proactive = {
       ...c.proactive,
