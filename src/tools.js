@@ -1503,7 +1503,15 @@ export function buildToolDefs() {
           // 白烧两轮才改对（会话 mu3uizk7-791fb483）。schema 与实现必须一致。
           userId: { type: 'string', pattern: '^\\d{1,15}$', description: '对方 QQ 号，纯数字（先用 get_active_members 查准确号码再填）' },
           target: { type: 'string', description: '对方名字（备注名/群名片/昵称）' },
-          content: { type: 'string', description: '印象内容（≤120字，稳定、可跨多次聊天使用）' }
+          content: { type: 'string', description: '印象内容（≤120字，稳定、可跨多次聊天使用）' },
+          // 🆕 2026-10-05（第四十四对话 · 用户拍板 C1 / 交接 §3-123）：**可选**的自评档位。
+          //   ⚠️ 现在**只进影子日志**（用来复盘"判档准不准"），⛔ 不影响任何召回与排序。
+          //   5 = 雷点/禁忌（踩了会出事）· 4 = 约定/偏好/身份（稳定）· 2 = 一次性（这次/今天）
+          importance: {
+            type: 'integer',
+            enum: [5, 4, 2],
+            description: '可选：这条印象的重要度。5=雷点/禁忌 · 4=约定/偏好/身份 · 2=一次性。拿不准就不填。'
+          }
         },
         required: ['category', 'userId', 'content']
       },
@@ -1514,7 +1522,10 @@ export function buildToolDefs() {
         }
         const entry = ctx.memory.append(ctx.chatKey, 'memberImpression', String(args.content ?? ''), {
           userId,
-          target: String(args.target ?? '').trim()
+          target: String(args.target ?? '').trim(),
+          // ⚠️ 如实透传（可能是 undefined / 3 / "5"）—— 收敛交给 memory.js 的 `normalizeImportance`，
+          //    ⛔ 别在这里悄悄改成合法值（那会把"模型报错了"这件事从影子读数里抹掉）。
+          importance: args.importance
         });
         return ok({ saved: true, entry });
       }

@@ -313,6 +313,82 @@ export function scoreImpression(entry, { member = {}, keywords = [], now = Date.
  */
 export const IMPRESSION_THRESHOLD = 0.3;
 
+// ── 🆕 2026-10-05（第四十四对话 · 用户拍板 C1 / 交接 §3-123）：印象的 `importance` **影子模式** ──
+//
+// 🔴🔴 **这是纯观测，⛔ 一个字都不许参与召回**：
+//   · `scoreImpression()` **没有**读它（上面的公式一字未动）；
+//   · 印象条目**不存**这个字段（⛔ 别往 entry 上加 —— 那会让"影子"变成"已生效"，而且改数据形状）；
+//   · 唯一的落点是**一行日志**，跑约两周后复盘"判档准不准"，再决定要不要让它参与排序。
+//   ⚠️ 反悔点写在交接里：两周后若判档不准 ⇒ 改词表或改成让模型自己报；若准 ⇒ 那时才谈"进排序"，
+//      而且**必须同时**改 `scoreImpression` 的公式与它的判据（`test-印象门槛制.mjs` 钉着那条公式）。
+//
+// 判定来源有**两个**，都要如实记下来（复盘时要比较谁更准）：
+//   ① 词表（本函数）—— 机械、可复现、不花钱；
+//   ② 模型自己报的（工具 schema 里那个可选参数 `importance`）—— 语义更好但不可靠。
+/** 档位定义（用户拍板）：5 = 雷点/禁忌 · 4 = 约定/偏好/身份 · 2 = 一次性。没有 3/1 这两档。 */
+export const IMPRESSION_IMPORTANCE_LEVELS = { 5: '雷点/禁忌', 4: '约定/偏好/身份', 2: '一次性' };
+
+/** 5 档词表：**踩了就出事**的那一类（用户拍板的"雷点/禁忌"）。 */
+const IMPORTANCE_WORDS_5 = [
+  '不要', '别', '禁止', '忌讳', '雷点', '讨厌', '反感', '不喜欢', '不许', '不能',
+  '怕', '恐惧', '过敏', '创伤', '阴影', '回避', '别提', '别说', '忌讳', '底线',
+  '隐私', '不要问', '别问', '生气', '发火', '吵架', '拉黑', '封禁'
+];
+/** 4 档词表：**稳定的约定 / 偏好 / 身份**（"以后都用得上"的那一类）。 */
+const IMPORTANCE_WORDS_4 = [
+  '叫', '称呼', '名字', '昵称', '身份', '职业', '工作', '学生', '老师', '医生',
+  '喜欢', '偏爱', '习惯', '总是', '每次', '经常', '约定', '说好', '答应', '习惯用',
+  '生日', '年龄', '关系', '家人', '女朋友', '男朋友', '老公', '老婆', '孩子',
+  '口味', '不吃', '爱吃', '爱好', '玩游戏', '追番', '作息', '上班', '上学'
+];
+/** 2 档词表：**一次性**的事（"这次/今天/刚才"这类时间限定词）。 */
+const IMPORTANCE_WORDS_2 = [
+  '这次', '今天', '刚才', '刚刚', '现在', '临时', '顺便', '碰巧', '刚好', '这一回',
+  '待会', '一会', '马上', '正在', '此刻'
+];
+
+/**
+ * 按**自有词表**给一条印象判档。**纯函数、零副作用、不读也不写任何状态。**
+ *
+ * 判定顺序（先踩雷、再看约定、最后才看"是不是一次性的"）：
+ *   · 命中 5 档词 → **5**
+ *   · 否则命中 4 档词 → **4**
+ *   · 否则命中 2 档词（且**没有**命中 4 档）→ **2**
+ *   · 都不命中 → **4**（回落到"约定/偏好/身份"这一档：`memory_append` 的 description
+ *     本来就明确要求只记"以后和这个人打交道时用得上"的稳定印象 ⇒ 默认落在中间档最合理；
+ *     ⚠️ 回落值**也是影子读数的一部分**，⛔ 别因为它"看着保守"就改成 0/undefined）
+ *
+ * ⚠️ 词表顺序有讲究：5 与 4 同时命中时**5 赢**（"别问他的生日"是雷点，不是偏好）。
+ * ⚠️ 用 `includes` 做**子串**匹配（中文没有词边界）；词表刻意短而具体，避免"别"这种
+ *    单字在无关句子里误伤 —— 它确实会误伤（"别的不说"），但那正是**两周复盘要量出来的东西**：
+ *    这是**影子模式**，判错只进日志、不影响她。
+ *
+ * @param {string} content 印象正文
+ * @returns {{level: 5|4|2, by: 'words', hits: string[]}} 判出来的档与命中的词（复盘要看"凭什么判的"）
+ */
+export function impressionImportance(content) {
+  const text = String(content ?? '');
+  const hit = (list) => list.filter((w) => text.includes(w));
+  const h5 = hit(IMPORTANCE_WORDS_5);
+  if (h5.length) return { level: 5, by: 'words', hits: h5 };
+  const h4 = hit(IMPORTANCE_WORDS_4);
+  if (h4.length) return { level: 4, by: 'words', hits: h4 };
+  const h2 = hit(IMPORTANCE_WORDS_2);
+  if (h2.length) return { level: 2, by: 'words', hits: h2 };
+  return { level: 4, by: 'default', hits: [] };
+}
+
+/**
+ * 把模型自报的档位**收敛**到合法值（它可能填 3 / 1 / "5" / 空 / 乱写）。
+ * ⚠️ 与 `impressionImportance` 分开：一个读词表、一个读模型，复盘时要**分别**统计。
+ * @returns {number|null} 合法的 5/4/2；认不出来就是 **null**（如实记"模型没报/报得不对"）
+ */
+export function normalizeImportance(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return (n === 5 || n === 4 || n === 2) ? n : null;
+}
+
 /**
  * 中文**虚词**：双字块里两个字都在这张表里时，就不算关键词（"我的"/"什么"/"这个"…）。
  *
@@ -609,7 +685,7 @@ export class MemoryStore {
     for (const k of toDelete) map.delete(k);
   }
 
-  #appendRaw(chatKey, userId, name, content, createdAt = Date.now(), source = 'model') {
+  #appendRaw(chatKey, userId, name, content, createdAt = Date.now(), source = 'model', modelImportance = null) {
     const map = this.#ensureChat(chatKey);
     const key = userId ? String(userId) : `_n_${memberFileName('', name)}`;
     const member = map.get(key) || loadMember(chatKey, userId, name);
@@ -623,6 +699,24 @@ export class MemoryStore {
       // 老条目没有这个字段 ⇒ 消费方按 undefined 显示"未知（早于 09-19）"
       source: String(source || 'model')
     };
+    // 🔴🔴 2026-10-05（第四十四对话 · 用户拍板 C1 / §3-123）· `importance` **影子模式**：
+    //   在这里（**印象写入的唯一收口**）算一次档位 + 收下模型自报的档位，**只打一行日志**。
+    //   ⛔ **绝不写进 `entry`**（那会让影子变生效、还改数据形状）；
+    //   ⛔ **绝不参与召回**（`scoreImpression` 一个字节都没动）。
+    //   ⇒ 复盘时比"词表判的"与"模型报的"谁更准，再决定要不要让它进排序。
+    try {
+      const byWords = impressionImportance(entry.content);
+      const byModel = normalizeImportance(modelImportance);
+      const agree = byModel === null ? 'na' : (byModel === byWords.level ? 'same' : 'diff');
+      // 一行、可 grep、可解析（复盘脚本按 `[importance-shadow]` 抓）
+      console.log(`[importance-shadow] chat=${chatKey} uid=${String(userId ?? '')} name=${String(name ?? '').slice(0, 24)}`
+        + ` words=${byWords.level}(${byWords.by}${byWords.hits.length ? ':' + byWords.hits.slice(0, 3).join('/') : ''})`
+        + ` model=${byModel === null ? 'na' : byModel} agree=${agree}`
+        + ` content=${JSON.stringify(entry.content.slice(0, 60))}`);
+    } catch (e) {
+      // 影子观测**绝不许影响写印象本身**（本项目最忌"观测把主路搞坏"）
+      console.warn('[importance-shadow] 判档失败（不影响这条印象）：' + String(e?.message ?? e));
+    }
     // ⚠️ 只比 content：entry 现在多了 source 字段，用整个对象比较会**永远不相等**、去重直接失效
     if (!member.impressions.some((e) => e.content === entry.content)) {
       member.impressions.push(entry);
@@ -635,13 +729,16 @@ export class MemoryStore {
     return entry;
   }
 
-  /** 记一条对群友的印象。extra: { userId, target } */
+  /**
+   * 记一条对群友的印象。extra: { userId, target, importance? }
+   * 🆕 `extra.importance` = **模型自报的档位**（可选）—— 只进影子日志，⛔ 不进条目、不参与召回。
+   */
   append(chatKey, category, content, extra = {}) {
     if (category !== 'memberImpression') return null;
     const userId = String(extra.userId ?? '').trim();
     const target = String(extra.target ?? '').trim().slice(0, 60);
     if (!userId && !target) return null;
-    return this.#appendRaw(chatKey, userId, target || userId, content);
+    return this.#appendRaw(chatKey, userId, target || userId, content, Date.now(), 'model', extra.importance ?? null);
   }
 
   /** 所有成员的印象（扁平列表，兼容旧消费方）。 */
