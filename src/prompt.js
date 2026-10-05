@@ -34,7 +34,7 @@ import { extractKeywords } from './memory.js';
 import { skillManager } from './skills/manager.js';
 // 🆕 2026-10-05（第四十三对话）：插画路"能不能给 R-18"那句话**只有一处真相源**
 //    （`illustrationR18Hint()` 按登录态现算）。⛔ 别在本文件里写死一份 —— 五处写死必然再漂。
-import { illustrationR18Hint } from './web-search.js';
+import { illustrationR18Hint, illustrationGroupR18Hint } from './web-search.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
@@ -311,11 +311,20 @@ function qqSceneRules(platform) {
         + '（风景、美食、工具、实物）⇒ kind=\'real\'；拿不准就不给 kind。'
         + '插画路也能自己给 tags（多个，如 ["hatsune_miku","1girl"]）与 rating。',
       '- 【插画的分级】rating 三档：safe=不加分级过滤（它的默认检索）/ questionable=只要擦边 / any=两者都可能。'
-        + '**群聊里用 safe，私聊随你**。⚠️ 结果里那条 rating 是**原站的词**：general 全年龄 / sensitive 轻擦边 / questionable 擦边；'
-        + 'Safebooru 上基本没有 explicit —— 真露骨的这条路给不了，搜不到就如实说。',
+        // 🆕 2026-10-05（第四十三对话）：这里原来写死"**群聊里用 safe，私聊随你**" ——
+        //   存档里她的思考原文就是"group chat rule: 群里请用 safe rating" ⇒ **她自己把 rating 传成了 safe**，
+        //   而代码一个字都没拦。⇒ 改成按 `imageSearch.allowR18InGroup` 现算（与另外三处同一真相源）。
+        + `${illustrationGroupR18Hint()}。`
+        + '⚠️ 结果里那条 rating 是**原站的词**：general 全年龄 / sensitive 轻擦边 / questionable 擦边；'
+        + 'Safebooru 上基本没有 explicit —— 真露骨的这条路给不了，搜不到就如实说。'
+        // 🆕 2026-10-05（第四十三对话 · **她自己的提案**）：统一两档的 `level` 字段，挑图先看它。
+        + '🔴 每条结果里有一个**统一的 `level`**（safe=全年龄 / r18=擦边或更露骨）——'
+        + '**挑图先看 level，别按标题猜**：她要"色图"而结果里混着 safe 的，那是你挑错了，不是没找到。',
       '- 【插画搜到之后】要发出去才算发（send_image，url 或 sampleUrl 都行，一条一张）。'
         + '⚠️ size 里宽度或高度任一超过 3000、或 file_url 看着很大时**优先发 sampleUrl**（小图更稳）。'
-        + '⚠️ rating 如实标着（general / sensitive / questionable）：别把 questionable 的图发到群里。',
+        // 🆕 2026-10-05（第四十三对话）：这句原来写死"别把 questionable 的图发到群里"——
+        //   存档里她引用的正是它 ⇒ 按开关现算。
+        + `⚠️ rating 如实标着（general / sensitive / questionable）；${illustrationGroupR18Hint(true)}。`,
       // 🆕 2026-10-04（第四十二对话 · 调研 §1）：插画路的**两条来源**。
       //   ⚠️ 同样只**追加**：上面三句一个字都没动（判据按整句钉着它们）。
       // 🆕 2026-10-05（第四十三对话）：那句话原来写死"pixiv **只有全年龄** —— 匿名拿不到 R-18"，

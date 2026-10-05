@@ -1312,6 +1312,32 @@ export function illustrationR18Hint(short = false) {
 }
 
 /**
+ * 「群聊里能不能搜/发擦边与 R-18」那句话 —— **按开关现算**，⛔ 别在 prompt.js / tools.js 里各写一份。
+ *
+ * 🔴 为什么收成一处（**真机 + 会话存档撞出来的**，2026-10-05 第四十三对话）：
+ *   用户在群里说「@她 来张铃兰的色图」，她**自己把 `rating` 传成了 `safe`**。她的思考原文：
+ *     "The character card says R18/擦边 image searching is allowed for study purposes.
+ *      **But group chat rule: 群里请用 safe rating.** The system says 「⚠️ 群里请用 safe」for rating.
+ *      Also 「**别把 questionable 的图发到群里**」. So I should search for 铃兰 illustration with safe rating."
+ *   ⇒ **代码一个字都没拦**，是**四处写死的文案**让她自己退了（而用户的人设卡里明写着允许）。
+ *   四处 = `search_images` 的 rating 参数说明 / 返回里的 tip / 提示词【插画的分级】/【插画搜到之后】。
+ *   ⚠️ 四处必须**同时**跟着 `imageSearch.allowR18InGroup` 走，少一处就会出现"一半允许一半禁止"。
+ */
+export function illustrationGroupR18Hint(short = false) {
+  let allow = true;
+  try { allow = getConfig()?.imageSearch?.allowR18InGroup !== false; } catch { allow = true; }
+  if (!allow) {
+    return short
+      ? '群聊里只用 safe'
+      : '群聊里**只用 safe**（别把 questionable 的图发到群里）—— 想发擦边就私聊';
+  }
+  return short
+    ? '群聊里也能搜/发擦边与 R-18'
+    : '群聊里**也能搜/发擦边与 R-18**（这是用户开的开关）—— 但 QQ 侧**有概率把这类图拦掉、'
+      + '或让对方看不到**，所以**如实说、别保证一定能发出去**';
+}
+
+/**
  * 插画路的**来源路由**（第四十二对话 · 调研 §1.7）：`pixiv` / `safebooru` / `auto`。
  *
  * `auto` 的语义（用户拍板"并列、不是替换"）：

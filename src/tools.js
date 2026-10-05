@@ -13,7 +13,7 @@ import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes } from './u
 import { estimateCost, cacheHitRate, resolveApiKey } from './llm.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint } from './web-search.js';
+import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
@@ -539,11 +539,36 @@ export function illustrationImagesFor(ctx, list) {
     url: x?.url ?? '',
     ...(x?.sampleUrl ? { sampleUrl: x.sampleUrl } : {}),
     ...(x?.rating ? { rating: x.rating } : {}),
+    // 🆕 2026-10-05（第四十三对话 · **她自己的提案**）：给每条加一个**统一两档**的 `level`。
+    //   她在 20:25 的提案里写得清清楚楚：
+    //     "我发出去的五张里混了三张非 r18（**我自己按标题挑的，没核分级标签**）…
+    //      最好统一成 safe/questionable 两档的说法，方便我判断能不能发。"
+    //   ⇒ 原站那三个词（general / sensitive / questionable）跨两条来源、还夹着 Safebooru 的
+    //      `questionable` 语义差别，模型很容易挑错 ⇒ 这里**归一成两档**：
+    //     `safe` = 全年龄 / 别的都算 `r18`（擦边及更露骨）。⛔ **不是**替代 `rating`：
+    //     `rating` 保留原站原词（工具描述里明说了那是"原站的词"），`level` 是给她看的判断依据。
+    //   ⚠️ 判定口径与 `pixivRowToItem` 的 `rating:'r18'`、Safebooru 解析的 `questionable/sensitive`
+    //     对齐（那三处就是"哪些算擦边"的既有定义，⛔ 别在这里另立一套）。
+    level: levelOfRating(x?.rating),
     ...(x?.size ? { size: x.size } : {}),
     ...(x?.source ? { source: x.source } : {}),
     ...(x?.pageUrl ? { pageUrl: x.pageUrl } : {}),
     title: x?.title ?? ''
   }));
+}
+
+/**
+ * 把原站那几档分级词**归一成两档**：`safe` = 全年龄，别的都算 `r18`（擦边及更露骨）。
+ *
+ * ⚠️ 既有定义只有三处（都在本文件/`web-search.js` 里）：
+ *   · pixiv：`pixivRowToItem` 把 `xRestrict > 0`（含 2 = R-18G）统一标成 `rating:'r18'`；
+ *   · Safebooru：解析出来的原词是 `general` / `sensitive` / `questionable`。
+ * ⇒ 这里**只做归一**，⛔ 不新增"哪些算擦边"的判断（那会让两处定义漂）。
+ */
+export function levelOfRating(rating) {
+  const r = String(rating ?? '').trim().toLowerCase();
+  if (!r || r === 'general' || r === 'safe') return 'safe';
+  return 'r18';
 }
 
 /**
@@ -1252,7 +1277,9 @@ export function buildToolDefs() {
             type: 'string',
             enum: ['safe', 'questionable', 'any'],
             description: '可选，仅插画路用：safe=只要全年龄；questionable=只要擦边/R-18；any=两者都可能有（默认）。'
-              + '⚠️ 群里请用 safe。'
+              // 🆕 2026-10-05（第四十三对话）：这句原来写死"⚠️ 群里请用 safe"，而**她是照着它做选择的**
+              //    （存档里她的思考原文就是"group chat rule: 群里请用 safe rating"）⇒ 改成按开关现算。
+              + `⚠️${illustrationGroupR18Hint()}。`
               // 🆕 2026-10-05（第四十三对话）：这句话原来写死成"要 questionable 时**只会走 Safebooru**"
               //    —— 用户填了 pixiv 登录态之后它就错了，而模型是**照着它选 source 的**
               //    （存档里她因此主动传了 source='safebooru' 去要色图）。⇒ 改成按登录态现算。
@@ -1373,7 +1400,15 @@ export function buildToolDefs() {
                 + '⚠️ rating 如实标了**原站的分级词**（general=全年龄 / sensitive=轻擦边 / questionable=擦边；'
                 // ⚠️ 这几档是原站的**单词**，不是 s/q/e（2026-10-04 真机实测：返回的是 `general`）。
                 //    第一版照 gelbooru 的字母写 ⇒ 属"照印象写文案"，判据抓不到，是真跑一次才发现。
-                + 'Safebooru 上基本没有 explicit）——别把 questionable 的图发到群里。'
+                + 'Safebooru 上基本没有 explicit）。'
+                // 🆕 2026-10-05（第四十三对话）：这里原来写死"别把 questionable 的图发到群里" ——
+                //    存档里她引用的正是这一句（"Also '别把 questionable 的图发到群里'"）⇒ 按开关现算。
+                + `⚠️${illustrationGroupR18Hint()}。`
+                // 🆕 2026-10-05（第四十三对话 · **她自己的提案**）：她 20:25 提过
+                //    "我发出去的五张里混了三张非 r18（我自己按标题挑的、没核分级标签）"
+                //    ⇒ 挑图前必须先看每条里的 `level` 字段（统一的 safe / r18 两档），别按标题猜。
+                + '🔴 挑图时**先看每条里的 `level`**（safe=全年龄 / r18=擦边或更露骨），⛔ 别按标题猜 —— '
+                + '她说要"色图"而结果里混着全年龄时，那是"发错了"，不是"没找到"。'
             });
           }
 
