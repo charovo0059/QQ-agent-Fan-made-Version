@@ -1017,6 +1017,22 @@ function renderAbilitiesSection(c) {
         <input type="number" id="cfg-imagesearch-keyword-max" min="1" max="10" value="${esc(img.keywordMaxPerRun ?? 2)}" />
         ${hintLine('与上面「单次运行最多真搜几次」各算各的：一次运行里"查出处的图"和"找新图"是两件事。')}
       </div>
+      <!-- 🆕 2026-10-05（第四十四对话 · **她自己的提案 f3bebcf7**）：把这两个数从"写死在代码里"
+           挪到界面上。她原话：「单次返回张数上限（默认 6，上限 12）只写在提示词和内核默认值里，
+           管理端 GUI 上看不到也改不了」。
+           ⚠️ 默认值由 value 现读配置 ⇒ ⛔ 别在这里写死 6/12（那会造成"界面显示的 ≠ 实际生效的"）。
+           ⚠️ "上限"是**硬上限**（她传更大也会被钳）⇒ 两个框的关系是"默认 ≤ 上限"。
+           🔴 本段在模板字符串里 ⇒ ⛔ 一个字反引号都不许有（坑 186）。 -->
+      <div class="field-row">
+        <div class="field"><label>单次返回张数（默认要几张）</label>
+          <input type="number" id="cfg-img-result-limit" min="1" max="50" value="${esc(img.resultLimit ?? 6)}" /></div>
+        <div class="field"><label>单次返回张数上限（硬上限）</label>
+          <input type="number" id="cfg-img-result-limit-max" min="1" max="50" value="${esc(img.resultLimitMax ?? 12)}" /></div>
+      </div>
+      <div class="field"><label>单次运行最多发几张图（0 = 不限）</label>
+        <input type="number" id="cfg-img-send-max" min="0" max="50" value="${esc(img.sendMaxPerRun ?? 0)}" />
+        ${hintLine('限制的是"发"几张（一次搜索能返回多张）；"搜"几次由上面那两个上限管。0 = 不限。')}
+      </div>
 
       <!-- 🆕 2026-10-05（第四十三对话 · 用户要求）：把"搜/发图片"有关的分级开关也收进这一节。
            起因：用户报"群聊似乎还是不能发色图"，而真机+存档查明**代码没拦** ——

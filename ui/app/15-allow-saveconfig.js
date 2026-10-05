@@ -414,7 +414,15 @@ async function saveConfig({ quiet = false } = {}) {
       //    `allowR18InGroup` 是本轮新增的（用户报"群聊还是不能发色图"之后做的）。
       //    ⚠️ 两个都按 `!== false` 判 —— 它们是"默认开"的开关（写反的症状是"没动过它却关了"）。
       allowQuestionable: chk('#cfg-allowquestionable', c.imageSearch?.allowQuestionable !== false),
-      allowR18InGroup: chk('#cfg-allowr18ingroup', c.imageSearch?.allowR18InGroup !== false)
+      allowR18InGroup: chk('#cfg-allowr18ingroup', c.imageSearch?.allowR18InGroup !== false),
+      // 🆕 2026-10-05（第四十四对话 · **她提案 f3bebcf7**）：单次返回张数（默认 / 硬上限）
+      //   + 单次运行最多发几张。这三个原来**都没有界面**（前者甚至写死在 tools.js 里）。
+      //   ⚠️ 每次从界面现读；没渲染时回落 `c.*` 原值（"这一节没渲染" ≠ "把它设成默认值"）。
+      //   ⚠️ 钳制范围与后端 `tools.js` 的钳制**同口径**（1~50；发送 0 = 不限）——
+      //      ⛔ 前端松、后端紧会让用户"填了却看不出为什么没生效"。
+      resultLimit: Math.max(1, Math.min(50, Number(val('#cfg-img-result-limit', c.imageSearch?.resultLimit ?? 6)) || 6)),
+      resultLimitMax: Math.max(1, Math.min(50, Number(val('#cfg-img-result-limit-max', c.imageSearch?.resultLimitMax ?? 12)) || 12)),
+      sendMaxPerRun: Math.max(0, Math.min(50, Number(val('#cfg-img-send-max', c.imageSearch?.sendMaxPerRun ?? 0)) || 0))
     };
 
     // ── 🆕 2026-10-05（第四十四对话 · 用户拍板 B1 / 交接 §3-121）────────────────────
