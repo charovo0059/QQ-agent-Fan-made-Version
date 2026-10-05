@@ -572,6 +572,93 @@ export function levelOfRating(rating) {
 }
 
 /**
+ * 🆕 2026-10-05（第四十四对话）：**把被分级过滤剔掉的那些链接从"发图白名单"里撤掉**。
+ *
+ * 为什么必须有这一步（否则群聊那道闸**等于没拦**）：
+ *   `illustrationImagesFor()` 在筛之前就已经把**整批** url 登记进 `ctx.__seenImageUrls`，
+ *   而 `send_image` 只认"本轮见过的链接"。⇒ 如果只把清单收窄、不撤白名单，
+ *   她**照样能把她刚被拦掉的那张 R-18 发出去**（只要还记得那个 url）。
+ *
+ * @param {Array} all 过滤**前**的清单（每条带 url/sampleUrl）
+ * @param {Array} kept 过滤**后**的清单
+ * @param {Set} seen `seenImageUrls(ctx)` 返回的那个 Set（**原地删**）
+ * @returns {number} 撤掉的链接条数（≥0；同一个 url 由多条共用时也只算一次）
+ */
+export function pruneSeenImageUrls(all, kept, seen) {
+  if (!(seen instanceof Set)) return 0;
+  const keep = new Set();
+  for (const x of Array.isArray(kept) ? kept : []) {
+    for (const u of [x?.url, x?.sampleUrl]) if (u) keep.add(u);
+  }
+  let removed = 0;
+  for (const x of Array.isArray(all) ? all : []) {
+    for (const u of [x?.url, x?.sampleUrl]) {
+      if (!u || keep.has(u)) continue;
+      if (seen.delete(u)) removed += 1;
+    }
+  }
+  return removed;
+}
+
+/**
+ * 🆕 2026-10-05（第四十四对话 · **她提案 123d9c1c** + 用户拍的"群聊能不能发色图"那个开关）：
+ * **按分级真筛一层**，并把"筛掉了多少 / 有没有退回"如实带回去。
+ *
+ * 为什么要有它（两个来源的需求合在一处）：
+ *   ① 她的提案原话："我发出去的五张里混了三张非 r18（**我自己按标题挑的，没核分级标签**）…
+ *      最好统一成 safe/questionable 两档的说法" ⇒ `level` 字段已加，但**光有字段不够**：
+ *      她仍可能挑错。**权威过滤必须在工具层**（代码拦，不是求她自觉）。
+ *   ② 用户拍板的「群聊里也允许她搜/发擦边与 R-18」这个开关，此前**只改提示词、代码一个字没拦**
+ *      （`illustrationGroupR18Hint()` 生成的说明）。群聊是**会影响别人**的场景 ⇒ 关掉时必须是硬闸。
+ *
+ * @param {Array} list 结果清单（每条带 `rating`（原站词）/ `level`（统一两档，可能还没加））
+ * @param {{require?: 'safe'|'r18'|'any', onlySafe?: boolean}} o
+ *   `require` = 她明确要哪一档；`onlySafe` = 群聊且开关关掉 ⇒ **无条件只要 safe**（压过 `require`）。
+ * @returns {{list: Array, dropped: number, fallback: boolean, reason: string}}
+ *   `dropped` = 被剔掉的条数；`fallback` = 要 r18 但一条都没有 ⇒ 已如实退回；`reason` = 给人话用的原因。
+ */
+export function refineIllustrationList(list, { require = 'any', onlySafe = false } = {}) {
+  const arr = Array.isArray(list) ? list : [];
+  const lv = (x) => x?.level ?? levelOfRating(x?.rating);
+  if (!arr.length) return { list: arr, dropped: 0, fallback: false, reason: '' };
+  // ① 群聊硬闸：无条件只要 safe（**压过她传的 rating**）—— 这是"代码真的拦住了"那一层。
+  if (onlySafe) {
+    const kept = arr.filter((x) => lv(x) === 'safe');
+    if (kept.length === arr.length) return { list: arr, dropped: 0, fallback: false, reason: '' };
+    // ⚠️ 全被剔光时**不退回**（与 ② 的取舍相反）：群聊里宁可"这次没图"，
+    //    也绝不能把擦边图发出去 —— 那是会影响别人的场景，空手比越界好。
+    return {
+      list: kept, dropped: arr.length - kept.length, fallback: false,
+      reason: `群聊里这个开关关着 ⇒ 已剔掉 ${arr.length - kept.length} 张擦边/R-18`
+    };
+  }
+  // ② 她明确要某一档 ⇒ 按档筛
+  const want = String(require ?? 'any').toLowerCase();
+  if (want === 'safe') {
+    const kept = arr.filter((x) => lv(x) === 'safe');
+    return {
+      list: kept, dropped: arr.length - kept.length, fallback: false,
+      reason: kept.length === arr.length ? '' : `只给全年龄 ⇒ 已剔掉 ${arr.length - kept.length} 张擦边/R-18`
+    };
+  }
+  if (want === 'r18') {
+    const kept = arr.filter((x) => lv(x) === 'r18');
+    if (kept.length) {
+      return {
+        list: kept, dropped: arr.length - kept.length, fallback: false,
+        reason: `只要 R-18 ⇒ 已剔掉 ${arr.length - kept.length} 张全年龄`
+      };
+    }
+    // 一条 R-18 都没有 ⇒ 如实退回全部（⛔ 不空手而归；调用方必须把这件事说出来）
+    return {
+      list: arr, dropped: 0, fallback: true,
+      reason: '这批里一张 R-18 都没有 ⇒ 已如实退回全年龄'
+    };
+  }
+  return { list: arr, dropped: 0, fallback: false, reason: '' };
+}
+
+/**
  * 按配置过滤工具集：无视觉模型 → 去掉看图工具；搜索关 → 去掉联网工具；
  * 技能工具（本子查询已搬进 skills/doujin-lookup/）→ 走 getToolAvailability() 统一口径。
  *
@@ -1262,7 +1349,15 @@ export function buildToolDefs() {
         type: 'object',
         properties: {
           query: { type: 'string', description: '搜索关键词（一句话，别塞整段聊天记录）' },
-          limit: { type: 'integer', description: '最多要几张，默认 6，上限 12' },
+          // 🆕 2026-10-05（第四十四对话 · 她提案 f3bebcf7 第 ③ 条："那段说明希望能跟着配置自动生成，
+          //   避免两边说不一样"）⇒ 默认值/上限**现算**，⛔ 别再写死"默认 6，上限 12"。
+          //   ⚠️ 这两个数住在 `config.imageSearch.resultLimit / resultLimitMax`（管理员可在界面上改）。
+          //   ⚠️ `getConfig()` 每次现读 ⇒ 改完**不用重启**（与 `imageLimits()` 同一取向）。
+          limit: {
+            type: 'integer',
+            description: `最多要几张，默认 ${Math.max(1, Number(getConfig().imageSearch?.resultLimit) || 6)}，`
+              + `上限 ${Math.max(1, Number(getConfig().imageSearch?.resultLimitMax) || 12)}`
+          },
           kind: {
             type: 'string',
             enum: ['auto', 'illustration', 'real'],
@@ -1320,7 +1415,12 @@ export function buildToolDefs() {
           // ⚠️ 计数器**只有这一个**（`__keywordImageCalls`）：插画路与老路**共用同一份额度**
           //    （两条路都属于"找图"这件事，各算各的会让上限形同虚设）。
           ctx.__keywordImageCalls = used + 1;
-          const limit = Math.max(1, Math.min(12, Number(args.limit) || 6));
+          // 🆕 2026-10-05（第四十四对话 · 她提案 f3bebcf7）：这个数原来**写死**成 `min(12, … || 6)`，
+          //   管理端看不到也改不了 ⇒ 挪进配置（`resultLimit` / `resultLimitMax`）。
+          //   ⚠️ `resultLimitMax` 是硬上限（防"一次拉 200 张"的护栏），⛔ 别把它也变成"建议值"。
+          const limDefault = Math.max(1, Number(cfg.resultLimit) || 6);
+          const limMax = Math.max(limDefault, Number(cfg.resultLimitMax) || 12);
+          const limit = Math.max(1, Math.min(limMax, Number(args.limit) || limDefault));
           const kind = String(args.kind ?? 'auto').trim().toLowerCase();
 
           // ── 插画路（2026-10-04 第四十对话 · 批 1，方案 §2；🆕 第四十二对话加了 pixiv 源）──
@@ -1338,12 +1438,24 @@ export function buildToolDefs() {
             const wantSource = ['auto', 'pixiv', 'safebooru'].includes(String(args.source ?? '').trim().toLowerCase())
               ? String(args.source).trim().toLowerCase() : 'auto';
             const heat = normalizePixivHeat(args.heat);
+            // 🆕 2026-10-05（第四十四对话）：**群聊分级硬闸**（用户拍的"群聊能不能发色图"那个开关）。
+            //   🔴 此前 `allowR18InGroup` 只喂给提示词、src 里没有任何一处拦图 ⇒
+            //      关掉它只让她"被劝退"，代码并没拦住。群聊是**会影响别人**的场景
+            //      ⇒ 关掉时这里**无条件只要 safe**（压过她传的 rating）。
+            //   ⚠️ 判定 `=== false`（这是"默认开"的开关，写反的症状是"没动过它却关着"）。
+            const inGroup = String(ctx.chatKey || '').startsWith('group:');
+            const onlySafe = inGroup && cfg.allowR18InGroup === false;
+            // ⚠️ 群聊硬闸时不把 `requireLevel` 传成 safe：由**工具层**筛（见下面 refineIllustrationList），
+            //    这样"被拦了几张"这件事是我们自己数出来的，不依赖上游各条路各自实现。
             const r = await illustrationSearchAnySource(q, {
               source: wantSource,
               heat,
               tags: Array.isArray(args.tags) ? args.tags : [],
               extraTags: cfg.extraTags || {},
               rating,
+              // 🔴 检索层也按分级要（她提案要的正是"在检索层就过滤"）：
+              //    `questionable` ⇒ 只要 r18；`safe` ⇒ 只要全年龄；`any` ⇒ 不过滤。
+              requireLevel: rating === 'questionable' ? 'r18' : (rating === 'safe' ? 'safe' : 'any'),
               limit,
               cache: ctx.__tagProbeCache
             });
@@ -1369,12 +1481,31 @@ export function buildToolDefs() {
                 + '⛔ 别拿不相干的图凑数。');
             }
             const images = illustrationImagesFor(ctx, r.list);
+            // 🆕 2026-10-05（第四十四对话）：**工具层的权威分级过滤**（群聊硬闸 + 她明确要的那一档）。
+            //   ⚠️ 用 `images` 筛（不是 `r.list`）：`images` 才带 `level`（`r.list` 只有原站 `rating`）。
+            //   ⚠️ `images` 已经过 `illustrationImagesFor` → 已 `rememberImageUrls` ⇒ 剔掉的那些
+            //      **仍然在白名单里**；群聊硬闸必须**同时**把白名单收窄，否则她还能拿它去 `send_image`。
+            const refined = refineIllustrationList(images, {
+              require: rating === 'questionable' ? 'r18' : (rating === 'safe' ? 'safe' : 'any'),
+              onlySafe
+            });
+            if (onlySafe && refined.dropped) {
+              // 🔴 硬闸真的拦了东西 ⇒ ① 把被拦的那些**从发图白名单里撤掉**（否则等于没拦：
+              //    她仍能拿那个 url 去 send_image）；② 如实告诉她原因（⛔ 别静默少几张）。
+              //    ⚠️ 撤白名单这一步抽成了纯函数（`pruneSeenImageUrls`）⇒ 能单测，
+              //       ⛔ 别把这段逻辑再内联回来（那样"白名单真的收窄了"就只能靠读源码相信）。
+              const removed = pruneSeenImageUrls(images, refined.list, seenImageUrls(ctx));
+              if (removed) refined.reason += `（这些链接也从"本轮可发"里撤掉了 ${removed} 条）`;
+            }
             return ok({
               query: q,
               kind: 'illustration',
               // 用了哪条路如实写出来（用户拍板：出错/换源要如实告诉她）
               source: r.source,
               tag: r.tag,
+              // 🆕 分级过滤的如实读数（她提案要的"别让我自己核对"就落在这里）
+              ...(refined.dropped ? { levelDropped: refined.dropped, levelNote: refined.reason } : {}),
+              ...(refined.fallback ? { levelFallback: true } : {}),
               ...(r.source === 'pixiv'
                 ? {
                   heat: r.heat,
@@ -1385,8 +1516,8 @@ export function buildToolDefs() {
                     : `热度门槛 ${r.heat > 0 ? `${r.heat}users入り` : '不按收藏数收窄（off）'}`
                 }
                 : {}),
-              count: images.length,
-              images,
+              count: refined.list.length,
+              images: refined.list,
               ...(r.notes && r.notes.length ? { notes: r.notes } : {}),
               tip: (r.source === 'pixiv'
                 // 🆕 2026-10-05（第四十三对话）：原来这里写死"这些是 pixiv 的图：**只有全年龄**
@@ -1434,7 +1565,13 @@ export function buildToolDefs() {
       description: '发一张图片（一条消息一张图，不能附带文字；想说的话先用 send_message 单独发）。'
         + '⚠️ url **只能**用 `search_images` 刚找回来的、或 `get_message_images` 刚看过的图片链接 —— '
         + '本工具会核对，其它来源（自己编的、别处抄的）一律拒绝。'
-        + '表情包请用 send_sticker，不要用这个。',
+        + '表情包请用 send_sticker，不要用这个。'
+        // 🆕 2026-10-05（第四十四对话 · 她提案 f3bebcf7）：配了"单次最多发几张"就如实写进描述，
+        //   ⛔ 别让描述与代码说的不一样（她提案第 ③ 条要的正是这件事）。`0`/没配 ⇒ 一个字都不加。
+        + (() => {
+          const cap = Math.max(0, Number(getConfig().imageSearch?.sendMaxPerRun) || 0);
+          return cap > 0 ? `⚠️ 本次运行最多发 ${cap} 张（超过会被拒）。` : '';
+        })(),
       parameters: {
         type: 'object',
         properties: {
@@ -1449,6 +1586,20 @@ export function buildToolDefs() {
         try {
           const raw = String(args.url ?? '').trim();
           if (!raw) return err('图片链接为空');
+          // 🆕 2026-10-05（第四十四对话 · 她提案 f3bebcf7 的"单次运行最多发送图片数"）：
+          //   它与"找图次数上限"**不是一回事** —— 那个限制**搜**几次，这个限制**发**几张
+          //   （一次搜索能返回多张，她可能把 limit 张全发出去）。
+          //   ⚠️ 默认 `0` = 不限 ⇒ 不配这个键时行为与加它之前**逐字节相同**。
+          //   ⚠️ 计数挂在 `ctx` 上（只属于本次运行，不写进会话记录），与其它几个上限同一口径。
+          const sendCap = Math.max(0, Number(getConfig().imageSearch?.sendMaxPerRun) || 0);
+          if (sendCap > 0) {
+            const sentAlready = Number(ctx.__imageSentCount) || 0;
+            if (sentAlready >= sendCap) {
+              return err(`本次运行已经发过 ${sentAlready} 张图，达到上限（${sendCap} 张）。`
+                + '不要再发了：把剩下的话用 send_message 说完就行。');
+            }
+            ctx.__imageSentCount = sentAlready + 1;
+          }
           // ① 安全边界：只允许发"本轮她真的见过"的地址（见 rememberImageUrls 的注释）
           const seen = seenImageUrls(ctx);
           if (!seen.has(raw)) {
@@ -1467,8 +1618,7 @@ export function buildToolDefs() {
             note: String(args.note ?? '').trim(),
             replyToMessageId: args.replyToMessageId ?? null,
             atUserId: args.atUserId ?? null
-          });
-          // ⚠️ 图与**文字**对"被去重"的处理**有意不同**，别互相"对齐"掉（决策记录 §82.1）：
+          });          // ⚠️ 图与**文字**对"被去重"的处理**有意不同**，别互相"对齐"掉（决策记录 §82.1）：
           //   · 文字那条：`session.sent` **照记**（带 `deduped:true`），因为"这句话确实在对面"
           //     —— `orchestrator.js` 的 `status`/追问/`nudgeRecovered`/出错重试/群禁言都靠它判"说过话没有"；
           //   · 图片这条：**不记** `session.sent` 且回执 `sent:false` —— 图不是"回话"，

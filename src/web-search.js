@@ -781,6 +781,9 @@ export function parseSafebooruImages(body, limit = 12) {
  */
 export async function safebooruImageSearch(query, {
   tags = [], rating = 'any', limit = 8, browseLocked = false,
+  // 🆕 2026-10-05（第四十四对话 · 她提案 123d9c1c）：`'safe'` = 只要全年龄 / `'r18'` = 只要擦边及更露骨
+  //   / `'any'`（缺省）= 不过滤。⚠️ 缺省 `'any'` ⇒ 不传它时行为与加这个参数之前**逐字节相同**。
+  requireLevel = 'any',
   maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch
 } = {}) {
   const base = (Array.isArray(tags) ? tags : [tags]).map((x) => String(x ?? '').trim()).filter(Boolean);
@@ -790,13 +793,17 @@ export async function safebooruImageSearch(query, {
   const rounds = rating === 'any' ? [base, [...base, 'rating:questionable']]
     : rating === 'questionable' ? [[...base, 'rating:questionable']]
       : [base];
+  // 🔴 要按分级筛时**多要一些**：`n` 是本函数最后 `slice(0, n)` 的条数，
+  //    而"筛完再切"会让池子不够 ⇒ 这里先要 `2n`（Safebooru 单请求上限 50，`safebooruSearchUrl` 会钳）。
+  //    ⚠️ 不这么做的话，`requireLevel='safe'` 时可能只回来 1~2 张（池子被切掉了）。
+  const want = String(requireLevel ?? 'any').toLowerCase() === 'any' ? n : Math.min(50, n * 2);
   const out = [];
   const seen = new Set();
   const errors = [];
   for (const round of rounds) {
     try {
-      const { body } = await fetcher(safebooruSearchUrl(round, { limit: n }), { browseLocked, maxBytes, headers: SAFEBOORU_HEADERS });
-      for (const it of parseSafebooruImages(body, n)) {
+      const { body } = await fetcher(safebooruSearchUrl(round, { limit: want }), { browseLocked, maxBytes, headers: SAFEBOORU_HEADERS });
+      for (const it of parseSafebooruImages(body, want)) {
         if (seen.has(it.url)) continue;             // 两轮之间按地址去重（同一个 post 可能两边都出现）
         seen.add(it.url);
         out.push(it);
@@ -806,7 +813,9 @@ export async function safebooruImageSearch(query, {
     }
   }
   if (!out.length && errors.length) throw new Error(`Safebooru 搜索失败 —— ${errors.join('；')}`);
-  return out.slice(0, n).map((it) => ({ ...it, title: String(query ?? '').trim() }));
+  // ⚠️ 这里**只按 `want`（含分级余量）返回候选**，分级过滤与最终 `slice` 都在 `illustrationSearch` 里做
+  //    —— ⛔ 别在本函数里筛（那会把"返回纯数组"这个契约弄脏，而调用方是 `[...]` 展开它）。
+  return out.map((it) => ({ ...it, title: String(query ?? '').trim() }));
 }
 
 // ── 中文 → booru tag 的词典（内置种子 + 配置扩展）─────────────────────────
@@ -942,6 +951,8 @@ export function illustrationTagCandidates(query, { tags = [], extraTags = {} } =
 export async function illustrationSearch(query, {
   tags = [], extraTags = {}, rating = 'any', limit = 8, maxProbe = 4,
   cache = null, browseLocked = false, maxBytes = IMAGE_SEARCH_MAX_BYTES,
+  // 🆕 2026-10-05（第四十四对话 · 她提案 123d9c1c）：分级过滤（同 pixiv 那条路的口径）。
+  requireLevel = 'any',
   fetcher = safeFetch, prober = null
 } = {}) {
   const candidates = illustrationTagCandidates(query, { tags, extraTags });
@@ -965,8 +976,29 @@ export async function illustrationSearch(query, {
     if (okTag) { hit = t; break; }
   }
   if (!hit) return { ok: false, reason: 'no-tag', tried };
-  const list = await safebooruImageSearch(query, { tags: [hit], rating, limit, browseLocked, maxBytes, fetcher });
-  return { ok: true, tag: hit, tried, list };
+  const pool = await safebooruImageSearch(query, { tags: [hit], rating, limit, requireLevel, browseLocked, maxBytes, fetcher });
+
+  // 🆕 2026-10-05（她提案 123d9c1c）：按分级**真筛一层**（Safebooru 这条路）。
+  //   口径与 pixiv 那条路**完全一致**：`general` / `safe` = 安全，其余（sensitive/questionable…）算 r18。
+  //   ⚠️ 筛在 `slice(0, limit)` 之后**不再切**（`safebooruImageSearch` 已经按 `n`/`2n` 取过），
+  //     所以这里筛完就是最终清单 —— 不会出现"筛完只剩一两张、而池子里明明有更多"。
+  const isR18 = (it) => {
+    const r = String(it?.rating ?? '').trim().toLowerCase();
+    return !!(r && r !== 'general' && r !== 'safe');
+  };
+  const level = String(requireLevel ?? 'any').toLowerCase();
+  const before = pool.length;
+  const kept = level === 'safe' ? pool.filter((it) => !isR18(it))
+    : level === 'r18' ? pool.filter(isR18)
+      : pool;
+  // 🔴 要 r18 但一张都没有 ⇒ 如实退回全部（带 `levelFallback`），⛔ 不空手而归。
+  const fallback = level === 'r18' && !kept.length && before > 0;
+  const list = (fallback ? pool : kept).slice(0, Math.max(1, Math.min(12, Number(limit) || 8)));
+  return {
+    ok: true, tag: hit, tried, list,
+    levelDropped: fallback ? 0 : (before - kept.length),
+    levelFallback: fallback
+  };
 }
 
 // ══ pixiv 检索源（2026-10-04 第四十二对话 · 调研 §1）══════════════════════════
@@ -1111,8 +1143,13 @@ export function pixivRowToItem(row) {
 export async function pixivIllustrationSearch(query, {
   tags = [], heat = PIXIV_DEFAULT_HEAT, limit = 8, browseLocked = false,
   rating = 'any',
+  // 🆕 2026-10-05（第四十四对话 · 她提案 123d9c1c）：`'safe'` = 只要全年龄 / `'r18'` = 只要擦边及更露骨
+  //   / `'any'`（缺省）= 不过滤。⚠️ 缺省 `'any'` ⇒ 不传它时行为与加这个参数之前**逐字节相同**。
+  requireLevel = 'any',
   maxBytes = PIXIV_TEXT_MAX_BYTES, fetcher = safeFetch, pagesFetcher = null
 } = {}) {
+  // ⚠️ 用 `let`：下面在"要 r18 但一条都没有"时会把它置 true（如实报"退回了全年龄"）。
+  let levelFallback = false;
   // 没有代理 ⇒ 直连 pixiv 必失败。**在发请求之前**就如实说清楚（省一次必然失败的等待）。
   if (!resolveProxyFor('www.pixiv.net')) return { ok: false, reason: 'no-proxy', tried: [] };
 
@@ -1198,7 +1235,37 @@ export async function pixivIllustrationSearch(query, {
   const ordered = r18First
     ? [...allowed.filter(isR18Row), ...allowed.filter((x) => !isR18Row(x))]
     : (keepR18 ? interleaveR18(allowed) : allowed);
-  const chosen = ordered.slice(0, n);
+
+  // 🔴🆕 2026-10-05（第四十四对话 · **她自己的提案 123d9c1c**）：按分级**真筛一层**。
+  //   她的原话（2026-10-05 20:25 提案）：
+  //     "今晚按「鲸鱼娘 r18」捞图时，捞回来的结果里混了三张标 general 的全年龄图…
+  //      希望 search_images 的插画路，在**检索层**就按 rating 过滤一次：
+  //      请求 rating=questionable 时，只把原站标 sensitive/questionable 的结果放进候选池，
+  //      general 的直接剔掉，**不要靠我自己事后核对**。"
+  //   ⇒ 这里就是那一层。判定用 `x.rating`（`pixivRowToItem` 已把 `xRestrict > 0` 归一成 `'r18'`），
+  //     ⛔ **不用** `level`（那是 tools.js 映射阶段才加的统一两档字段，这里还没有）。
+  //   ⚠️ `requireLevel` 由工具层传（它才知道"要不要 r18"）；缺省 `'any'` ⇒ 行为与加这个参数之前**逐字节相同**。
+  let pool = ordered;
+  let levelDropped = 0;
+  // ⚠️ 用参数里的 `requireLevel`（**上面解构进来的**）—— ⛔ 别在这里再 `const` 一次：
+  //    同一作用域重复声明会 `SyntaxError: Identifier 'requireLevel' has already been declared`
+  //    （我第一版就是先写成 `opts.requireLevel` 又留了个 const，当场红）。
+  const wantLevel = String(requireLevel ?? 'any').toLowerCase();
+  if (wantLevel === 'safe') {
+    const before = pool.length;
+    pool = pool.filter((x) => !isR18Row(x));
+    levelDropped = before - pool.length;
+  } else if (wantLevel === 'r18') {
+    const before = pool.length;
+    const onlyR18 = pool.filter(isR18Row);
+    levelDropped = before - onlyR18.length;
+    // 🔴 一条 R-18 都没有时**如实退回**全年龄（并把 `levelFallback` 带上去让工具层说明），
+    //    ⛔ 不要"空手而归"：那样她只能回一句"没搜到"，而明明有能用的图。
+    //    ⚠️ 这个回退**只在"确实一张 R-18 都没有"时**发生 ⇒ 正常情况（有 R-18）严格只给 R-18。
+    if (onlyR18.length) pool = onlyR18;
+    else { pool = ordered; levelFallback = true }
+  }
+  const chosen = pool.slice(0, n);
 
   const list = await Promise.all(chosen.map(async ({ row, hot }) => {
     const item = pixivRowToItem(row);
@@ -1244,7 +1311,12 @@ export async function pixivIllustrationSearch(query, {
     hotCount: list.filter((x) => x.hot).length,
     fullSizeMiss: list.filter((x) => !x.fullSize).length,
     r18Dropped,
-    r18Kept
+    r18Kept,
+    // 🆕 2026-10-05（她提案 123d9c1c）：分级过滤的两个读数。
+    //   `levelDropped` = 因为"只要 safe / 只要 r18"被剔掉的条数（对着**切片前**的池子数）；
+    //   `levelFallback` = 要 r18 但一条都没有 ⇒ 已如实退回全年龄（工具层必须说明这件事）。
+    levelDropped,
+    levelFallback
   };
 }
 
@@ -1351,6 +1423,8 @@ export function illustrationGroupR18Hint(short = false) {
 export async function illustrationSearchAnySource(query, {
   source = 'auto', tags = [], extraTags = {}, rating = 'any', heat = PIXIV_DEFAULT_HEAT,
   limit = 8, maxProbe = 4, cache = null, browseLocked = false,
+  // 🆕 2026-10-05（她提案 123d9c1c）：`'safe'` / `'r18'` / `'any'`（缺省）。透传给 pixiv 那条路。
+  requireLevel = 'any',
   maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch, pixivPagesFetcher = null, prober = null
 } = {}) {
   const src = ['auto', 'pixiv', 'safebooru'].includes(String(source)) ? String(source) : 'auto';
@@ -1369,7 +1443,7 @@ export async function illustrationSearchAnySource(query, {
   } else if (wantPixiv) {
     try {
       const p = await pixivIllustrationSearch(query, {
-        tags, heat, limit, browseLocked, rating,
+        tags, heat, limit, browseLocked, rating, requireLevel,
         maxBytes: PIXIV_TEXT_MAX_BYTES, fetcher, pagesFetcher: pixivPagesFetcher
       });
       if (p.ok) {
@@ -1389,12 +1463,22 @@ export async function illustrationSearchAnySource(query, {
         if (p.loggedIn && p.mode === 'r18' && !p.r18Kept) {
           notes.push('配了 pixiv 登录态、也按 mode=r18 要了，但这批里一张 R-18 都没有（也可能是登录态已经过期）');
         }
+        // 🆕 2026-10-05（她提案 123d9c1c）：把"分级过滤"这件事**如实报出来**。
+        if (p.levelDropped) {
+          notes.push(requireLevel === 'safe'
+            ? `按你的要求只给全年龄，已剔掉 ${p.levelDropped} 张擦边/R-18`
+            : `只要 R-18 ⇒ 已剔掉 ${p.levelDropped} 张全年龄`);
+        }
+        if (p.levelFallback) {
+          notes.push('这批里一张 R-18 都没有 ⇒ 已如实退回全年龄（换个词或换条来源再试）');
+        }
         return {
           ok: true, source: 'pixiv', tag: p.word, heat: p.heat, downgraded: p.downgraded,
           list: p.list, tried: p.tried, notes,
           // 这几个计数也带回去：它们是"这批图是怎么来的"的事实（工具层可以照实说）
           popularCount: p.popularCount, hotCount: p.hotCount,
           fullSizeMiss: p.fullSizeMiss, r18Dropped: p.r18Dropped, r18Kept: p.r18Kept,
+          levelDropped: p.levelDropped, levelFallback: p.levelFallback,
           mode: p.mode, loggedIn: p.loggedIn
         };
       }
@@ -1410,7 +1494,16 @@ export async function illustrationSearchAnySource(query, {
 
   if (!wantBooru) return { ok: false, source: null, reason: 'no-source', tried: [], notes };
   const b = await illustrationSearch(query, {
-    tags, extraTags, rating, limit, maxProbe, cache, browseLocked, maxBytes, fetcher, prober
+    tags, extraTags, rating, limit, maxProbe, cache, browseLocked, maxBytes, fetcher, prober, requireLevel
   });
+  // 🆕 2026-10-05（她提案 123d9c1c）：Safebooru 这条路的"分级过滤"读数也如实报出来（与 pixiv 同一口径）。
+  if (b.ok) {
+    if (b.levelDropped) {
+      notes.push(String(requireLevel).toLowerCase() === 'safe'
+        ? `按你的要求只给全年龄，已剔掉 ${b.levelDropped} 张擦边/R-18`
+        : `只要 R-18 ⇒ 已剔掉 ${b.levelDropped} 张全年龄`);
+    }
+    if (b.levelFallback) notes.push('这批里一张 R-18 都没有 ⇒ 已如实退回全年龄（换个词再试）');
+  }
   return { ...b, source: 'safebooru', notes };
 }
