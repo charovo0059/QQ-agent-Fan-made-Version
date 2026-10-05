@@ -294,7 +294,10 @@ async function saveConfig({ quiet = false } = {}) {
     const enteredMetasoKey = val('#cfg-metaso-key', '').trim();
     patch.webSearch = {
       ...c.webSearch,
-      enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
+      // ⛔ `enabled` **不在这里**：它 2026-10-05 搬去了「她的能力」（交接 §3-105）。
+      //    这一页已经没有那个复选框了 ⇒ 留着这行等于让"在搜索服务页点一下保存"
+      //    把它写成 fallback（`chk` 读不到元素就回退），而那正是"搬一半"最毒的一种。
+      //    `...c.webSearch` 已经把当前值带过去了 ⇒ 不写它反而是对的。
       provider: val('#cfg-searchprovider', c.webSearch?.provider || 'bing'),
       searchUrl: val('#cfg-searchurl', c.webSearch?.searchUrl || 'https://cn.bing.com/search').trim() || 'https://cn.bing.com/search',
       deepseek: {
@@ -327,15 +330,10 @@ async function saveConfig({ quiet = false } = {}) {
     const enteredSaucenaoKey = val('#cfg-saucenao-key', '').trim();
     patch.imageSearch = {
       ...(c.imageSearch || {}),
-      enabled: chk('#cfg-imagesearch', c.imageSearch?.enabled !== false),
-      // 触发策略 + 单次运行上限（见 src/tools.js 的 search_image_source）
-      policy: val('#cfg-imagesearch-policy', c.imageSearch?.policy || 'asked'),
-      maxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-max', c.imageSearch?.maxPerRun ?? 2)) || 2)),
-      // 🆕 2026-09-25（第十八对话）：**找图**（search_images / send_image）的单次上限。
-      //    ⚠️ 触发策略**不在这里** —— 它与"以图搜图"共用 `policy` 一个开关
-      //    （曾经单独立过 `keywordPolicy`，界面上成了两个几乎同名的下拉框、用户当场设错，
-      //      当天就合并回去了；见 config.js 的注释）。
-      keywordMaxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-keyword-max', c.imageSearch?.keywordMaxPerRun ?? 2)) || 2)),
+      // ⛔ `enabled` / `policy` / `maxPerRun` / `keywordMaxPerRun` **都不在这里**了 ——
+      //    2026-10-05 搬去了「她的能力」（交接 §3-105）。同理：控件不在这页了，
+      //    留着读数就会把用户在那页保存的意图**静默抹掉**；靠 `...(c.imageSearch || {})`
+      //    展开保住当前值才对。
       cfBypass: chk('#cfg-cfbypass', c.imageSearch?.cfBypass !== false),
       // ****** = 保持原 Key 不变；明文或新输入才更新
       ...(enteredSaucenaoKey && enteredSaucenaoKey !== '******' ? { saucenaoApiKey: enteredSaucenaoKey } : {})
@@ -380,6 +378,30 @@ async function saveConfig({ quiet = false } = {}) {
     };
     const pickedOwners = ownerIdsOrKeep();
     if (pickedOwners !== undefined) patch.selfElsewhere.ownerIds = pickedOwners;
+
+    // ── 🆕 2026-10-05（第四十三对话 · 交接 §3-105 / 调研-能力开关归位）────────────────
+    //   能力类开关从「搜索服务」搬进这一节（第一批：联网搜索 / 以图搜图 / 触发策略 / 两个上限）。
+    //
+    //   🔴 为什么 `patch.webSearch` / `patch.imageSearch` 在**两个分区里各写一份**是对的：
+    //      `saveConfig` 一次只跑**当前分区**那一个 `if` 块 ⇒ 两个块永不同时执行、不会互相覆盖；
+    //      而每一块都带 `...c.xxx` 展开 ⇒ **本页没渲染的键保持原值**。
+    //      ⛔ 反过来说：漏掉任何一个展开 = "在这一页点一下保存就把那些键抹回默认"（本项目老坑）。
+    patch.webSearch = {
+      ...c.webSearch,
+      enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false)
+    };
+    patch.imageSearch = {
+      ...(c.imageSearch || {}),
+      enabled: chk('#cfg-imagesearch', c.imageSearch?.enabled !== false),
+      // 触发策略 + 单次运行上限（见 src/tools.js 的 search_image_source）
+      policy: val('#cfg-imagesearch-policy', c.imageSearch?.policy || 'asked'),
+      maxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-max', c.imageSearch?.maxPerRun ?? 2)) || 2)),
+      // 🆕 2026-09-25（第十八对话）：**找图**（search_images / send_image）的单次上限。
+      //    ⚠️ 触发策略**不在这里** —— 它与"以图搜图"共用 `policy` 一个开关
+      //    （曾经单独立过 `keywordPolicy`，界面上成了两个几乎同名的下拉框、用户当场设错，
+      //      当天就合并回去了；见 config.js 的注释）。
+      keywordMaxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-keyword-max', c.imageSearch?.keywordMaxPerRun ?? 2)) || 2))
+    };
   }
 
   if (sec === 'persona') {
