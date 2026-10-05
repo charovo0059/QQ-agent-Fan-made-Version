@@ -32,6 +32,9 @@ import { extractKeywords } from './memory.js';
 // 技能提示词片段（Skill 的 prompt.sections + 动态 promptSections()）。
 // 单例，与 tool-registry / plugin-loader 共用同一份 Skill 状态。
 import { skillManager } from './skills/manager.js';
+// 🆕 2026-10-05（第四十三对话）：插画路"能不能给 R-18"那句话**只有一处真相源**
+//    （`illustrationR18Hint()` 按登录态现算）。⛔ 别在本文件里写死一份 —— 五处写死必然再漂。
+import { illustrationR18Hint } from './web-search.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
 
@@ -315,8 +318,12 @@ function qqSceneRules(platform) {
         + '⚠️ rating 如实标着（general / sensitive / questionable）：别把 questionable 的图发到群里。',
       // 🆕 2026-10-04（第四十二对话 · 调研 §1）：插画路的**两条来源**。
       //   ⚠️ 同样只**追加**：上面三句一个字都没动（判据按整句钉着它们）。
+      // 🆕 2026-10-05（第四十三对话）：那句话原来写死"pixiv **只有全年龄** —— 匿名拿不到 R-18"，
+      //   用户填了登录态之后它就错了，而**她是照着它选 source 的**（存档里她的思考原文就是
+      //   "pixiv path doesn't give R-18"）⇒ 主动传 source='safebooru'，pixiv 一次没走过。
+      //   ⇒ 改成调 `illustrationR18Hint()`（按登录态现算，全项目只有那一处写这句话）。
       '- 【插画的来源】插画路有两条来源：**pixiv**（要配代理；tag 直接吃中文/日文；'
-        + '**只有全年龄** —— 匿名拿不到 R-18；热度靠「N users入り」把池子收到"被 N 人收藏过"的作品上，'
+        + `${illustrationR18Hint()}；热度靠「N users入り」把池子收到"被 N 人收藏过"的作品上，`
         + 'pixiv 官方那种"按热度排序"是**付费功能**，我们用的是免费替代）'
         + '与 **Safebooru**（按英文/罗马字 tag，有 questionable）。不给 source 时内核自己选：'
         + '配了代理先试 pixiv、没搜到才退 Safebooru；**用了哪条、有没有降档，返回里都写着** —— 照实说就行，'

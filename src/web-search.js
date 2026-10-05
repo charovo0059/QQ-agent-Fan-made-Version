@@ -1117,10 +1117,19 @@ export async function pixivIllustrationSearch(query, {
   if (!resolveProxyFor('www.pixiv.net')) return { ok: false, reason: 'no-proxy', tried: [] };
 
   // 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：登录态下，`rating='questionable'`
-  //    才真的去要 R-18（匿名要了也会被忽略），并**保留**结果（下面那道过滤会放过它们）。
+  //    才真的去要 R-18（匿名要了也会被忽略）。
   const loggedIn = pixivLoggedIn();
   const mode = pixivModeForRating(rating, loggedIn);
-  const keepR18 = loggedIn && mode === 'r18';
+  // 🔴 **保留 R-18 的条件不只是 questionable**（真机撞出来的第二个洞）：
+  //    `any` 的字面意思就是"两者都可能"，而登录态下 `mode=all` 的响应**本来就混着 R-18**
+  //    （真机实测 60 条里 22 条 xRestrict=1）；原来对 `any` 一律剔掉 ⇒ "说好两者都可能、
+  //    实际只给全年龄"。而 **`any` 正是默认值**（`allowQuestionable !== false` 时）⇒
+  //    默认那次搜索永远拿不到 R-18，用户看到的就是"还是搜不了 r18"。
+  //    ⚠️ 仍然要求 `loggedIn`：匿名下这些条目根本不会出现（出现了也只可能是我们误判）。
+  const keepR18 = loggedIn && (mode === 'r18' || String(rating) === 'any');
+  // 只有**明确要 R-18**（questionable ⇒ mode=r18）时才把 R-18 排到最前。
+  // `any` 保持原序（popular 在前）⇒ "默认那一次"不会把 R-18 顶到清单最前面。
+  const r18First = loggedIn && mode === 'r18';
 
   const query_ = String(query ?? '').trim();
   const words = [query_, ...(Array.isArray(tags) ? tags : [tags]).map((x) => String(x ?? '').trim())]
@@ -1169,9 +1178,26 @@ export async function pixivIllustrationSearch(query, {
   //        返回的却是一屏全年龄（症状："搜了 R-18，发出来的都是正常图"）。
   //    ⛔ 别删这条排序 —— 它治的正是"要了 R-18 却一张都返回不到"这个真机症状。
   //    ⚠️ 没要 R-18（safe/any）时顺序**一字不动**（popular 仍排最前：那是"免费人工热门"的质量信号）。
-  const ordered = keepR18
+  // 🔴 2026-10-05（第四十三对话 · **真机第二遍才看出来的**）：`any` 只是"保留"R-18 还**不够** ——
+  //    真机实测 `mode=all` 的前 13 条 `popular` **全是全年龄**，而 `chosen = ordered.slice(0, limit)`
+  //    ⇒ 不做交错的话前 `limit` 张**永远**是全年龄
+  //    （真机读数：`source=auto, rating=any` 返回 8 张、R-18 = **0**）。
+  //    那就等于"any 说好两者都可能、实际只给全年龄"，也正是用户报的"还是搜不了 r18"。
+  //    ⇒ `any`（**默认档**）**交错**取：全年龄与 R-18 轮流进清单，两者都真的会出现。
+  //    ⚠️ 从全年龄那条开始（`popular` 是"免费人工热门"的质量信号，让它占第一个位置）。
+  //    ⚠️ 明确要 R-18（questionable）时仍走"R-18 全排最前"那条 —— 用户要的就是它。
+  const interleaveR18 = (xs) => {
+    const r18 = xs.filter(isR18Row); const rest = xs.filter((x) => !isR18Row(x));
+    const out = [];
+    for (let i = 0; i < Math.max(r18.length, rest.length); i++) {
+      if (rest[i]) out.push(rest[i]);
+      if (r18[i]) out.push(r18[i]);
+    }
+    return out;
+  };
+  const ordered = r18First
     ? [...allowed.filter(isR18Row), ...allowed.filter((x) => !isR18Row(x))]
-    : allowed;
+    : (keepR18 ? interleaveR18(allowed) : allowed);
   const chosen = ordered.slice(0, n);
 
   const list = await Promise.all(chosen.map(async ({ row, hot }) => {
@@ -1255,6 +1281,37 @@ export function pixivModeForRating(rating, loggedIn = pixivLoggedIn()) {
 }
 
 /**
+ * 「插画路能不能给 R-18」那句话 —— **按登录态现算**，⛔ 别在 prompt.js / tools.js 里各写一份写死的。
+ *
+ * 🔴 为什么必须收成一处（**真机上撞出来的**，2026-10-05 第四十三对话）：
+ *   登录态上线之前，**五处**文案都写着"pixiv 只有全年龄 —— 要擦边得走 source='safebooru'"。
+ *   用户填了 cookie 之后那些话**全错了**，而模型正是**照着它们做选择**的：
+ *   他自己会话存档里的思考原文是 "pixiv path doesn't give R-18 (anonymous can't get R-18)"
+ *   ⇒ 她**主动传了 source='safebooru'** 去要色图，pixiv 那条路一次都没走过
+ *   （用户原话："她搜图时是优先 safebooru.org，应该优先 p 站的，而且还是搜不了 r18"）。
+ *   五处 = search_images 的 description / rating 参数说明 / source 参数说明 / 返回里的 tip
+ *          + prompt.js 的【插画的来源】。写死五份必然再漂 ⇒ 全部改成调这个函数。
+ *
+ * @param {boolean} short 短版（给"同一条 tool 定义里已经出现过长版"的地方用，省 token）
+ */
+export function illustrationR18Hint(short = false) {
+  const loggedIn = pixivLoggedIn();
+  if (!loggedIn) {
+    // ⚠️ 这两句里**必须留着字面量「R-18」**：`test-illustration-pixiv源.mjs` 有一条判据
+    //    "匿名拿不到 R-18 这件事必须在工具描述里如实写"（它按字面串找）。第一版我改成了
+    //    "只有全年龄（mode=r18 会被静默忽略）" ⇒ **把那三个字弄丢了**，判据当场红。
+    return short
+      ? 'pixiv 匿名只有全年龄、拿不到 R-18（要擦边得走 Safebooru）'
+      : 'pixiv **匿名只有全年龄、拿不到 R-18**（mode=r18 会被静默忽略）⇒ 要擦边只能走 Safebooru（source=safebooru），'
+        + '或者到「设置 → 搜索服务」填一份 pixiv 登录态 cookie';
+  }
+  return short
+    ? 'pixiv 有登录态 ⇒ 它也能给 R-18（要它就给 rating=questionable）'
+    : 'pixiv **有登录态 ⇒ 它也能给 R-18**：要 R-18 就明确给 rating=questionable（内核会按 mode=r18 去要）；'
+      + 'source 不用给 —— auto 会先试 pixiv，真没搜到才退 Safebooru';
+}
+
+/**
  * 插画路的**来源路由**（第四十二对话 · 调研 §1.7）：`pixiv` / `safebooru` / `auto`。
  *
  * `auto` 的语义（用户拍板"并列、不是替换"）：
@@ -1298,7 +1355,11 @@ export async function illustrationSearchAnySource(query, {
         if (p.r18Dropped) notes.push(`有 ${p.r18Dropped} 张是 R-18（匿名拿不到，已剔掉）`);
         // 🆕 §3-113：登录态下真的拿到了 R-18 ⇒ 如实说"这次是按登录态要的"。
         //    ⛔ 别写成"放心发" —— 能不能发出去是 QQ 那边的事（概率失败由提示词交代）。
-        if (p.r18Kept) notes.push(`按登录态要了 R-18（mode=r18），这批里有 ${p.r18Kept} 张是 R-18`);
+        //    ⚠️ `mode` 要说对：`questionable` 才是 r18，`any` 仍是 all（只是不再剔 R-18）。
+        if (p.r18Kept) {
+          notes.push(`这批返回的 ${p.list.length} 张里有 ${p.r18Kept} 张是 R-18`
+            + `（登录态；按 ${p.mode === 'r18' ? 'mode=r18 专要 R-18' : 'mode=all 检索、不再剔掉 R-18'}）`);
+        }
         if (p.loggedIn && p.mode === 'r18' && !p.r18Kept) {
           notes.push('配了 pixiv 登录态、也按 mode=r18 要了，但这批里一张 R-18 都没有（也可能是登录态已经过期）');
         }

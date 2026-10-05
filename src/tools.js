@@ -13,7 +13,7 @@ import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes } from './u
 import { estimateCost, cacheHitRate, resolveApiKey } from './llm.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat } from './web-search.js';
+import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
@@ -1226,9 +1226,10 @@ export function buildToolDefs() {
         + '插画路的 tag 是**英文/罗马字**（hatsune_miku 这样），中文名由内核的词典翻译；'
         + '也可以自己给 tags（多个，如 ["hatsune_miku","1girl"]）与 rating（safe/questionable/any）。'
         + '🆕【插画有两条来源】不给 source 时内核自己选：配了代理就**先试 pixiv**'
-        + '（直接吃中文/日文，**只有全年龄** —— 匿名拿不到 R-18；热度用「N users入り」把池子收到'
+        + '（直接吃中文/日文；热度用「N users入り」把池子收到'
         + '"被 N 人收藏过"的作品上，pixiv 官方那种"按热度排序"是付费功能、我们用的是免费替代），'
         + '没搜到才退 Safebooru（按英文/罗马字 tag，有 questionable）。'
+        + `⚠️${illustrationR18Hint()}。`
         + '用了哪条、有没有降档，返回里都写着。'
         + 'heat 默认 5000（=「5000users入り」这个门槛）；可以给 1000 / 10000 / "off"，'
         + '⚠️ 冷门角色给高门槛会一条都搜不到（内核会自动降档兜底，但那是兜底不是常态）。',
@@ -1250,15 +1251,20 @@ export function buildToolDefs() {
           rating: {
             type: 'string',
             enum: ['safe', 'questionable', 'any'],
-            description: '可选，仅插画路用：safe=只要全年龄；questionable=只要擦边；any=两者都可能有（默认）。'
-              + '⚠️ 群里请用 safe。⚠️ 要 questionable 时只会走 Safebooru（pixiv 匿名只有全年龄）。'
+            description: '可选，仅插画路用：safe=只要全年龄；questionable=只要擦边/R-18；any=两者都可能有（默认）。'
+              + '⚠️ 群里请用 safe。'
+              // 🆕 2026-10-05（第四十三对话）：这句话原来写死成"要 questionable 时**只会走 Safebooru**"
+              //    —— 用户填了 pixiv 登录态之后它就错了，而模型是**照着它选 source 的**
+              //    （存档里她因此主动传了 source='safebooru' 去要色图）。⇒ 改成按登录态现算。
+              + `⚠️${illustrationR18Hint()}。`
           },
           source: {
             type: 'string',
             enum: ['auto', 'pixiv', 'safebooru'],
             description: '可选，仅插画路用：auto（默认）=配了代理先 pixiv、没搜到退 Safebooru；'
-              + 'pixiv=只要 pixiv（直接吃中文/日文，**只有全年龄**，需要代理）；'
+              + 'pixiv=只要 pixiv（直接吃中文/日文，需要代理）；'
               + 'safebooru=只要 Safebooru（按英文/罗马字 tag）。'
+              + `⚠️${illustrationR18Hint(true)}。`
           },
           heat: {
             type: 'string',
@@ -1356,8 +1362,12 @@ export function buildToolDefs() {
               images,
               ...(r.notes && r.notes.length ? { notes: r.notes } : {}),
               tip: (r.source === 'pixiv'
-                ? '这些是 pixiv 的图：**只有全年龄**（匿名拿不到 R-18，要擦边得走 source=\'safebooru\'）。'
-                : '')
+                // 🆕 2026-10-05（第四十三对话）：原来这里写死"这些是 pixiv 的图：**只有全年龄**
+                //    （匿名拿不到 R-18，要擦边得走 source='safebooru'）" —— 登录态上线后它错了，
+                //    而且会给模型一个**错误的下一次选择**（"要擦边得走 safebooru"）。
+                ? `这些是 pixiv 的图。${illustrationR18Hint()}。`
+                : `这些是 Safebooru 的图（pixiv 那条路这次没给结果）。`
+                  + `${illustrationR18Hint()}；想优先要 pixiv 的图，下次**别传 source**（用默认的 auto）。`)
                 + '要发给群友就用 send_image 传上面的 url 或 sampleUrl（一条一张）。'
                 + '⚠️ size 里宽度或高度任一超过 3000、或 file_url 看着很大时，**优先发 sampleUrl**（小图更稳）。'
                 + '⚠️ rating 如实标了**原站的分级词**（general=全年龄 / sensitive=轻擦边 / questionable=擦边；'
