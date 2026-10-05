@@ -1323,6 +1323,12 @@ return `
             （项目坑 §4-27，本轮又踩了一次，node --check 当场报 Unexpected identifier）。 -->
     <div class="field-row">
       <div class="field"><label>发送去重窗口（毫秒，0 = 关闭）</label><input type="number" id="cfg-dedupewindow" min="0" step="500" value="${esc(c.send.dedupeWindowMs ?? 8000)}" /></div>
+      <!-- 🆕 2026-10-05（第四十三对话 · 交接 §3-111）：send.imageTimeoutMs 的界面。
+           它加进 config 的同一天就接了这条输入框 —— 上一轮的反面教材正是"键是真的、默认也在跑、
+           就是界面没有"（dedupeWindowMs 挂了 7 天才补上界面，见上面那段注释）。
+           ⚠️ 只给**图片**那一档：文字/查询类仍是 onebot.js 里的 15000（那个值刻意不做界面，
+              因为把探测类调用也拖慢是这个项目明确不要的行为）。 -->
+      <div class="field"><label>发图超时（毫秒）—— 图片要协议端收下再上传，比发文字慢得多</label><input type="number" id="cfg-imgtimeout" min="1000" step="1000" value="${esc(c.send.imageTimeoutMs ?? 60000)}" /></div>
     </div>
     <div class="hint" style="font-size:12px;margin:-6px 0 10px">
       同一会话里、<b>发出去的纯文本完全一样</b>的两条，在这个窗口内只发第一条。防的是模型重复调用发送、

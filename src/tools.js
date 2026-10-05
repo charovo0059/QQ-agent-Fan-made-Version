@@ -1434,7 +1434,13 @@ export function buildToolDefs() {
           }
           ctx.session.sent.push({ type: 'image', text: '[图片]', at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
           ctx.emit?.('session-update', ctx.session.id);
-          return ok({ sent: true, messageId: result?.message_id ?? null, note: '图发出去了。' });
+          // 🆕 2026-10-05（第四十三对话 · 交接 §3-112）：如实带上"实际发出去的那份有多大"。
+          //    发图这条路现在是"我们先下载 → 必要时压 → 本地文件交给协议端"，
+          //    所以她有资格知道对面收到的是不是原图（⛔ 别让她以为原样发出去了而许下"原图"的承诺）。
+          const sizeNote = result?.compressed && result?.originalBytes && result?.sentBytes
+            ? `原图 ${fmtBytes(result.originalBytes)}，上传前压到了 ${fmtBytes(result.sentBytes)}（她那边看到的是压过的）。`
+            : '';
+          return ok({ sent: true, messageId: result?.message_id ?? null, note: `图发出去了。${sizeNote}` });
         } catch (error) {
           return err(error?.message ?? error);
         }

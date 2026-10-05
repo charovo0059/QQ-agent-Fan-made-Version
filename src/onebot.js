@@ -2,7 +2,7 @@
 // （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
 import { sanitizeUserText, escapeCqText, toFileUri, fmtBytes } from './util.js';
-import { getConfig } from './config.js';
+import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { initProxyConfig, resolveProxyFor } from './proxy.js';
 
 // 🔴 注入（同 safe-fetch/web-search/cf-fetch）：不注入 ⇒ 代理判定恒 false ⇒
@@ -11,6 +11,41 @@ initProxyConfig(getConfig);
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
+
+/**
+ * 文字/查询类 OneBot 调用的超时（**这个值一个字都没改**，保持历史行为）。
+ *
+ * ⚠️ 抽成具名常量只是为了让"两档超时"这件事**看得见** —— 原来它是 `call()` 的
+ *    默认参数里那个裸的 `15000`，而图片那一档要读配置（见 `imageSendTimeoutMs`），
+ *    两档摆在一起才能一眼看出"图片没有跟着文字一起变"。
+ */
+export const TEXT_TIMEOUT_MS = 15000;
+
+/**
+ * 发**图片**那一档的超时（毫秒）—— 从 `config.send.imageTimeoutMs` 现读。
+ *
+ * 为什么在这里读、而不是让 `sender.js` 传进来：
+ *   `onebot.js` 本来就是"那个 15000 的所在地"，而图片两档的分界也长在这两个方法上
+ *   （`sendImage` / `sendSticker`→`sendImage`）。放在一处 ⇒ 只有一个真相源，
+ *   也顺手让 `sendSticker`（同一个报文）自动跟上，不必再改一遍调用方。
+ *
+ * ⚠️ 非法值（0 / 负数 / 非数字）一律回落到 `DEFAULT_CONFIG.send.imageTimeoutMs`
+ *    —— 与 `sender.js` 的 `#pokeLimits` / `#dedupeWindow` 同一套口径，
+ *    也防止判据里"设成 0 想表达立刻超时"变成"0 = 没有超时"。
+ */
+export function imageSendTimeoutMs() {
+  let raw;
+  try { raw = getConfig()?.send?.imageTimeoutMs; } catch { raw = undefined; }
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_CONFIG.send.imageTimeoutMs;
+}
+
+/** 判断一个错误是不是 `AbortSignal.timeout` 抛出来的超时（要把它翻译成人话）。 */
+function isTimeoutError(error) {
+  const name = String(error?.name ?? '');
+  const msg = String(error?.message ?? error);
+  return name === 'TimeoutError' || /aborted due to timeout|operation was aborted/i.test(msg);
+}
 
 export class OneBotClient {
   constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
@@ -161,7 +196,7 @@ export class OneBotClient {
   }
 
   /** OneBot HTTP API（发送与查询都走这里）。 */
-  async call(action, params = {}, timeoutMs = 15000) {
+  async call(action, params = {}, timeoutMs = TEXT_TIMEOUT_MS) {
     const res = await fetch(`${this.httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -192,13 +227,19 @@ export class OneBotClient {
     return this.selfInfo?.nickname ? String(this.selfInfo.nickname) : '';
   }
 
-  /** 发送消息段。返回 OneBot 响应 data（含 message_id）。 */
-  async sendSegments(kind, id, segments) {
+  /**
+   * 发送消息段。返回 OneBot 响应 data（含 message_id）。
+   *
+   * @param {number} [timeoutMs] 不传 = 走 `call()` 的默认（文字那一档 15 秒）。
+   *   ⚠️ **只有图片那条路传它**（见 `sendImage`）—— 文字/表情包以外的调用一律不传，
+   *      免得"发文字"也悄悄跟着图片一起变慢。
+   */
+  async sendSegments(kind, id, segments, timeoutMs) {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private'
       ? { user_id: Number(id), message: segments }
       : { group_id: Number(id), message: segments };
-    return this.call(action, params);
+    return this.call(action, params, timeoutMs);
   }
 
   async sendText(kind, id, text, { replyToMessageId = null, atUserId = null } = {}) {
@@ -227,6 +268,16 @@ export class OneBotClient {
    *
    * ⚠️ `file` 既可以是 http(s) 链接，也可以是 `file://` 本地路径（协议端自己读盘，见 `toFileUri`）。
    *    调用方负责校验地址合法性 —— **本层不做安全判断**（它只负责"把这段话发给协议端"）。
+   *
+   * 🆕 2026-10-05（第四十三对话 · 交接 §3-111）：这一档的超时**不再吃全局的 15 秒**，
+   *    改读 `config.send.imageTimeoutMs`（默认 60 秒，见 `imageSendTimeoutMs` 的注释）。
+   *    `sendSticker` 转发到这里 ⇒ 表情包同一个报文、同一个档位。
+   *
+   * 🔴 超时要**翻译成人话**再抛：协议端给的原文是
+   *    `The operation was aborted due to timeout` —— 她（模型）看到这句只会当成"工具坏了"，
+   *    于是要么放弃要么原样重试。这里改成"等了多少秒、这次没发出去、换张小图"。
+   *    ⚠️ 措辞**不假装成功**：超时意味着没等到回执，图**可能**已经传出去了，
+   *       所以只能说"很可能没发出去"，不能说"一定没发"（本项目最忌静默失败，也忌反过来的假话）。
    */
   async sendImage(kind, id, imageUrl, { replyToMessageId = null, atUserId = null } = {}) {
     const segments = [];
@@ -241,7 +292,15 @@ export class OneBotClient {
       segments.push({ type: 'at', data: { qq: at } });
     }
     segments.push({ type: 'image', data: { file: String(imageUrl) } });
-    return this.sendSegments(kind, id, segments);
+    const timeoutMs = imageSendTimeoutMs();
+    try {
+      return await this.sendSegments(kind, id, segments, timeoutMs);
+    } catch (error) {
+      if (!isTimeoutError(error)) throw error;
+      const secs = Math.max(1, Math.round(timeoutMs / 1000));
+      throw new Error(`图片上传超时（等了 ${secs} 秒）：协议端没能在这个时限内把图传完，`
+        + '**这次很可能没发出去**。换一张小一点的图再试（或在「设置 → 发送保护 → 发图超时」里调大这个时限）。');
+    }
   }
 
   /** 发一个收藏表情。**就是 `sendImage`**（表情与普通图片走完全相同的报文），保留此名是为了调用方语义清晰。 */
