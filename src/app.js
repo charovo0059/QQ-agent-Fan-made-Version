@@ -3364,7 +3364,20 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         if (next.proactive?.enabled) orchestrator.startProactiveLoop(); else orchestrator.stopProactiveLoop();
         initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
         emit('status', { configUpdated: true });
-        return json(res, 200, { ok: true, config: next });
+        // 🔴 2026-10-05（第四十三对话）：返回的配置**也要脱敏** —— 与 GET 同一条纪律
+        //   （见上面 GET 那段注释："不把任何真实 Key 暴露给前端"）。
+        //
+        //   不脱敏会坏两件事，而第二件是用户真机上撞到的：
+        //     ① 前端**四处**都写 `state.config = data.config`（saveConfig / 黑名单 / 群成员备注×2）
+        //        ⇒ 渲染进程从此握着一份**含原始凭据**的配置（apiKey / proxy.password /
+        //        dshProviderKeys / saucenaoApiKey / pixivCookie…），与 GET 的口径直接矛盾；
+        //     ② has* 那些"填没填"标记会读到**盘里那份过期的值**。前端把脱敏响应展开回写进 patch
+        //        （`...c.imageSearch` 那条"不暴露的键不许被抹掉"的保险），于是盘里会躺着一个
+        //        早先算出来的 `hasPixivCookie: false`；保存完 cookie 之后 `state.config` 拿到它
+        //        ⇒ 「pixiv 会话 cookie」那个框**显示成空**，用户以为没保存成功（实际存了 2279 字节）。
+        //        ⚠️ 只有新鲜 GET 会重算成 true —— 所以症状是"保存后一直空、点一下页签才恢复"。
+        //   ⇒ 一处修好四个调用点（⛔ 别去前端逐处补 GET：那会漏掉将来新加的调用点）。
+        return json(res, 200, { ok: true, config: sanitizeConfig(next) });
       }
 
       if (pathname === '/api/version' && method === 'GET') {

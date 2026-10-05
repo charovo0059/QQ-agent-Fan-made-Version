@@ -1155,12 +1155,24 @@ export async function pixivIllustrationSearch(query, {
   for (const row of used.popular) push(row, true);
   for (const row of used.rows) push(row, false);
 
+  const isR18Row = (x) => Number(x?.row?.xRestrict) > 0;
+
   // ⛔ 匿名拿不到 R-18（`mode=r18` 会被忽略）⇒ 真出现了也只能剔掉，别装作拿到了。
   //    登录态**明确要了** `r18` 时则保留 —— 这是"R-18 也要发"那条用户要求落地的位置。
-  const allowed = keepR18 ? merged : merged.filter((x) => !(Number(x.row?.xRestrict) > 0));
-  const r18Dropped = keepR18 ? 0 : (merged.length - allowed.length);
-  const r18Kept = keepR18 ? allowed.filter((x) => Number(x.row?.xRestrict) > 0).length : 0;
-  const chosen = allowed.slice(0, n);
+  const allowed = keepR18 ? merged : merged.filter((x) => !isR18Row(x));
+
+  // 🔴 2026-10-05（第四十三对话 · **真机诊断出来的**）：要 R-18 时把全年龄的挪到后面。
+  //    实测（真机、登录态、同一个词「オリジナル」）：
+  //      · `mode=r18` 的 `illustManga.data` 60 条里 **57 条 xRestrict=1、3 条 =2**（真全是 R-18）；
+  //      · 而 `body.popular` 那 13 条在 **r18 与 all 两种 mode 下 xRestrict 全为 0**（恒全年龄）；
+  //      · 原来"热门排最前"⇒ 前 `limit` 张**被全年龄的热门占满** ⇒ 她明明要 R-18，
+  //        返回的却是一屏全年龄（症状："搜了 R-18，发出来的都是正常图"）。
+  //    ⛔ 别删这条排序 —— 它治的正是"要了 R-18 却一张都返回不到"这个真机症状。
+  //    ⚠️ 没要 R-18（safe/any）时顺序**一字不动**（popular 仍排最前：那是"免费人工热门"的质量信号）。
+  const ordered = keepR18
+    ? [...allowed.filter(isR18Row), ...allowed.filter((x) => !isR18Row(x))]
+    : allowed;
+  const chosen = ordered.slice(0, n);
 
   const list = await Promise.all(chosen.map(async ({ row, hot }) => {
     const item = pixivRowToItem(row);
@@ -1176,6 +1188,18 @@ export async function pixivIllustrationSearch(query, {
     if (!item.url) item.url = item.sampleUrl;
     return { ...item, hot, fullSize };
   }));
+
+  // 🔴 2026-10-05（第四十三对话 · 真机诊断出来的第二个读数不符）：
+  //    **计数一律对着"真正返回的那一份"（`list`）算**。
+  //    原来 `r18Kept` 是对着**切片前**的 `allowed` 算的 ⇒ 真机出现过这样一组读数：
+  //    `r18Kept=60` 而返回的 8 张里**一张 R-18 都没有** —— 对模型说的"这批里有 60 张是 R-18"
+  //    与它手里那份清单**对不上**。这正是本项目最忌的一类（看着对其实错）。
+  //    ⚠️ `r18Dropped` 有意**保持"对着搜索全集"**：它的语义是"这次搜索里有多少张因为没登录
+  //       被剔掉了"（解释"为什么一张 R-18 都没有"），⛔ 不是"返回的清单里有多少张"。
+  //        两个数的口径**故意不同**，所以措辞必须写清楚（工具层那句 note 就这么写的）。
+  const r18Dropped = keepR18 ? 0 : (merged.length - allowed.length);
+  // `pixivRowToItem` 把 `xRestrict > 0`（含 2 = R-18G）统一标成 `rating: 'r18'` ⇒ 这里按它数。
+  const r18Kept = keepR18 ? list.filter((x) => x.rating === 'r18').length : 0;
 
   const askedHeat = Number(heat) || 0;
   return {
