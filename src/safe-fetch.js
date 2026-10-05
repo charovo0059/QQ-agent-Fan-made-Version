@@ -671,6 +671,31 @@ const ALLOWED_OVERRIDE_HEADERS = ['user-agent', 'accept', 'accept-language', 're
  */
 const PXIMG_REFERER = 'https://www.pixiv.net/';
 
+/**
+ * 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：pixiv **登录态** cookie 的注入范围。
+ *
+ * 🔴 为什么是"按 host 白名单注入"而不是"放开 `cookie` 覆盖"：
+ *   `ALLOWED_OVERRIDE_HEADERS` 里**故意**没有 `cookie`（注释里写着理由：`cookie` 被改就等于
+ *   把别的站的凭据带过去）。要让 pixiv 带登录态，就得**另外设计一条只对它生效的通道** ——
+ *   也就是这个函数：调用方仍然一个字都传不进来，注入只由**目标 host** 决定。
+ *
+ * ⚠️ 两个域名都要：`www.pixiv.net`（搜索/`/pages` 那两个接口）与 `i.pximg.net`（图床本身
+ *   也会按登录态给不同的图/水印）。⛔ 别写成 `endsWith('pixiv.net')` —— 那会放行
+ *   `notpixiv.net` / `pixiv.net.evil.com`（同 `hostAllowed` 那条踩过的坑）。
+ */
+export function isPixivHost(hostname) {
+  const h = String(hostname || '').trim().toLowerCase().replace(/\.+$/, '');
+  if (!h) return false;
+  return /(^|\.)pixiv\.net$/.test(h) || /(^|\.)pximg\.net$/.test(h);
+}
+
+/** 当前配置里的 pixiv 登录 cookie（空串 = 没配 ⇒ 匿名，行为与加它之前逐字节一致）。 */
+function pixivCookie() {
+  let raw;
+  try { raw = getConfig()?.imageSearch?.pixivCookie; } catch { raw = ''; }
+  return String(raw ?? '').trim();
+}
+
 function buildHeaders(overrides, url = null) {
   const headers = {
     host: undefined,   // 下面按 url.host 填
@@ -679,6 +704,13 @@ function buildHeaders(overrides, url = null) {
     'accept-language': 'zh-CN,zh;q=0.9'
   };
   if (url && /(^|\.)pximg\.net$/i.test(String(url.hostname || ''))) headers.referer = PXIMG_REFERER;
+  // 🔴 登录态：**只**给 pixiv 系域名带（调用方传不进来，见 isPixivHost 的注释）。
+  //    ⚠️ 顺序有意：放在 overrides **之前** —— 万一以后有人把 `cookie` 加进
+  //    `ALLOWED_OVERRIDE_HEADERS`，注入仍会被调用方显式值覆盖（那是"调用方说了算"的既有语义）。
+  if (url && isPixivHost(url.hostname)) {
+    const ck = pixivCookie();
+    if (ck) headers.cookie = ck;
+  }
   if (overrides && typeof overrides === 'object') {
     for (const k of ALLOWED_OVERRIDE_HEADERS) {
       const raw = overrides[k] ?? overrides[k.toLowerCase()];

@@ -576,6 +576,17 @@ function renderSearchSection(c) {
     <div class="field-row">
       <div class="field"><label>SauceNAO API Key（可选：注册 saucenao.com 账号免费获取；填了走官方 JSON API，更稳且不怕网页改版）</label>
         <input type="password" id="cfg-saucenao-key" value="${esc(c.imageSearch?.hasSaucenaoApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" /></div>
+      <!-- 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：pixiv 登录态。**由用户自己粘**（不经过任何人）。
+           ⚠️ 它只在**配了代理**时才有意义（直连到不了 p 站）。 -->
+      <div class="field"><label>pixiv 会话 cookie（可选：登录 p 站后从浏览器复制，用来搜 R-18）</label>
+        <input type="password" id="cfg-pixiv-cookie" value="${esc(c.imageSearch?.hasPixivCookie ? '******' : '')}" placeholder="粘贴 Cookie（至少含 PHPSESSID=…）；留空保持不变" autocomplete="new-password" /></div>
+    </div>
+    <!-- ⚠️ 这句是"代价如实说"，不是可选美化：掉线**不会自愈**，不说清楚就会变成静默失效。 -->
+    <div class="hint" style="font-size:12px;margin:-4px 0 10px">
+      ⚠️ <b>pixiv 登录态</b>：填了它，她才搜得到 p 站的 <b>R-18</b>（匿名下 <code>mode=r18</code> 会被静默忽略）。
+      这份 cookie <b>只会发给 <code>*.pixiv.net</code> / <code>*.pximg.net</code></b>，别的站一个字都带不出去；
+      它也<b>不会</b>出现在任何接口返回里（服务端只回一个"填没填"）。
+      <b>它会过期</b>，而 p 站登录带人机验证 ⇒ <b>掉线只能你本人回来重贴一次</b>，不会自愈。
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-cfbypass" ${c.imageSearch?.cfBypass !== false ? 'checked' : ''} />
       <label for="cfg-cfbypass">Cloudflare 验证自动绕过（被拦截时用内置浏览器自动完成验证，仅限搜图引擎域名）</label></div>

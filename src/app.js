@@ -1546,8 +1546,12 @@ export function createApp({ log = console.log, resume = [] } = {}) {
 
   // ── 配置脱敏 ────────────────────────────────────────────────────────────
   // 凡是字段名命中这些模式的，值一律替换为空串（保留"有/无"的 hasXxx 标记）。
-  // 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password …
-  const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
+  // 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password / cookie …
+  // 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：补上 **cookie** —— `imageSearch.pixivCookie`
+  //    是登录态凭据，绝不能出现在 `GET /api/config` 的返回里（它会被写进前端 state、
+  //    进日志、也可能被截图带出去）。⚠️ 新增项一律**追加在末尾**：`test-代理分流与隧道.mjs`
+  //    有一条 `SECRET_KEY_PATTERN = /(apikey…password/` 的形状断言。
+  const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key|cookie)/i;
   // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
   const SECRET_KEY_EXCLUDE = /from$/i;
 

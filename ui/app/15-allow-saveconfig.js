@@ -328,6 +328,8 @@ async function saveConfig({ quiet = false } = {}) {
     };
     // 以图搜图开关（引擎均免 Key，只有开/关 + 可选 SauceNAO Key）
     const enteredSaucenaoKey = val('#cfg-saucenao-key', '').trim();
+    // 🆕 2026-10-05（第四十三对话 · 交接 §3-113）：pixiv 登录态 cookie（与上面同一套占位符语义）。
+    const enteredPixivCookie = val('#cfg-pixiv-cookie', '').trim();
     patch.imageSearch = {
       ...(c.imageSearch || {}),
       // ⛔ `enabled` / `policy` / `maxPerRun` / `keywordMaxPerRun` **都不在这里**了 ——
@@ -336,7 +338,13 @@ async function saveConfig({ quiet = false } = {}) {
       //    展开保住当前值才对。
       cfBypass: chk('#cfg-cfbypass', c.imageSearch?.cfBypass !== false),
       // ****** = 保持原 Key 不变；明文或新输入才更新
-      ...(enteredSaucenaoKey && enteredSaucenaoKey !== '******' ? { saucenaoApiKey: enteredSaucenaoKey } : {})
+      ...(enteredSaucenaoKey && enteredSaucenaoKey !== '******' ? { saucenaoApiKey: enteredSaucenaoKey } : {}),
+      // 🔴 pixiv 登录态：**没填新值就一个键都不写**。
+      //    为什么不能靠 `...(c.imageSearch || {})` 展开来保住它：脱敏发生在 `/api/config`
+      //    的出口，`c.imageSearch` 里**根本没有** `pixivCookie`（只有 `hasPixivCookie`）
+      //    ⇒ 一旦这里写一个空串，就是把用户的登录态静默清空（本项目最忌的那一类）。
+      //    ⚠️ 所以这条纪律是"**不写这个键**"，不是"写回原值"。
+      ...(enteredPixivCookie && enteredPixivCookie !== '******' ? { pixivCookie: enteredPixivCookie } : {})
     };
     // 看图（视觉）的体积上限：四个数字一起收。
     // 界面侧先钳一道，后端 imageLimits() 还会再兜一道（非法值回落默认），两道都不信任对方。
