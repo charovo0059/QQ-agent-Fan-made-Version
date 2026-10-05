@@ -1559,8 +1559,16 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         if (value && typeof value === 'object') { walk(value); continue; }
         if (SECRET_KEY_EXCLUDE.test(key)) continue;
         // 已生成的 hasXxx 布尔标记本身也会被 apikey 模式匹配到，
-        // 不排除就会连锁生成 hasHasXxx
-        if (/^has/i.test(key) && typeof value === 'boolean') continue;
+        // 不排除就会连锁生成 hasHasXxx。
+        //
+        // 🔴 2026-10-05（第四十四对话 · 交接 §3-118）：这里原来是 `continue`（**留着**盘里的假值）。
+        //    那让 `has*` 的正确性**依赖 JSON 键序**：walk 按 `Object.keys()` 的顺序走，
+        //    真实字段（如 `pixivCookie`）在前 ⇒ 生成 `true`，随后遍历到盘里那个**过期的**
+        //    `hasPixivCookie: false` 时被 `continue` 跳过 ⇒ 新值侥幸赢；**键序一反过来，假值就赢**。
+        //    ⇒ 改成 **delete 掉盘里的 has\***：计算值永远赢，且与键序无关。
+        //    ⚠️ 这是"删装饰字段"，不是"删数据"：`has*` 是纯派生标记，真值永远由真实字段重算。
+        //    ⚠️ `out.api.hasKey` 与 providers 的 `hasKey` 是 **walk 之后手工补的** ⇒ 不受影响。
+        if (/^has/i.test(key) && typeof value === 'boolean') { delete node[key]; continue; }
         if (SECRET_KEY_PATTERN.test(key)) {
           // ⚠️ 必须"删除字段"而不是"置为空串"。
           // 前端保存设置时会把整个 config 展开成 patch 回传（...c.webSearch?.deepseek），
