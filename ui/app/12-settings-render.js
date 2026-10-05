@@ -1036,6 +1036,22 @@ function renderAbilitiesSection(c) {
     </div>
 
     <div class="form-panel">
+      <h4 style="margin-top:0">改进提议</h4>
+      <!-- 🆕 2026-10-05（第四十四对话 · 用户拍板 B1 / 交接 §3-121）：改进提议的总开关
+           （配置键名 proposals.enabled）。
+           ⚠️ **这不是"搬家"，是"顺手新做界面"** —— 那个键一直存在且后端一直在判
+           （src/proposals.js 里 enabled === false 就直接拒并如实说原因），但界面上**从来没有控件**，
+           想关只能手改 config.json。用户拍板「只搬这一个」；其余三组
+           （usage / dream.enabled / coreMemory）**维持现状、一个像素都不动**。
+           🔴 本段在**模板字符串里面** ⇒ ⛔ 一个字反引号都不许有（坑 186）。 -->
+      <div class="checkbox-row"><input type="checkbox" id="cfg-improvement" ${c.proposals?.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-improvement">改进提议：允许她提改进建议（记录在「改进提议」页）</label></div>
+      ${hintLine('关掉它，她就不能提改进建议了（提了会被直接拒，并如实告诉她为什么）。',
+        '提议只会被记录下来、等你自己去看，不会自己改任何东西。'
+        + '这一项默认开着；已经提过的那些仍然留在「改进提议」页，关掉它不会删掉任何条目。')}
+    </div>
+
+    <div class="form-panel">
       <h4 style="margin-top:0">看自己在别的会话里什么样</h4>
       <div class="checkbox-row"><input type="checkbox" id="cfg-selfelsewhere" ${enabled ? 'checked' : ''} />
         <label for="cfg-selfelsewhere">启用 get_my_self_elsewhere（只读）</label></div>

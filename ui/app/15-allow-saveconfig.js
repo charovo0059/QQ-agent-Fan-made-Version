@@ -416,6 +416,19 @@ async function saveConfig({ quiet = false } = {}) {
       allowQuestionable: chk('#cfg-allowquestionable', c.imageSearch?.allowQuestionable !== false),
       allowR18InGroup: chk('#cfg-allowr18ingroup', c.imageSearch?.allowR18InGroup !== false)
     };
+
+    // ── 🆕 2026-10-05（第四十四对话 · 用户拍板 B1 / 交接 §3-121）────────────────────
+    //   「改进提议」开关（`proposals.enabled`）。
+    //   ⚠️ 判定方向：**默认开** ⇒ `!== false`（⛔ 写成 `=== true` 会把"默认开"静默变成"默认关"，
+    //      症状是"没动过它却关了" —— 与上面两个 imageSearch 开关同一族）。
+    //   🔴 `...c.proposals` 展开**必须有**：`proposals` 这个顶层键以后再加字段时，
+    //      靠它保住"这一页没渲染的键不被一次保存抹掉"（本项目老坑）。
+    //   ℹ️ 用户拍板只搬这一个；其余三组（usage.* / dream.enabled / coreMemory.*）**不在这里**，
+    //      它们维持"即时生效 + 失败回滚"的现状，⛔ 别顺手搬过来。
+    patch.proposals = {
+      ...c.proposals,
+      enabled: chk('#cfg-improvement', c.proposals?.enabled !== false)
+    };
   }
 
   if (sec === 'persona') {
