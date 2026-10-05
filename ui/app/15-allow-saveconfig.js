@@ -408,7 +408,13 @@ async function saveConfig({ quiet = false } = {}) {
       //    ⚠️ 触发策略**不在这里** —— 它与"以图搜图"共用 `policy` 一个开关
       //    （曾经单独立过 `keywordPolicy`，界面上成了两个几乎同名的下拉框、用户当场设错，
       //      当天就合并回去了；见 config.js 的注释）。
-      keywordMaxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-keyword-max', c.imageSearch?.keywordMaxPerRun ?? 2)) || 2))
+      keywordMaxPerRun: Math.max(1, Math.min(10, Number(val('#cfg-imagesearch-keyword-max', c.imageSearch?.keywordMaxPerRun ?? 2)) || 2)),
+      // 🆕 2026-10-05（第四十三对话 · 用户要求）：分级那两个开关收进这一节。
+      //    `allowQuestionable` 原来在界面上**一个控件都没有**（只靠 `...c.imageSearch` 展开保住）；
+      //    `allowR18InGroup` 是本轮新增的（用户报"群聊还是不能发色图"之后做的）。
+      //    ⚠️ 两个都按 `!== false` 判 —— 它们是"默认开"的开关（写反的症状是"没动过它却关了"）。
+      allowQuestionable: chk('#cfg-allowquestionable', c.imageSearch?.allowQuestionable !== false),
+      allowR18InGroup: chk('#cfg-allowr18ingroup', c.imageSearch?.allowR18InGroup !== false)
     };
   }
 

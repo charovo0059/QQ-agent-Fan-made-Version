@@ -533,15 +533,14 @@ function renderSearchSection(c) {
          字段本身由 skills/doujin-lookup/skill.json 的 configSchema 声明（通用表单渲染），
          「检测连通 / 试查一次 / 导入离线库」那几个动作也在技能页的「配置」里
          （见 ui/app.js 的 SKILL_ACTION_PANELS）。
-         ⇒ 这里只留一行指路，**不要再把表单加回来**：两处都能改必然漂移。 -->
-    <div class="hint">
-      <b>本子查询</b>（JM 禁漫直连 + 本地 NH 英文库兜底）的设置已移到
-      <b>技能</b>页 → <code>本子查询</code> → <code>配置</code>；
-      那里同时有「检测连通 / 试查一次 / 导入离线库」。
-    </div>
-      </div>
-    </div>
-
+         ⇒ **不要再把表单加回来**：两处都能改必然漂移。
+         🆕 2026-10-05（第四十三对话 · 用户要求）：**原来这里还有一行 .hint 指路，已删** ——
+            用户原话"这句说明可以去掉了…说明还带了一个滑条，有点占地方"。
+            ⚠️ 那个滑条的真正来源是**紧跟在 .hint 后面那两个多余的 &lt;/div&gt;**（没有配对的开始标签，
+            浏览器只能自己造一个容器 ⇒ 那一块变成可滚动的）。**两个都删了**，这一节的层级恢复正常。
+            ⇒ 想给她指路就写进「本页说明」（save-bar 的 ？，见 SETTINGS_PAGE_HELP），
+            ⛔ 别再把常显说明加回这一节（.hint 有"只减不增"的棘轮，见 test-设置页说明小字分层.mjs）。
+            🔴 本段在**模板字符串里面** ⇒ ⛔ 一个字反引号都不许有（写标签用 &lt;/div&gt; 这种转义）。 -->
     <h3 id="settings-search">搜索服务</h3>
     <!-- 🆕 2026-10-05（第四十三对话 · 交接 §3-105 / 调研-能力开关归位）：两个**能力开关**
          （联网搜索、以图搜图）**已搬去「她的能力」那一节** —— 用户拍板"都搬"，
@@ -1018,6 +1017,22 @@ function renderAbilitiesSection(c) {
         <input type="number" id="cfg-imagesearch-keyword-max" min="1" max="10" value="${esc(img.keywordMaxPerRun ?? 2)}" />
         ${hintLine('与上面「单次运行最多真搜几次」各算各的：一次运行里"查出处的图"和"找新图"是两件事。')}
       </div>
+
+      <!-- 🆕 2026-10-05（第四十三对话 · 用户要求）：把"搜/发图片"有关的分级开关也收进这一节。
+           起因：用户报"群聊似乎还是不能发色图"，而真机+存档查明**代码没拦** ——
+           是提示词里两句话（"群里请用 safe"、"别把 questionable 的图发到群里"）让她自己退了，
+           而用户的人设卡里明写着允许。⇒ 做成开关（allowR18InGroup），并把它与既有的
+           总开关 allowQuestionable 一起放在这里（后者以前**一个控件都没有**）。
+           🔴 本段在**模板字符串里面** ⇒ ⛔ 一个字反引号都不许有。 -->
+      <h4>图片的分级</h4>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-allowquestionable" ${img.allowQuestionable !== false ? 'checked' : ''} />
+        <label for="cfg-allowquestionable">允许她找擦边 / R-18 的图（关掉 ⇒ 默认检索退回全年龄）</label></div>
+      ${hintLine('关掉它，她搜插画时不给 rating 的那一档会从「两者都可能」退回「只要全年龄」。',
+        '私聊里明确要 R-18（rating=questionable）仍然可以 —— 这个开关管的是"不给 rating 时的默认档"。')}
+      <div class="checkbox-row"><input type="checkbox" id="cfg-allowr18ingroup" ${img.allowR18InGroup !== false ? 'checked' : ''} />
+        <label for="cfg-allowr18ingroup">群聊里也允许她搜 / 发擦边与 R-18</label></div>
+      ${hintLine('⚠️ 开着时，群里有人要图她也会去搜 R-18 —— 但 QQ 侧有概率把这类图拦掉、或让对方看不到（她会如实说，不会保证发得出去）。',
+        '关掉它，群里她只用全年龄档、也不会把擦边图发出去；私聊完全不受影响。这两个开关会跟着进她的提示词。')}
     </div>
 
     <div class="form-panel">
