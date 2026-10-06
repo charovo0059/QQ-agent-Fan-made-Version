@@ -142,6 +142,21 @@ function memoryRules() {
   if (getConfig()?.selfElsewhere?.enabled !== false) {
     lines.push('想知道自己在**别的会话**里大概是什么样（那边活不活跃、你最近开过几次口），在私聊里用 get_my_self_elsewhere —— 它只给个大概，不给内容也不给那边叫什么；群聊里没有这个能力，也不该在群里提别处的事。');
   }
+  // 🆕 2026-10-06（第四十七对话 · 用户拍板"补 B 档两句提示词"）：
+  //   仪器实测（`工具-会话诊断\体检-工具可见性.mjs`）：`dream_recall` 与 `delete_core_memory`
+  //   这两个工具**进了工具集、却在生效正文里命中 0**（写进了工具定义，系统提示一次都没提）。
+  //   ⚠️ **为什么不写进 `toolProtocol()`**：那一段**线上有覆盖版**（QQ 侧 512 字，
+  //      实测 `overrideCounts.qq = 5`）⇒ 改内置版对 QQ 侧**完全不生效**（改了个寂寞）。
+  //      而 `memoryRules` 这一段**没有被覆盖** ⇒ 改这里 QQ / 微信两侧都立刻生效。
+  //   ⚠️ 两句都**跟着各自的开关走**（与上面 get_my_self_elsewhere 同一条纪律：
+  //      关掉功能就别在提示词里教她调）—— 默认开 ⇒ 判定写 `!== false`，写反的症状是"没这个键就整句不见"。
+  //   ⚠️ 改这两行要同步登记 `测试-现行\test-skills基础设施.mjs` 的 ADDED_LINES（见该文件注释）。
+  if (getConfig()?.dream?.enabled !== false) {
+    lines.push('你深夜写的那些「梦」（只给管理员看的笔记）用 dream_recall 才翻得到：想看某一天传 day，想找某个话题或某个人传 keyword，传 currentChat=true 就只看当前这个会话那一章（推荐带上它，免得把别处的事拿到这里说）。');
+  }
+  if (getConfig()?.coreMemory?.enabled !== false) {
+    lines.push('「核心记忆」是你自己挑出来、原样留着的那几段（像相册）；存错了或者不想留了，用 delete_core_memory 删掉。');
+  }
   return lines.join('\n');
 }
 

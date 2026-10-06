@@ -7,6 +7,7 @@ import { getConfig, DATA_DIR } from './config.js';
 import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary, removeSticker,
   findSticker, formatStickerList, applyStickerNote, markStickerUsed, contentHashOfUrl,
+  lookupSticker,
   refreshStickerSource
 } from './stickers.js';
 // 🆕 2026-09-29（第三十一对话）§3-26：**收藏那一刻就把字节缓存下来** ⇒ 复用 tools.js 的
@@ -87,6 +88,17 @@ export class StickerManager {
   async find(ref) {
     const synced = await this.sync(false);
     return findSticker(synced.entries, ref);
+  }
+
+  /**
+   * 🆕 2026-10-06（第四十七对话）：带"为什么没命中"的解析结果 —— `send_sticker` 报错要用。
+   * ⚠️ `find` 与 `lookup` 是**两件事**，别合并：`find` 是老口径（只认 id/md5/url，
+   *    `note`/`remove`/`markUsed` 这些走在 id 上的路径都靠它保持逐字不变），
+   *    `lookup` 多一层"按名字查"（她真的会传名字，实测 30/30 全失败）。
+   */
+  async lookup(ref) {
+    const synced = await this.sync(false);
+    return lookupSticker(synced.entries, ref);
   }
 
   note(id, patch) {

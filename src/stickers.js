@@ -163,6 +163,62 @@ export function findSticker(entries, ref) {
   }) || null;
 }
 
+/**
+ * 解析一个"表情引用"到底指哪一条 —— `send_sticker` 的入口（2026-10-06 第四十七对话）。
+ *
+ * 为什么要它（真机存档量出来的，⛔ 不是推测）：
+ *   `findSticker` 只认 id / resId / md5 / url，而**提示词里从来不给她 id** ——
+ *   【可用表情包】那一块只列 `localNote || desc`（见 `buildStickerContext`），
+ *   线上的 `stickerRules` 还明说"按角色设定、语境和 desc／localNote／tags 选"
+ *   ⇒ 她记住、能引用的本来就是**名字**。实测（1539 份会话存档）：
+ *     传 id 28 次 / 失败 0；传备注名 23 次 / 失败 23；传裸数字 7 次 / 失败 7。
+ *   ⇒ 失败与"图片好不好"无关，纯粹是**引用形态**对不上。
+ *
+ * ⛔ 不重写匹配逻辑：id/md5/url 那半仍走 `findSticker`（老口径一个字不动），
+ *    近似项提示复用 `formatStickerList` 的搜索口径。这里只补"名字"这一层。
+ *
+ * @returns {{entry: object|null, how: string, candidates: Array<{id:string,name:string}>}}
+ *   how = 'id' | 'md5' | 'url' | 'name' | 'prefix' | 'ambiguous' | 'none'
+ *   candidates = 给报错用的"最像的几条"（最多 3 条，只有 id 与名字，⛔ 不吐 url）
+ */
+export function lookupSticker(entries, ref) {
+  const list = Array.isArray(entries) ? entries : [];
+  const raw = String(ref ?? '').trim();
+  if (!raw) return { entry: null, how: 'none', candidates: [] };
+  // ① 原来那条路：id / resId / md5 / url
+  const hit = findSticker(list, raw);
+  if (hit) {
+    const how = hit.id === raw || hit.resId === raw ? 'id'
+      : (hit.md5 && hit.md5 === raw.toUpperCase()) ? 'md5' : 'url';
+    return { entry: hit, how, candidates: [] };
+  }
+  // ② 名字：desc（QQ 收藏里那条备注）/ localNote（这一侧能改的笔记）/ tags
+  const norm = (s) => String(s ?? '').trim().toLowerCase();
+  const want = norm(raw);
+  const exact = list.filter((e) => norm(e.desc) === want || norm(e.localNote) === want
+    || (Array.isArray(e.tags) && e.tags.some((t) => norm(t) === want)));
+  if (exact.length === 1) return { entry: exact[0], how: 'name', candidates: [] };
+  if (exact.length > 1) return { entry: null, how: 'ambiguous', candidates: briefStickers(exact) };
+  // ③ 唯一前缀 —— 只对 desc / localNote 开（tags 通常很短，前缀撞车概率大）
+  const pref = list.filter((e) => {
+    const d = norm(e.desc); const n = norm(e.localNote);
+    return (d && d.startsWith(want)) || (n && n.startsWith(want));
+  });
+  if (pref.length === 1) return { entry: pref[0], how: 'prefix', candidates: [] };
+  if (pref.length > 1) return { entry: null, how: 'ambiguous', candidates: briefStickers(pref) };
+  // ④ 一条都没对上：拿近似项当提示（复用 list 的搜索口径；实在没有就给最前面几条，
+  //    至少让她下一次调用有个能抄的 id）
+  const { stickers } = formatStickerList(list, raw, 3);
+  const fallback = stickers.length ? stickers : formatStickerList(list, '', 3).stickers;
+  return { entry: null, how: 'none', candidates: briefStickers(fallback) };
+}
+
+/** 报错里用的极简三条（只有 id 与名字 —— ⛔ 不吐 url/md5 这些她不需要的东西）。 */
+function briefStickers(items) {
+  return (Array.isArray(items) ? items : []).slice(0, 3)
+    .map((e) => ({ id: String(e?.id ?? ''), name: String(e?.localNote || e?.desc || '') }));
+}
+
 export function formatStickerList(entries, query = '', limit = 48) {
   const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
   const q = String(query ?? '').trim().toLowerCase();
