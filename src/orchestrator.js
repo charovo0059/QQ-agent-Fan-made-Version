@@ -704,8 +704,12 @@ export class Orchestrator {
 
     // 表情库快照（提示词用）
     // ⚠️ 微信侧**不取**：微信没有表情包，给了目录她就会去发（发不出去，白花一次调用）
+    // 🆕 2026-10-06（第四十七对话 · 用户拍板 B3①）：`sticker.enabled` 这道闸**已废弃** ——
+    //    "表情属于聊天系统，随便她发" ⇒ 这里只剩平台这一条判断。
+    //    ⚠️ 老 config.json 里残留的 `sticker.enabled:false` **一律视为开**（没人读它了），
+    //       深合并不会把那个键从盘里抹掉 —— 别在文档里写成"会自动清掉"。
     let stickerEntries = [];
-    if (!isWechat && cfg.sticker?.enabled !== false) {
+    if (!isWechat) {
       try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
 
@@ -1094,15 +1098,75 @@ export class Orchestrator {
         messages.push(rEntry);
         session.messages.push(structuredClone(rEntry));
         session.rounds = roundsUsed + 2;
-        // 追问后如果它这次调了工具，就把工具跑掉（只跑一轮，不再递归追问）
-        for (const call of rToolCalls) {
-          const nm = call?.function?.name ?? '';
-          markActivity(`正在调用 ${nm}…`);
-          const res = await executeTool(toolDefs, ctx, nm, call?.function?.arguments ?? '{}');
-          const text = Array.isArray(res.content)
-            ? res.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n')
-            : String(res.content ?? '');
-          messages.push({ role: 'tool', tool_call_id: call.id, name: nm, content: text });
+        // 追问后如果它这次调了工具：**执行 → 记账 →（把结果喂回去再要一次回复）**
+        // 🆕 2026-10-06（第四十七对话 · 用户拍板 B6，选的是"**全喂一轮**"而不是"只喂只读结果"）。
+        //
+        // 改动前后差在哪（原来只有前两步）：工具**照样执行**，结果**只 push 进本地 `messages`
+        // 就随本次运行丢弃** ⇒ 副作用已经发生（写了记忆、发了图…），而**她看不到结果**，
+        // 事后也无法从存档复盘（那条 `{toolCall:{…}}` 挂件也从来没写过）。
+        // 实测（1547 份会话存档）：追问发生过 **486 次（31.4%）**，其中"追问轮调了**非发送类**工具"
+        // 只有 **4 次** ⇒ 影响面小，但那 4 次每一次都是"她做了事却不知道结果"。
+        //
+        // 🔴 **硬上限仍然是"多一轮"**：这段跑完就进收尾 ——
+        //    `nudged` 在本次运行里已经是 true ⇒ 上面那个 `if (!nudged …)` 不会再进；
+        //    下面第二轮只**执行**工具，⛔ **不再喂回**（判据专门钉"只多喂一轮"）。
+        //
+        // ⚠️ 记账形状与**正常循环逐字同款**（`session.messages.push({ toolCall: { name, args,
+        //    result, resultChars, truncated, isError } })`）—— 体检工具读的就是这个形状，
+        //    不写它的话"追问轮调过什么工具"在存档里查不出来（那正是本条的动机之一）。
+        const NUDGE_TOOL_RESULT_MAX = 50000;   // 与正常循环的 TOOL_RESULT_MAX 同口径
+        const runNudgeTools = async (calls) => {
+          for (const call of calls) {
+            const nm = call?.function?.name ?? '';
+            const argsRaw2 = call?.function?.arguments ?? '{}';
+            markActivity(`正在调用 ${nm}…`);
+            const res = await executeTool(toolDefs, ctx, nm, argsRaw2);
+            const text = Array.isArray(res.content)
+              ? res.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n')
+              : String(res.content ?? '');
+            messages.push({ role: 'tool', tool_call_id: call.id, name: nm, content: text });
+            session.messages.push({
+              toolCall: {
+                name: nm,
+                args: safeParse(argsRaw2),
+                result: text.length > NUDGE_TOOL_RESULT_MAX ? text.slice(0, NUDGE_TOOL_RESULT_MAX) : text,
+                resultChars: text.length,
+                truncated: text.length > NUDGE_TOOL_RESULT_MAX,
+                isError: !!res.isError
+              }
+            });
+            // 正常循环对 web_search 会加这个计数（L984-985），这里补同一口径
+            if (nm === 'web_search') { webSearchCount += 1; session.webSearchCount = webSearchCount; }
+          }
+        };
+        await runNudgeTools(rToolCalls);
+        if (rToolCalls.length) {
+          // 「喂回」的落点：这一次请求的 `messages` 里**带着上面那些 `role:'tool'` 结果**
+          // ⇒ 她终于看得到自己刚才做了什么。
+          const after = await chatCompletionWithRetry({ messages, tools: openAiTools });
+          addUsage(session.usage, after.usage);
+          session.usage.calls += 1;
+          session.model = after.model || session.model;
+          const amsg = after.message;
+          const aContent = typeof amsg.content === 'string' ? amsg.content : '';
+          const aToolCalls = Array.isArray(amsg.tool_calls) ? amsg.tool_calls : [];
+          const aEntry = {
+            role: 'assistant', content: aContent, tool_calls: amsg.tool_calls ?? null,
+            raw: after.raw ?? null,
+            // `round` 的口径同 L1091：这是本次运行的第 3 次调用（原始 + 追问 + 喂回后这一次）
+            // ⚠️ **不打 `nudgeRetry`**：那个标记的语义是"**那一次**追问重试"（判据按
+            //    "有且只有 1 条 nudgeRetry"钉着）；这一条用 `nudgeFedBack` 自己的名。
+            round: roundsUsed + 3, hadToolResult: true, nudgeFedBack: true,
+            draftWithoutSend: isDraftWithoutSend(amsg)
+          };
+          messages.push(aEntry);
+          session.messages.push(structuredClone(aEntry));
+          session.rounds = roundsUsed + 3;
+          // 这一轮她调的工具**照样执行**（"喂回之后终于发出去了"必须真的发出去），
+          // ⛔ 但结果不再喂回 —— 硬上限到这儿为止。
+          await runNudgeTools(aToolCalls);
+          this.sessions.update(session.id);
+          this.emit('session-update', session.id);
         }
       } catch (error) {
         session.messages.push({ nudgeError: String(error?.message ?? error).slice(0, 200) });

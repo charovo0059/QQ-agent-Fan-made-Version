@@ -46,13 +46,16 @@ export class StickerManager {
     this.collectTimes = [];
   }
 
-  get enabled() {
-    return getConfig().sticker?.enabled !== false;
-  }
+  /**
+   * 🆕 2026-10-06（第四十七对话 · 用户拍板 B3①）：**没有"表情包总开关"了**。
+   * 用户原话："表情属于聊天系统，随便她发" ⇒ 这道闸**已废弃**（`config.sticker.enabled` 不再被读）。
+   * ⚠️ 这里是**唯一**读那个键的地方之一（另两处在 `prompt.js` / `orchestrator.js`，也都删了）；
+   *    老 config.json 里残留的 `enabled:false` **一律视为开**。
+   * ⛔ 别再把这个 getter 加回来当开关用 —— 要限制她发什么，走 `collectEnabled`（收藏）或平台判断。
+   */
 
   /** 同步 QQ 收藏表情（带 TTL 缓存；force 立即刷新）。失败时退回本地缓存。 */
   async sync(force = false) {
-    if (!this.enabled) return { entries: this.entries, fromCache: true, disabled: true };
     const ttl = 60000;
     const now = Date.now();
     if (!force && this.syncedAt && now - this.syncedAt < ttl) {

@@ -69,7 +69,7 @@ async function loadDreams() {
   try {
     data = await api('/api/dreams');
   } catch (error) {
-    page.innerHTML = `<div class="empty-hint">读不到笔记：${esc(error?.message || error)}</div>`;
+    page.innerHTML = `<div class="empty-hint">读不到日记：${esc(error?.message || error)}</div>`;
     return;
   }
 
@@ -101,25 +101,25 @@ async function loadDreams() {
         </div>
         ${noteBody(n)}
       </div>`).join('')
-    : `<div class="empty-hint">还没有笔记。${data.enabled ? '等夜里安静下来，它就会写一条。' : '「夜里做『梦』」现在是关着的。'}</div>`;
+    : `<div class="empty-hint">还没有日记。${data.enabled ? '等夜里安静下来，它就会写一篇。' : '「夜里写『日记』」现在是关着的。'}</div>`;
 
   // 关着的时候也把原因说清楚，免得点了"现在做一次"像是没反应
   const hint = data.running
-    ? '正在做梦…'
+    ? '正在写日记…'
     : (data.whyNot
-      ? `自动做梦的条件还没满足：${data.whyNot}。（手动点「现在做一次」不受这些限制）`
-      : '条件都满足了，下一次检查（5 分钟内）就会写一条。');
+      ? `自动写日记的条件还没满足：${data.whyNot}。（手动点「现在做一次」不受这些限制）`
+      : '条件都满足了，下一次检查（5 分钟内）就会写一篇。');
 
   page.innerHTML = `
     <div class="dream-wrap">
       <div class="dream-bar">
-        <label class="dream-toggle" title="夜里没人说话时，让它把当天的事整理成一条笔记">
-          <input type="checkbox" id="dream-enabled" ${data.enabled ? 'checked' : ''} />夜里做「梦」
+        <label class="dream-toggle" title="夜里没人说话时，让它把当天的事整理成一篇日记">
+          <input type="checkbox" id="dream-enabled" ${data.enabled ? 'checked' : ''} />夜里写「日记」
         </label>
         <span class="muted">时段 ${esc(data.startHour)}:00 ~ ${esc(data.endHour)}:00 · 需安静 ${esc(data.minIdleMinutes)} 分钟</span>
         <span style="margin-left:auto"></span>
-        <button class="btn btn-small" id="dream-now">现在做一次</button>
-        <button class="btn btn-small btn-danger" id="dream-clear">清空笔记</button>
+        <button class="btn btn-small" id="dream-now">现在写一次</button>
+        <button class="btn btn-small btn-danger" id="dream-clear">清空日记</button>
       </div>
       <div class="hint dream-hint">${esc(hint)}</div>
       <div class="dream-list">${listHtml}</div>
@@ -144,14 +144,14 @@ async function loadDreams() {
     const btn = e.target;
     const label = btn.textContent;
     btn.disabled = true;
-    btn.textContent = '正在做梦…';
+    btn.textContent = '正在写日记…';
     try {
-      // force=true：跳过开关/时段/"今天做过了"，但仍然要有模型、要有人说过话
+      // force=true：跳过开关/时段/"今天写过了"，但仍然要有模型、要有人说过话
       const r = await api('/api/dream', { method: 'POST', body: JSON.stringify({ force: true }) });
       if (!r.ok) alert(`这次没写成：${r.reason || '未知原因'}`);
       await loadDreams();
     } catch (error) {
-      alert(`做梦失败：${error?.message || error}`);
+      alert(`写日记失败：${error?.message || error}`);
       btn.textContent = label;
       btn.disabled = false;
     }
@@ -160,8 +160,8 @@ async function loadDreams() {
   // ── 清空 ──
   $('#dream-clear')?.addEventListener('click', async () => {
     const n = notes.length;
-    if (!n) { alert('还没有笔记。'); return; }
-    if (!confirm(`删掉全部 ${n} 条笔记？删了就找不回来了。`)) return;
+    if (!n) { alert('还没有日记。'); return; }
+    if (!confirm(`删掉全部 ${n} 条日记？删了就找不回来了。`)) return;
     try {
       await api('/api/dreams', { method: 'DELETE' });
       await loadDreams();

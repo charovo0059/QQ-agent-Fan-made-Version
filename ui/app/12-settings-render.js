@@ -1454,8 +1454,12 @@ return `
     <div class="hint status" style="margin:6px 0 10px">退避状态：<span id="proactive-reengage">…</span></div>
 
     <h3>表情包</h3>
-    <div class="checkbox-row"><input type="checkbox" id="cfg-sticker" ${c.sticker.enabled ? 'checked' : ''} />
-      <label for="cfg-sticker">启用表情包（收藏表情同步 + 发送工具）</label></div>
+    <!-- 🆕 2026-10-06（第四十七对话 · 用户拍板 B3①）：原来这里有一个「启用表情包」总开关
+         （控件 id 是 cfg-sticker），**已撤**。用户原话："表情属于聊天系统，随便她发" ⇒ 表情包常开。
+         ⛔ 别把它加回来当闸门；要限制她发什么，走平台判断或「表情包」页里的收藏开关。
+         ⚠️ 下面「积极程度」那个 select **必须留着** —— 它是 test-微信联系人设置页.mjs
+         的源码切片锚点（同一个容器里那块注释也是），删了那条判据会直接抽不出来。
+         ⚠️ 本文件是**模板字符串**，注释里⛔ 一个反引号都不许有（坑 205，本轮又踩了一次 —— node --check 逮住）。 -->
 
     <div class="field">
       <label>发表情包的积极程度</label>

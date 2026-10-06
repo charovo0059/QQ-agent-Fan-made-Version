@@ -460,11 +460,18 @@ export class SendQueue {
         replyToMessageId: options.replyToMessageId ?? null,
         atUserId: options.atUserId ?? null
       };
+      // 🆕 2026-10-06（第四十七对话 · 与 B4 同一条）：**按会话来源选客户端**。
+      //    原来下面三处都写 `this.onebot`（= 默认的 QQ 通道）⇒ 在**微信会话**里"发表情"
+      //    会把请求发到 QQ 上（**发错平台**）。`clientFor()` 取不到来源时仍回落默认客户端
+      //    ⇒ QQ 侧行为**逐字不变**。
+      //    ⚠️ 下面那两处**取图字节**的调用（`ensureStickerImage` / `resolveFreshImageUrl`）
+      //       继续用 `this.onebot` —— 那是从图床下载，与"发给哪个平台"无关。
+      const client = this.clientFor(chatKey);
       const cached = cachedStickerFilePath(sticker);
       let data = null, lastErr = null;
       if (cached) {
         try {
-          data = await this.onebot.sendSticker(kind, id, pathToFileURL(cached).href, pickOpts);
+          data = await client.sendSticker(kind, id, pathToFileURL(cached).href, pickOpts);
         } catch (error) {
           lastErr = error;
           console.error(`[sender] 发表情：走本地缓存失败（${error?.message ?? error}），改用远程链接重试`);
@@ -510,7 +517,7 @@ export class SendQueue {
           const filled = cachedStickerFilePath(sticker);
           if (filled) {
             try {
-              data = await this.onebot.sendSticker(kind, id, pathToFileURL(filled).href, pickOpts);
+              data = await client.sendSticker(kind, id, pathToFileURL(filled).href, pickOpts);
             } catch (error) {
               lastErr = error;
               console.error(`[sender] 发表情：补完缓存后仍然发送失败（${error?.message ?? error}），改用远程链接重试`);
@@ -524,7 +531,7 @@ export class SendQueue {
         const { url: sendUrl } = await resolveFreshImageUrl(this.onebot, { url: sticker.url, file: sticker.file });
         if (!sendUrl) throw lastErr || new Error('发表情失败：本地缓存与远程链接都没有可用的图片');
         try {
-          data = await this.onebot.sendSticker(kind, id, sendUrl, pickOpts);
+          data = await client.sendSticker(kind, id, sendUrl, pickOpts);
         } catch (error) {
           lastErr = error;
         }
@@ -556,7 +563,12 @@ export class SendQueue {
       //    工具会把错误告诉模型"）—— 不静默丢弃，否则她会以为自己拍过了。
       this.#assertPokeAllowed(chatKey, targetUserId);
       await sleep(randInt(300, 900));
-      const data = await this.onebot.sendPoke(kind, id, targetUserId);
+      // 🆕 2026-10-06（第四十七对话 · 用户拍板 B4）：**按会话来源选客户端**，与 sendText/sendImage 同一口径。
+      //    原来这里写的是 `this.onebot`（默认客户端 = QQ 那条通道）⇒ 在**微信会话**里拍一拍会
+      //    拿微信那边的数字 id 当 QQ 号打到 **QQ 客户端**上 —— 那是"**发错平台**"，比"不支持"严重。
+      //    （`clientFor()` 取不到来源时仍回落到默认客户端，所以 QQ 侧行为**逐字不变**。）
+      const client = this.clientFor(chatKey);
+      const data = await client.sendPoke(kind, id, targetUserId);
       const ts = Date.now();
       this.#recordPoke(chatKey, targetUserId, ts);
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';
