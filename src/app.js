@@ -2553,7 +2553,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         });
         return json(res, 200, {
           ok: true,
-          // 🆕 2026-10-03（第三十五对话）：每条带上**归属标签**（`夏亚（QQ 1857354535）`）。
+          // 🆕 2026-10-03（第三十五对话）：每条带上**归属标签**（`某群友（QQ 1000000001）`）。
           //    ⚠️ 标签由后端 `coreMemorySourceLabel()` 现算 —— 与**注入提示词里那份逐字同源**
           //       （页面与提示词共用同一个函数）。⛔ 别让前端自己拼一份：
           //       两份标签一旦漂开，页面说的和注入的就不是一回事，而那种漂看不出来。
@@ -3487,7 +3487,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
             return;
           }
           // 🆕 2026-09-29（第三十对话）：**QQ 私聊也要有名字**（交接 §3-7 缺口①）。
-          //    原来这里 `if (!m) return;` 直接把私聊放过去了 ⇒ 界面只能显示「私聊 2229596136」。
+          //    原来这里 `if (!m) return;` 直接把私聊放过去了 ⇒ 界面只能显示「私聊 1000000008」。
           //    但"这个人叫什么"我们本来就有两处现成的来源，都不必问 OneBot 也不会超时：
           //      ① OneBot 的 `get_friend_list`（`qq-contacts.js`，带 nickname/remark）；
           //      ② **我们自己的存档** —— 每条入站消息都记了 `senderName`（`store.chatDisplayName`）。
