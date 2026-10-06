@@ -26,14 +26,76 @@ function chatFile(chatKey) {
   return path.join(MESSAGES_DIR, `${safe}.json`);
 }
 
+// ── 读失败"留档保命"（🆕 2026-10-06 第四十六对话）──────────────────────────
+//
+// 为什么加：`loadChat` 原来是 `catch { /* 新会话 */ }` —— 一个坏字节 / 权限错 /
+//   文件被别的进程占着（Windows 上杀毒扫描、编辑器）、或者内容不是我们写的形状，
+//   就一律**当成"新会话"**返回空存档；而它随即被 `#state` **记进内存缓存**
+//   （`this.chats`），下一次 `drainUnread` / `appendIncoming` 落盘时
+//   `writeChatNow` 的 rename **把整份聊天历史覆盖成空**，用户那边一点痕迹都没有。
+//   ⇒ 本项目最忌讳的那一类失败，偏偏落在最贵的数据上。
+//
+// 口径照 `memory.js` 的 `reportReadFailure`（同一族里已经做对的那一个，⛔ 别另发明一套）：
+//   · `ENOENT` = 首次运行 / 新会话 ⇒ **静默**（正常路径，不是故障）
+//   · 其它错误 / 形状不对 ⇒ 原文件**另存** `.corrupt-<时间戳>`（**原文件不动**）+ 限流报错
+//   · 并且这一份 state 打上 `__readFailed` ⇒ `writeChatNow` **拒绝写回**
+//     （备份只是保命；在"没读懂"的内容上盖一层，才是原来那个 bug 本身）
+// ⚠️ 写失败那条路早就有了（见下面的 `reportWriteFailure`），这一节补的是**读**侧。
+const READ_FAIL_LOG_COOLDOWN_MS = 60 * 1000;
+/** chatKey -> { lastLogAt, backedUp }。一个会话一个键，到顶整体清空（同 memory.js）。 */
+const readFailState = new Map();
+
+function reportReadFailure(chatKey, file, err) {
+  const now = Date.now();
+  const st = readFailState.get(chatKey) || { lastLogAt: 0, backedUp: false };
+  if (readFailState.size >= 512) readFailState.clear();   // 清空只让某个会话多报一次，不会漏报
+  let bak = null;
+  if (!st.backedUp) {
+    // 与 memory.js 同款：**整份复制**，原文件不动 ⇒ 数据还在盘上、可人工恢复。
+    // 只做一次：热路径上重复复制会白占磁盘（一个坏会话可能被反复读）。
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    bak = `${file}.corrupt-${stamp}`;
+    try { fs.copyFileSync(file, bak) } catch { bak = null }   // 连备份都失败也得继续报
+    st.backedUp = true;
+  }
+  if (now - st.lastLogAt >= READ_FAIL_LOG_COOLDOWN_MS) {
+    st.lastLogAt = now;
+    console.error(`[store] 存档 ${path.basename(file)} 存在但读不出来（${err?.message || err}）`
+      + (bak ? `—— 已另存为 ${path.basename(bak)}` : '—— 本次按空值处理')
+      + `；⚠️ 原文件**不会被覆盖**，可人工恢复。这一份存档在修好之前**拒绝落盘**。`
+      + `（同一会话这条提示 ${READ_FAIL_LOG_COOLDOWN_MS / 1000} 秒内只报一次）`);
+  }
+  readFailState.set(chatKey, st);
+}
+
+/** 空存档。`readFailed=true` 时带上"拒绝写回"的标记（见 writeChatNow）。 */
+function freshState(chatKey, readFailed) {
+  const st = { chatKey, nextLocalId: 1, messages: [] };
+  if (readFailed) st.__readFailed = true;
+  return st;
+}
+
 function loadChat(chatKey) {
+  const file = chatFile(chatKey);
+  let text;
   try {
-    let text = fs.readFileSync(chatFile(chatKey), 'utf8');
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') reportReadFailure(chatKey, file, err);
+    return freshState(chatKey, err?.code !== 'ENOENT');
+  }
+  try {
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = JSON.parse(text);
     if (parsed && Array.isArray(parsed.messages)) return parsed;
-  } catch { /* 新会话 */ }
-  return { chatKey, nextLocalId: 1, messages: [] };
+    // 读到了合法 JSON、但不是我们写出来的形状（`messages` 不是数组）⇒ 同样算"读不出来"。
+    // ⚠️ 与 `memory.js` 有意**不同**的一处：那边对"形状不对"只出声不留档（没有坏字节可留），
+    //    这里**照样留档** —— 存档是长年累积的东西，哪怕形状变了，那份内容本身也值得先保下来。
+    reportReadFailure(chatKey, file, new Error('内容不是存档形状（messages 不是数组）'));
+  } catch (err) {
+    reportReadFailure(chatKey, file, err);
+  }
+  return freshState(chatKey, true);
 }
 
 // ── 落盘合并（2026-09-17） ────────────────────────────────────────────────
@@ -50,11 +112,32 @@ const WRITE_COALESCE_MS = 200;
 const WRITE_MAX_DELAY_MS = 1000;
 const pendingWrites = new Map(); // chatKey -> { state, firstAt, timer }
 
+/**
+ * 把一份存档写下去。**返回 false = 故意没写**（这份存档读失败过 ⇒ 拒绝覆盖）。
+ * 🔴 见 `loadChat` 上方那段"读失败留档保命"：读都没读懂就 rename 覆盖，
+ *    等于把整份聊天历史抹成眼前这几条 —— 那是本轮修掉的 bug，⛔ 别把守卫去掉。
+ */
 function writeChatNow(state) {
+  if (state?.__readFailed) return false;
   fs.mkdirSync(MESSAGES_DIR, { recursive: true });
   const tmp = `${chatFile(state.chatKey)}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8');
   fs.renameSync(tmp, chatFile(state.chatKey));
+  return true;
+}
+
+/**
+ * 落盘被**拒绝**时出声（限流，同 reportWriteFailure）。
+ * 为什么不当成"落盘失败"报：那会让人去查磁盘，而真正的原因是这个会话的存档坏了。
+ */
+const refuseReportedAt = new Map();
+function reportRefuseOverwrite(key, state) {
+  const now = Date.now();
+  if (now - (refuseReportedAt.get(key) || 0) < 60000) return;
+  refuseReportedAt.set(key, now);
+  const n = Array.isArray(state?.messages) ? state.messages.length : 0;
+  console.error(`[store] 拒绝把存档 ${key} 写回去：它这次**读失败过**（已另存 .corrupt 备份，原文件没动）。`
+    + `内存里这 ${n} 条**不会落盘** —— 把那个坏文件修好或移走、重启应用之后才会恢复正常写入。`);
 }
 
 /**
@@ -81,7 +164,10 @@ function flushChat(key) {
   if (rec.timer) clearTimeout(rec.timer);
   pendingWrites.delete(key);
   try {
-    writeChatNow(rec.state);
+    // 🔴 读失败过的那一份：**拒绝写回**，而且**不放回 pendingWrites** ——
+    //    放回会每 200ms 重试一次、刷屏，而它永远不会成功（守卫是确定性的）。
+    //    出声由 reportRefuseOverwrite 限流负责。
+    if (writeChatNow(rec.state) === false) { reportRefuseOverwrite(key, rec.state); return; }
   } catch (error) {
     // 🔴 2026-09-24（第十三对话 · T2「只打日志」型 catch 逐条定性）：**失败必须把待写记录放回去**。
     //

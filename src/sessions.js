@@ -6,6 +6,11 @@ import crypto from 'node:crypto';
 import { DATA_DIR } from './config.js';
 import { addUsage, emptyUsage } from './llm.js';
 import { modelLabel, splitModelLabel } from './model-prices.js';
+// 🆕 2026-10-06（第四十六对话 · 第三方报告复核）：日键改成复用 util.js 的 `todayKey`。
+// 原来这里自己写了一份 `localDayKey`，与 `util.js:48` 的 `todayKey` **逐字等价**（都是本地时区 Y-M-D）
+// ⇒ 两份实现迟早会分家（改时区规则时只改一处，另一个静默保留旧口径）。
+// ⛔ 别再在这里另写日键。
+import { todayKey } from './util.js';
 
 const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
 
@@ -380,7 +385,7 @@ export class SessionRegistry {
 
   /** 在会话结束时累加今日用量。 */
   #bumpTodayUsage(s) {
-    const dayKey = localDayKey(s.startedAt);
+    const dayKey = todayKey(s.startedAt);
     let data = { dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0, webSearchCount: 0, models: {} };
     try {
       const parsed = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
@@ -470,12 +475,6 @@ export class SessionRegistry {
       console.error('[sessions] 持久化失败:', error?.message ?? error);
     }
   }
-}
-
-function localDayKey(ts) {
-  const d = new Date(ts);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function triggerEntriesToText(trigger) {

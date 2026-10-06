@@ -19,10 +19,19 @@ function closeModelModal(overlay) {
 function modelModalShell({ head, body, foot = '', danger = false }) {
   const overlay = document.createElement('div');
   overlay.className = 'model-modal-overlay';
+  // 🔴 `head` 必须转义（🆕 2026-10-06 第四十六对话，第三方报告 S3 复核后落地）。
+  //    为什么只有 head 需要：`body` / `foot` 是**调用方拼好的 HTML**（表格、按钮、字段），
+  //    这里必须原样放进 innerHTML —— 那是既有约定，⛔ 别顺手也 esc 掉（会把整个弹窗变纯文本）。
+  //    而 `head` 全都是**一句话标题**，实测 27 个调用点里没有一处塞标签（grep `head: .*<` 零命中）
+  //    ⇒ 在这里统一转义既安全又一次性覆盖全部调用点。
+  //    为什么要紧：有几处 head 直接拼了 **QQ 昵称 / 群名片 / 群名 / 备注 / 表情描述**
+  //    （09-memory-dreams.js 的 4 处 + 10-settings-load.js 的 1 处），
+  //    而昵称是**群成员自己可控**的 ⇒ 一个 `<img src=x onerror=…>` 的昵称，
+  //    管理员点开"同一个人 / 编辑群友印象 / 召回预览 / 编辑备注 / 编辑表情"就执行了脚本。
   overlay.innerHTML = `
     <div class="model-modal ${danger ? 'danger' : ''}">
       <div class="model-modal-head">
-        <span>${head}</span>
+        <span>${esc(head)}</span>
         <button class="model-modal-close">×</button>
       </div>
       <div class="model-modal-body${/^\s*<div class="model-modal-left"/.test(String(body)) ? ' row' : ''}">${body}</div>

@@ -43,6 +43,33 @@ const NOTE_MAX = 200;
 
 let cache = null;                  // [{ id, at, chatKey, chatLabel, name, note, messages: [...] }]，最新在前
 let loadError = null;              // 上一次读取时"文件坏了"的原因（ENOENT 不算）
+// 🆕 2026-10-06（第四十六对话）：文件坏了就**拒绝写回**。
+//
+// 为什么必须单开一个标记：`load()` 解析失败时把 `cache` 置成 `[]`，而 `save()` 写的是
+// `{ items: load() }` —— 也就是说，"文件坏了"之后的**第一次保存**（她再存一段）
+// 会把整份相册**替换成**那一段新的。上面 26-27 行那句"⛔ 不静默清空"原来只对
+// **本次读取**成立，对**后续写回**不成立 —— 这一处补的就是那个缺口。
+// 口径与 `src/memory.js` 的"留档保命"一致：另存 `.corrupt-<时间戳>`、原文件不动、出声。
+// ⚠️ 恢复方式：把那个坏文件修好 / 移走，然后**重启应用**（`cache` 与这个标记都是模块级的）。
+let corrupt = false;
+
+/** 把读不出来的原文件**整份另存**一份（只做一次）。⛔ 绝不动原文件本身。 */
+let corruptBackedUp = false;
+function backupCorruptFile(reason) {
+  if (corruptBackedUp) return null;
+  corruptBackedUp = true;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const bak = `${FILE}.corrupt-${stamp}`;
+  try {
+    fs.copyFileSync(FILE, bak);
+    console.warn(`[核心记忆] 原文件读不出来（${reason}）—— 已另存为 ${path.basename(bak)}，原文件不会被覆盖。`);
+    return bak;
+  } catch (error) {
+    console.warn(`[核心记忆] 原文件读不出来（${reason}），而且另存备份也失败：${error?.message ?? error}`
+      + ' —— 原文件仍然不会被覆盖。');
+    return null;
+  }
+}
 
 function load() {
   if (cache) return cache;
@@ -53,6 +80,8 @@ function load() {
     if (error?.code === 'ENOENT') { cache = []; return cache; }   // 还没存过 —— 真·空
     loadError = `读不到（${error?.message ?? error}）`;
     console.warn(`[核心记忆] ${loadError}`);
+    corrupt = true;                 // 读不到 ≠ 空：⛔ 不许拿"眼前这几条"覆盖掉它
+    backupCorruptFile(loadError);
     cache = [];
     return cache;
   }
@@ -65,12 +94,20 @@ function load() {
     // 🔴 "解析失败"与"文件不存在"必须分开报（交接坑 64）：前者是坏了，后者是还没存过。
     loadError = `文件解析失败（${error?.message ?? error}）—— 已当成空，但**没有**覆盖它`;
     console.warn(`[核心记忆] ${loadError}`);
+    corrupt = true;
+    backupCorruptFile('文件解析失败');
     cache = [];
   }
   return cache;
 }
 
 function save() {
+  if (corrupt) {
+    // ⛔ 拒绝写回：写下去就是把整份相册换成内存里这几条（见上面 corrupt 那段注释）。
+    console.warn('[核心记忆] 拒绝落盘：上次读这个文件时它坏了（已另存 .corrupt 备份）——'
+      + ' 这一条只在内存里，把坏文件修好 / 移走并重启之后才会恢复写入。');
+    return false;
+  }
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const tmp = `${FILE}.tmp`;
@@ -142,7 +179,13 @@ export function saveCoreMemory({ chatKey, chatLabel = '', name = '', note = '', 
   const over = items.length - MAX_ITEMS;
   if (over > 0) items.length = MAX_ITEMS;
   const wrote = save();
-  return { ok: wrote, item, dropped: dropped || 0, truncatedByChars, evicted: Math.max(0, over), error: wrote ? undefined : '写盘失败（磁盘/权限问题），这一段没存下来' };
+  // 🆕 2026-10-06：`save()` 现在有两种"没写成"——磁盘/权限问题，**以及**"上次读它时它坏了 ⇒ 拒绝写回"。
+  //    两者的处置完全不同（后者要去修那个 .corrupt 文件），所以话必须分开说，⛔ 别一律说成磁盘问题。
+  const why = wrote ? undefined
+    : (loadError
+      ? `相册文件读不出来（${loadError}）—— 这一段**没有写盘**，原文件一个字节都没动；先处理那个 .corrupt 文件`
+      : '写盘失败（磁盘/权限问题），这一段没存下来');
+  return { ok: wrote, item, dropped: dropped || 0, truncatedByChars, evicted: Math.max(0, over), error: why };
 }
 
 /** 目录：只要索引（不带正文）—— 工具默认返回这个，省 token。 */

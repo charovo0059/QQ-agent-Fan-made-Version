@@ -3,6 +3,28 @@
 <head data-page-node-id="IsCa0pdqCFHN4aOg8ZLqCH">
   <meta charset="UTF-8" data-page-node-id="8xi2lJIfYAgLleFVuOJUJ4" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="6HjAQtPOvWz7Elp6uKOeUp" />
+  <!-- 🆕 2026-10-06（第四十六对话 · 第三方报告 M4 复核后落地）：内容安全策略。
+       守的是什么：控制台是**唯一**会渲染远程可控文本的地方（QQ 昵称/群名片/群名/备注/表情描述
+       都会进 innerHTML），而"读到东西之后把它发出去"是这类注入里最值钱的一步。
+       本策略把那一步堵死：
+         · connect-src 'self' https://kondius.cn —— fetch/XHR/EventSource 只能打控制台自己
+           **和作者自建的那个公开服务**（`16-misc.js` 的 COMMUNITY_API：意见收集 / 金句墙上下行）。
+           🔴 那个域名**必须**在这里列出来，否则「意见收集」与「金句墙」会**静默失效**
+           （按钮还在、点了没反应、只有 devtools 里一行 CSP 违规）—— 本判据第一版就漏了它，
+           是写 CSP 之前把 `https://<host>` 全量 grep 一遍才捞出来的。
+           ⚠️ 除它之外页面**没有任何**外部网络目标（已 grep：无外链脚本/样式/字体/图片）。
+         · object-src / base-uri / form-action 'none' —— 插件、<base> 劫持、表单外发
+         · img-src 'self' data: blob: —— 实测页面只有三类图：同源 `/api/stickers/…` 与 `group-qrcode.jpg`、
+           `data:`、以及本地预览用的 `blob:`（`URL.createObjectURL`）；UI 里**没有** `background-image`/`url(`
+       ⚠️ 两处**不得不**留 `'unsafe-inline'`（理由都写在这儿，别顺手删）：
+         ① 下面那段**内联**主题预置脚本（首屏防闪白/闪黑，晚一步就会闪一下）；
+         ② 表情包缩略图上的 `onerror=` 内联处理器（`10-settings-load.js`）。
+         要收紧这两处得先把它们改成外部脚本 / 事件委托 —— 那是独立的一轮，⛔ 别在这里硬上
+         （CSP 配错会让整个控制台白屏，而它正是用户每天要用的东西）。
+       ⚠️ 本应用**没有** iframe / video / audio / webfont（都 grep 过），所以 frame-src / media-src / font-src
+          按默认收紧即可。⚠️ `frame-ancestors` 在 <meta> 里**不生效**（规范只认 HTTP 响应头），
+          所以这里不写它 —— 写了也只是个记号，反而让人以为防了。 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://kondius.cn; object-src 'none'; base-uri 'none'; form-action 'none'" />
   <title>QQ Agent</title>
   <link rel="stylesheet" href="/style.css" data-page-node-id="x8F6i7W4lVVFQuDLeTBT6x" />
   <!-- ⚠️ 阶段 D（2026-09-22）：阶段 0 那条 `<link rel="stylesheet" href="/prototype.css">`

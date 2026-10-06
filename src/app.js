@@ -1543,12 +1543,52 @@ export function createApp({ log = console.log, resume = [] } = {}) {
   //    是登录态凭据，绝不能出现在 `GET /api/config` 的返回里（它会被写进前端 state、
   //    进日志、也可能被截图带出去）。⚠️ 新增项一律**追加在末尾**：`test-代理分流与隧道.mjs`
   //    有一条 `SECRET_KEY_PATTERN = /(apikey…password/` 的形状断言。
-  const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key|cookie)/i;
+  // 🆕 2026-10-06（第四十六对话 · 第三方报告复核）：再补上**单独的 token** —— 原来模式里只有
+  //    `accesstoken|access_token`，所以 `server.token`（**能直接控制这台机器的凭据**）会原样出现在
+  //    `GET /api/config` 里。核实过两件事才敢动它：
+  //      ① 控制台**不需要**它 —— 前端所有请求带的是硬编码的 `CONSOLE_MARKER`（01-utils.js），
+  //         而服务端 `keyEndpointAllowed` 只要求"带了这个头"；
+  //      ② 设置页**没有**它的输入框（只有一个注释提到它）⇒ 不存在"保存时把空串写回去"那种连带伤害
+  //         （也就是坑 178 那一类；SnowLuma 令牌就是那样被清空的，见 15-allow-saveconfig.js）。
+  //    ⚠️ 仍然**追加在末尾**，别插到中间去打乱那条形状断言。
+  const SECRET_KEY_PATTERN = /(apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key|cookie|token)/i;
   // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
   const SECRET_KEY_EXCLUDE = /from$/i;
 
   function sanitizeConfig(cfg) {
     const out = JSON.parse(JSON.stringify(cfg ?? {}));
+
+    // 🔴 第一趟：**先把盘上那些 `has*` 派生标记整树删掉**（第二趟再按真实字段现算）。
+    //
+    // 为什么必须单独一趟（🆕 2026-10-06 第四十六对话 · **真机核出来的 bug**）：
+    //   单趟时 `for (const key of Object.keys(node))` 用的是**一开始快照的键序**，而
+    //   盘上的 `hasXxx` 完全可能排在真实字段 `xxx` **之后**。线上 `imageSearch` 就是这个顺序：
+    //     … saucenaoApiKey, pixivCookie, cfBypass, hasSaucenaoApiKey, hasPixivCookie
+    //   于是：处理 `pixivCookie` ⇒ `delete` 它并生成 `hasPixivCookie = true`；
+    //        紧接着处理盘上那份**过期的** `hasPixivCookie: false` ⇒ 命中"删掉 has*"分支
+    //        ⇒ **把刚生成的那个 true 一起删了**。
+    //
+    // 实测后果（本棒在真机上量到的）：`GET /api/config` 里 `hasPixivCookie` **整个字段消失**
+    //   （不是 false，是 undefined），而设置页正是靠它决定"填没填" ⇒ **cookie 输入框显示为空**，
+    //   用户会以为自己的 p 站登录态没了。`hasSaucenaoApiKey` 同样消失。
+    //   ⚠️ 为什么既有判据没逮到：`test-pixiv登录态与cookie注入.mjs` 用的是它**自己写的**临时配置
+    //      （里面没有过期的 has*），所以那个坏键序只存在于**用户的真实配置文件**里。
+    //
+    // ⚠️ 上一版（第四十四对话）把 `continue` 改成 `delete`，只解决了"过期假值会赢"，
+    //    没解决"生成的真值会被随后的 delete 连带删掉" —— 键序依赖换了个形态又回来了。
+    //    ⇒ **两趟**才真正与键序无关（第二趟里那条 delete 分支留着当兜底，不再有副作用）。
+    const purgeSeen = new WeakSet();
+    const purgeDerived = (node) => {
+      if (!node || typeof node !== 'object' || purgeSeen.has(node)) return;
+      purgeSeen.add(node);
+      for (const key of Object.keys(node)) {
+        const value = node[key];
+        if (value && typeof value === 'object') { purgeDerived(value); continue; }
+        if (/^has/i.test(key) && typeof value === 'boolean') delete node[key];
+      }
+    };
+    purgeDerived(out);
+
     const seen = new WeakSet();
 
     const walk = (node) => {

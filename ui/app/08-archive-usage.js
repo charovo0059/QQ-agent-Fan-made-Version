@@ -828,7 +828,7 @@ function openUsageBreakdown(dim, key) {
   let activeBy = tabs[0][0];
 
   const overlay = modelModalShell({
-    head: `明细：${dimLabel} ${esc(key)}`,
+    head: `明细：${dimLabel} ${key}`,      // 🆕 2026-10-06：内层 esc 去掉了 —— modelModalShell 统一 esc(head)，留在这里会转义两遍
     body: `
       <div class="ub-wrap">
         <div class="ub-tabs" id="ub-tabs">${tabs.map(([v, l]) => `<button class="btn btn-small" data-by="${v}">${l}</button>`).join('')}</div>
