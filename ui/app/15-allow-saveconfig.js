@@ -724,13 +724,25 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   if (sec === 'onebot') {
+    // 🔴 凭据类：**没填新值就一个键都不写**（坑 178 的既定口径，⛔ 别改回"总是写这个键"）。
+    //
+    // 🆕 2026-10-06（第四十六对话）：原来写的是
+    //     `accessToken: val('#cfg-obtoken', c.snowluma?.accessToken || '').trim()`
+    //   —— 而 `sanitizeConfig` 早就把 `accessToken` 从 `/api/config` 里**删掉**了
+    //   （只留 `hasAccessToken`）⇒ `c.snowluma.accessToken` 恒为 undefined，
+    //   `val()` 拿到的是那个**永远为空**的输入框 ⇒ **每次保存 OneBot 段都把真令牌写成空串**。
+    //   它一直没爆出来，只是因为 `app.js` 的 `applyTokens` 会从 SnowLuma 自己的 runtime.json
+    //   里把令牌重新学回来（那是运气，不是设计）。
+    //   ⇒ 现在：输入框是 `******` 占位符 / 留空 ⇒ 这个键**根本不进 patch**，服务端原值保住。
+    const enteredWsToken = val('#cfg-obtoken', '').trim();
+    const enteredHttpToken = val('#cfg-obhttptoken', '').trim();
     patch.snowluma = {
       dir: val('#cfg-snowlumadir', c.snowluma?.dir || '').trim(),
       autoLaunch: chk('#cfg-snowlumalaunch', !!c.snowluma?.autoLaunch),
       wsUrl: val('#cfg-wsurl', c.snowluma?.wsUrl || '').trim(),
       httpUrl: val('#cfg-httpurl', c.snowluma?.httpUrl || '').trim(),
-      accessToken: val('#cfg-obtoken', c.snowluma?.accessToken || '').trim(),
-      httpAccessToken: val('#cfg-obhttptoken', c.snowluma?.httpAccessToken || '').trim()
+      ...(enteredWsToken && enteredWsToken !== '******' ? { accessToken: enteredWsToken } : {}),
+      ...(enteredHttpToken && enteredHttpToken !== '******' ? { httpAccessToken: enteredHttpToken } : {})
     };
   }
 

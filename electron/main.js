@@ -453,6 +453,38 @@ function createWindow(port) {
     if (/^https?:\/\//.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  // ── 主窗口的"导航守卫"与"权限处理器"（🆕 2026-10-06 第四十六对话，第三方报告 M4 复核后落地）──
+  //
+  // 守的是什么：上面那条 `setWindowOpenHandler` **只管新窗口**；而**在窗口内导航**这条路
+  //   原来**完全没有守卫**（全库 grep `will-navigate` 零命中）。控制台是唯一会渲染
+  //   远程可控文本的地方（QQ 昵称/群名片/群名/备注/表情描述都会进 innerHTML），
+  //   一旦那层被绕过，最省事的下一步就是 `location.href = 'http://…'` ——
+  //   窗口一跳走，preload 会在**远端页面**上重跑，控制台也就没了（用户只能重启）。
+  //   ⚠️ 如实说清边界：**没有发现现成的"点一下就跳走"入口**（关于页那条外链本来就带
+  //      `target="_blank"`，走的是上面那条 handler ⇒ 系统浏览器）。所以这是**纵深**，
+  //      不是补一个已经发生的 bug —— 但它是"出事后最省事的那条路"，值得先堵上。
+  const APP_ORIGIN = `http://127.0.0.1:${port}`;
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const target = String(url || '');
+    if (target.startsWith(APP_ORIGIN)) return;          // 自己那个源（含 ?/# 与刷新）：放行
+    event.preventDefault();
+    if (/^https?:\/\//.test(target)) shell.openExternal(target);   // 与"新窗口"同一处置：交给系统浏览器
+    console.warn('[window] 已拦下主窗口内的导航（并交给系统浏览器）：', target);
+  });
+
+  // 权限处理器：**默认全拒**，只放行"写剪贴板"这一条白名单。
+  //   为什么不是一律拒：控制台有 6 处 `navigator.clipboard.writeText`（复制令牌/密码/正文），
+  //   全拒会让那些「已复制」按钮**静默失效**。
+  //   为什么必须显式拒：Electron 官方安全清单第 4 条写明"**默认会自动批准所有权限请求**"，
+  //   而本应用一个都不需要（没有摄像头/麦克风/通知/定位/读剪贴板）。
+  const ALLOWED_PERMISSIONS = new Set(['clipboard-sanitized-write', 'clipboard-write']);
+  mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+    const allowed = ALLOWED_PERMISSIONS.has(String(permission));
+    if (!allowed) console.warn('[window] 已拒绝页面的权限请求：', permission);
+    callback(allowed);
+  });
+  mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission) => ALLOWED_PERMISSIONS.has(String(permission)));
   // 关窗默认缩到托盘（真正退出走托盘菜单），符合"常驻机器人"的使用习惯
   mainWindow.on('close', (event) => {
     if (!quitting && core?.getConfig().server?.closeToTray !== false) {

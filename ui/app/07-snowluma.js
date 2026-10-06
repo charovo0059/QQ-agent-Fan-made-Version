@@ -526,7 +526,7 @@ async function broadcastSend(text, btnId, { clearInput = false } = {}) {
   const split = `其中群聊 <b>${dry.counts?.groups ?? 0}</b> 个、私聊 <b>${dry.counts?.privates ?? 0}</b> 个`;
   say('');
   confirmDanger({
-    head: `群发「${esc(text)}」？`,
+    head: `群发「${text}」？`,     // 🆕 2026-10-06：内层 esc 去掉了 —— confirmDanger 把 head 原样交给 modelModalShell，那里已统一 esc(head)
     text: `将向 <b>${dry.total}</b> 个会话各发一条「${esc(text)}」<br>`
       + `<span class="muted">范围：${esc(dry.scopeLabel || '')}；${split}</span><br><br>`
       + '发出去就撤不回来了。',

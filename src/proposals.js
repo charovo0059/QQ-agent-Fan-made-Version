@@ -35,19 +35,71 @@ const KIND_LABEL = {
   other: '其他'
 };
 
-function load() {
+// ── 读失败"留档保命"（🆕 2026-10-06 第四十六对话）────────────────────────
+//
+// 原来是 `catch { /* 还没有过提案 */ }` —— "文件坏了"与"还没提过"长得一模一样，
+// 于是坏文件被当成空；下一次 `appendProposal` / `reviewProposal` 拿着空 state 去
+// `save()`，**整份提案历史（线上 26 条）被那一条新的替换掉**，而且一句日志都没有。
+// 口径与 `src/memory.js` / `src/store.js` 那一族一致：
+//   · ENOENT = 还没提过 ⇒ 正常路径，静默
+//   · 其它错误 / 形状不对 ⇒ 原文件另存 `.corrupt-<时间戳>`（**原文件不动**）+ 出声
+//   · 并且此后 **拒绝写回**（`save()` 返回 false，由调用方如实告诉模型/界面）
+let readFailed = false;
+// 备份**只做一次**：`load()` 是读路径（列表/计数/每个会话都可能调），
+// 没有这个闸的话，一个坏文件会被复制出一堆 `.corrupt-*`（本判据第一版就抓到了两份）。
+let corruptBackedUp = false;
+
+function backupCorruptFile(reason) {
+  if (corruptBackedUp) return;
+  corruptBackedUp = true;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const bak = `${FILE}.corrupt-${stamp}`;
   try {
-    const j = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+    fs.copyFileSync(FILE, bak);
+    console.error(`[proposals] ${path.basename(FILE)} 读不出来（${reason}）—— 已另存为 ${path.basename(bak)}，原文件不会被覆盖。`);
+  } catch (error) {
+    console.error(`[proposals] ${path.basename(FILE)} 读不出来（${reason}），而且另存备份也失败：${error?.message ?? error}`
+      + ' —— 原文件仍然不会被覆盖。');
+  }
+}
+
+function load() {
+  let raw;
+  try {
+    raw = fs.readFileSync(FILE, 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') { readFailed = true; backupCorruptFile(`读不到（${err?.message ?? err}）`); }
+    return { version: 1, items: [] };
+  }
+  try {
+    const j = JSON.parse(raw);
     if (j && Array.isArray(j.items)) return { version: j.version || 1, items: j.items };
-  } catch { /* 还没有过提案 */ }
+    readFailed = true;
+    backupCorruptFile('内容不是提案文件形状（items 不是数组）');
+  } catch (err) {
+    readFailed = true;
+    backupCorruptFile(`解析失败（${err?.message ?? err}）`);
+  }
   return { version: 1, items: [] };
 }
 
+/** 落盘。**返回 false = 故意没写**（这份文件读失败过 ⇒ 拒绝覆盖）或真的写失败了。 */
 function save(state) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${FILE}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8');
-  fs.renameSync(tmp, FILE);   // 先写 tmp 再 rename：半截文件比不写更糟
+  if (readFailed) {
+    console.error('[proposals] 拒绝落盘：上次读提案文件时它坏了（已另存 .corrupt 备份）——'
+      + ' 这一次的改动**没有写盘**，原文件保持不动；修好 / 移走那个文件并重启后恢复写入。');
+    return false;
+  }
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = `${FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 1), 'utf8');
+    fs.renameSync(tmp, FILE);   // 先写 tmp 再 rename：半截文件比不写更糟
+    return true;
+  } catch (error) {
+    console.error(`[proposals] 落盘失败：${error?.message ?? error}`);
+    return false;
+  }
 }
 
 const clip = (s, n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
@@ -95,7 +147,10 @@ export function appendProposal({ kind, title, detail, rationale, chatKey = '', m
   state.items.unshift(item);
   // 只保留最近 300 条（含已处理的），避免文件无限长
   if (state.items.length > 300) state.items.length = 300;
-  save(state);
+  if (save(state) === false) {
+    // 🔴 不许静默：这一次**没落盘**（文件坏了 / 磁盘错），要如实告诉她，否则她会以为提过了。
+    return { ok: false, error: '提案文件现在写不进去（它读不出来，或磁盘出错）—— 这次**没有落盘**，原文件没被改动；请管理员看一下 data/proposals.json' };
+  }
   return { ok: true, item };
 }
 
@@ -127,7 +182,9 @@ export function reviewProposal(id, { status, note = '' } = {}) {
   it.status = String(status);
   it.reviewedAt = Date.now();
   it.reviewNote = clip(note, 500);
-  save(state);
+  if (save(state) === false) {
+    return { ok: false, error: '提案文件现在写不进去（它读不出来，或磁盘出错）—— 状态**没有改动**，原文件没被动过' };
+  }
   return { ok: true, item: it };
 }
 

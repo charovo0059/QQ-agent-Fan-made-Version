@@ -549,8 +549,9 @@ export class MemoryStore {
     this.cache = new Map(); // chatKey -> Map(userId|_n_xx, member)
     // 会话 → 平台（'qq'/'wechat'）的缓存，来源是 messages/<chatKey>.json 的 source 字段。
     // 见 platformOf 的注释：不能 import store.js（循环依赖），所以这里自己读 + 缓存。
-    this._platCache = null;
-    this._platStamp = -1;
+    // 🆕 2026-10-06（第四十六对话）：缓存粒度从"整个目录一个 stamp"改成**逐文件 mtime** ——
+    //    理由见 #platformMap 里那段注释（原来那个键等于每轮唤醒都失效一次，然后全量重读）。
+    this._platFiles = new Map();   // 文件名 -> { mtimeMs, source }
     // 🆕 2026-09-21（第十对话，提案 16:45「希望记忆的增删改对本人可见/可感知」）：
     //    chatKey -> { at, items:[{name,userId,delta,at}] } —— **本次唤醒周期内**算出来的
     //    "记忆变过"的那一份。
@@ -1519,23 +1520,44 @@ export class MemoryStore {
 
   #platformMap() {
     const dir = path.join(DATA_DIR, 'messages');
-    let stamp = 0;
-    try { stamp = fs.statSync(dir).mtimeMs; } catch { /* 目录不存在 */ }
-    if (this._platCache && this._platStamp === stamp) return this._platCache;
+    // 🆕 2026-10-06（第四十六对话）：**逐文件 mtime** 缓存（原来只拿"目录 mtime"当键）。
+    //
+    // 🔴 原来那个键的问题（实测，2026-10-06）：写盘是 `tmp + rename`，而 **rename 会更新父目录
+    //    的 mtime**（本机 NTFS 实测 +66ms），于是 `messages/` 的目录 mtime 在**任何一次存档落盘**
+    //    时都会变 ⇒ 这个缓存在活跃会话里**每轮唤醒都失效一次**，接着 `readdir` + 把**每一个**
+    //    会话存档整份 `JSON.parse`（实测当前 20 个文件 / 14MB）。而它就在提示词渲染的热路径上。
+    // ⇒ 现在：每次只 `readdir` + 逐文件 `stat`（20 次 stat ≈ 1ms），**只重读 mtime 变过的那个文件**
+    //    （正常一轮只有 1 个），并清掉已经消失的文件。
+    //    ⚠️ 为什么不用"文件名集合"当键：那样会漏掉"同一个文件内容变了"（`source` 被重写）。
+    //    ⚠️ 与 `app.js` 里那条 `文件数 + 目录 mtime` 的缓存键是同一族思路，但这里要的是
+    //       "**别重读没变的文件**"，所以键必须细到文件一级。
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { /* 目录不存在 */ }
+    const live = new Set();
+    for (const f of names) {
+      const m = /^(group|private)_(\w+)\.json$/.exec(f);
+      if (!m) continue;
+      const full = path.join(dir, f);
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(full).mtimeMs; } catch { continue }
+      live.add(f);
+      const hit = this._platFiles.get(f);
+      if (hit && hit.mtimeMs === mtimeMs) continue;      // 没变 ⇒ 不重读（这就是本函数存在的理由）
+      let source = null;
+      try {
+        const j = readJson(full, null);
+        if (j && typeof j.source === 'string' && j.source) source = j.source;
+      } catch { /* 单个文件坏了不影响别人 */ }
+      this._platFiles.set(f, { mtimeMs, source });
+    }
+    for (const f of [...this._platFiles.keys()]) if (!live.has(f)) this._platFiles.delete(f);
 
     const map = new Map();
-    try {
-      for (const f of fs.readdirSync(dir)) {
-        const m = /^(group|private)_(\w+)\.json$/.exec(f);
-        if (!m) continue;
-        try {
-          const j = readJson(path.join(dir, f), null);
-          if (j && typeof j.source === 'string' && j.source) map.set(`${m[1]}:${m[2]}`, j.source);
-        } catch { /* 单个文件坏了不影响别人 */ }
-      }
-    } catch { /* 目录不存在 */ }
-    this._platCache = map;
-    this._platStamp = stamp;
+    for (const [f, v] of this._platFiles) {
+      if (!v.source) continue;
+      const m = /^(group|private)_(\w+)\.json$/.exec(f);
+      if (m) map.set(`${m[1]}:${m[2]}`, v.source);
+    }
     return map;
   }
 

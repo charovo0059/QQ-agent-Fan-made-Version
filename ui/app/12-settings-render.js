@@ -1734,8 +1734,17 @@ function renderOnebotSection(c) {
     <div class="field-row">
       <div class="field"><label>WebSocket 地址（收消息）</label><input type="text" id="cfg-wsurl" value="${esc(c.snowluma.wsUrl)}" /></div>
       <div class="field"><label>HTTP 地址（发消息）</label><input type="text" id="cfg-httpurl" value="${esc(c.snowluma.httpUrl)}" /></div>
-      <div class="field"><label>WebSocket 令牌</label><input type="password" id="cfg-obtoken" value="${esc(c.snowluma.accessToken || '')}" /></div>
-      <div class="field"><label>HTTP 令牌（与 WS 不同时填；SnowLuma 默认分开）</label><input type="password" id="cfg-obhttptoken" value="${esc(c.snowluma.httpAccessToken || '')}" /></div>
+      <!-- 🔴 凭据类字段：界面只放星号占位符，**服务端根本不下发真值**
+           （sanitizeConfig 会把 accessToken / httpAccessToken 删掉，只留 hasAccessToken）。
+           🆕 2026-10-06（第四十六对话）：原来写的是 esc(c.snowluma.accessToken || '') ——
+           而那个字段在客户端**永远是 undefined** ⇒ 输入框恒为空、用户以为"没设令牌"；
+           更糟的是保存侧原来无条件把输入框的值写回去 ⇒ **一次保存就把真令牌写成空串**
+           （只是被 app.js 的 applyTokens 从 SnowLuma 自己的 runtime.json 重新学回来，才没曝出来）。
+           ⇒ 改法与项目里其它 Key 完全一致（坑 178）：占位符 + 保存侧"没填新值就一个键都不写"。
+           ⚠️ 本段在**模板字符串**里：注释与文案里一个反引号都不许有 —— 本注释第一版在星号
+              外面套了反引号，node --check 当场报 Unexpected token（坑 186 的又一次，已改）。 -->
+      <div class="field"><label>WebSocket 令牌</label><input type="password" id="cfg-obtoken" value="${esc(c.snowluma?.hasAccessToken ? '******' : '')}" placeholder="留空保持不变" autocomplete="new-password" /></div>
+      <div class="field"><label>HTTP 令牌（与 WS 不同时填；SnowLuma 默认分开）</label><input type="password" id="cfg-obhttptoken" value="${esc(c.snowluma?.hasHttpAccessToken ? '******' : '')}" placeholder="留空保持不变" autocomplete="new-password" /></div>
     </div>
     <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>`;
 }
