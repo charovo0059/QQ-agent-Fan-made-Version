@@ -922,11 +922,11 @@ export function buildToolDefs() {
     },
     {
       name: 'send_sticker',
-      description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 从 list_stickers 获取。',
+      description: '发送一个 QQ 收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。',
       parameters: {
         type: 'object',
         properties: {
-          stickerId: { type: 'string', description: '表情 id' },
+          stickerId: { type: 'string', description: '表情的 id，或它的备注名（提示词【可用表情包】与 list_stickers 里显示的那个名字）' },
           replyToMessageId: { type: ['integer', 'string'], description: '可选：要引用的消息 id（聊天记录里的 #数字）' },
           atUserId: { type: ['integer', 'string'], description: '可选：要 @ 的 QQ 号' }
         },
@@ -934,8 +934,30 @@ export function buildToolDefs() {
       },
       async execute(ctx, args) {
         try {
-          const sticker = await ctx.stickers.find(unquoteJsonString(args.stickerId));
-          if (!sticker) return err(`找不到表情 ${args.stickerId}，请先用 list_stickers 获取有效 id`);
+          const ref = unquoteJsonString(args.stickerId);
+          // 🆕 2026-10-06（第四十七对话）：**按名字也认**。
+          //    为什么：提示词里从来不给她 id（【可用表情包】只列 localNote/desc，
+          //    stickerRules 明说"按 desc／localNote／tags 选"）⇒ 她只能传名字。
+          //    真机实测：传 id 28/28 成功，传备注名 23/23 失败、传裸数字 7/7 失败。
+          const { entry: sticker, how, candidates } = await ctx.stickers.lookup(ref);
+          if (!sticker) {
+            // 🔴 **三分类报错**（她原来只能拿到"找不到表情 X"一句，分不清是哪种坏）：
+            //    ① 名字重了 ⇒ 让她直接用 id  ② id 形态却查不到 ⇒ 这条根本没收藏/已删
+            //    ③ 其余 ⇒ 名字记错了。三种都**把她下一步该做什么说出来**。
+            const near = candidates.length
+              ? '库里最接近的：' + candidates.map((c) => `「${c.name || '(没名字)'}」= ${c.id}`).join('；') + '。'
+              : '库里现在没有名字接近的条目，用 list_stickers 看全部。';
+            if (how === 'ambiguous') {
+              return err(`「${ref}」在库里对应**不止一条**（名字重了），别猜 —— 直接用 id：${near}`);
+            }
+            // id 形态的引用（collected_… / 数字_数字…）查不到 ⇒ 不是"名字记错"，
+            // 而是"这一条现在已经不在库里"（从没收藏过，或已经被删掉了）
+            if (/^(collected_|\d+_)/.test(String(ref).trim())) {
+              return err(`库里没有这条（${ref}）—— 它可能是从没被收藏过，或者已经被删掉了。`
+                + `要对那条消息先收进来才能发（collect_sticker）；${near}`);
+            }
+            return err(`找不到表情「${ref}」：它既不是有效 id，库里也没有这个名字的条目。${near}`);
+          }
           if (!sticker.url) return err(`表情 ${sticker.id} 没有可发送的图片地址`);
           try {
             await validateImageUrl(sticker.url); // 只允许公网 http(s)，防止本地库被污染后诱导 OneBot 抓内网

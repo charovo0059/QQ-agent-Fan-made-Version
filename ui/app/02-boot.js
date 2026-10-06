@@ -52,21 +52,48 @@ async function bootLoop() {
 }
 
 
-// 「我已保存」的记忆：**按密码值记**，不按时间戳。
-// 为什么：如果只记一个时间点，下次安装又生成一个新密码时会被旧的记录吞掉，
-// 用户就再也看不到提示了。按值记 = 每个不同的密码各提示一次。
+// 「我已保存」的记忆：**按密码的指纹记** —— ⛔ 不按密码本身、也不按时间戳。
+//  · 为什么不能按时间戳：`initialPassword.at` 是**进程内的捕获时刻**（`src/app.js:422`），
+//    每次重启都会重新捕获、时间就变 ⇒ 记时间戳等于每次重启都再提示一遍（用户明明点过"我已保存"）。
+//  · 为什么不再按密码明文（2026-10-06 之前就是这么写的）：这个键**只做相等比较**，
+//    没有任何理由把一条凭据明文长期留在 localStorage 里（第四十七对话 · 用户拍板改成指纹）。
+//  · 为什么用同步哈希、不用 `crypto.subtle.digest`：后者返回 Promise，而两个调用点
+//    （`renderBanner` 的同步判断、点击回调）都在同步路径上 —— 为一个"只做相等比较"的键
+//    把开机渲染改成异步不值当。FNV-1a/64 够用：初始密码是 `randomBytes(8)` 的 16 位十六进制
+//    （≈64 位熵），拿 64 位指纹反查要 2^64 次；这里要的只是"别留明文"。
+//  ⚠️ `v1-` 前缀是有意的：老版本存进去的**明文**永远不会与指纹相等 ⇒ 升级后已确认过的用户
+//     会**再看到一次**提示条（多提示一次是安全方向；⛔ 别为了省这一次去掉前缀）。
+//     同时它给以后的算法变更留了版本位（换算法时改前缀，不与人比对旧格式）。
 const CRED_ACK_KEY = 'qqagent.credAckd';
-function credAckd(value) {
+function credFingerprint(value) {
+  const s = String(value);
+  let h = 0xcbf29ce484222325n;                 // FNV-1a 64 位：偏移基准
+  const prime = 0x100000001b3n;                //             质数
+  for (let i = 0; i < s.length; i += 1) {
+    h = BigInt.asUintN(64, (h ^ BigInt(s.charCodeAt(i))) * prime);
+  }
+  return 'v1-' + h.toString(16).padStart(16, '0');
+}
+/**
+ * 读出"已确认过的密码指纹"表。**任何异常都当成空表**，⛔ 不抛。
+ * ⚠️ 为什么把它单独拎出来：`setCredAckd` 也必须走这条读法 —— 否则存量 JSON 坏了时
+ *    `JSON.parse` 抛错、被 catch 吞掉，于是**永远写不进新的**（表现是"我已保存"点了没反应、
+ *    提示条永远点不掉，而且完全静默）。第一版就是这样，是配套判据逼出来的（第四十七对话）。
+ */
+function credAcks() {
   try {
     const seen = JSON.parse(localStorage.getItem(CRED_ACK_KEY) || '[]');
-    return Array.isArray(seen) && seen.includes(String(value));
-  } catch { return false; }
+    return Array.isArray(seen) ? seen : [];
+  } catch { return []; }
+}
+function credAckd(value) {
+  return credAcks().includes(credFingerprint(value));
 }
 function setCredAckd(value) {
   try {
-    const seen = JSON.parse(localStorage.getItem(CRED_ACK_KEY) || '[]');
-    const next = Array.isArray(seen) ? seen : [];
-    if (!next.includes(String(value))) next.push(String(value));
+    const next = credAcks();
+    const fp = credFingerprint(value);
+    if (!next.includes(fp)) next.push(fp);
     localStorage.setItem(CRED_ACK_KEY, JSON.stringify(next.slice(-10)));
   } catch { /* 存不了就下次再提示，不影响使用 */ }
 }
