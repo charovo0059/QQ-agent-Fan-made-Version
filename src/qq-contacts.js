@@ -78,25 +78,11 @@ export function replaceFriendNames(rows) {
   return { count: next.size, named: next.size, skipped, raw: list.length };
 }
 
-/**
- * 给一个 Promise 加"死线"：超时就以给定消息 reject，**定时器无论成败都会被清掉**。
- *
- * 🔴 为什么不能用 `Promise.race([p, timeout])` 那种最简写法（本项目 2026-09-29 实测踩到）：
- *   直白的写法要给定时器 `unref()`（"别吊住事件循环"——本项目在 fs.watch/定时器上的老规矩），
- *   但 **unref 过的定时器在事件循环没别的活干时根本不会触发** —— 事件循环直接空掉，
- *   于是"超时"永远不会发生：`await` 挂在那里，Node 报
- *   `Detected unsettled top-level await` 然后退出（退出码 13）。
- *   症状极具误导性：**看起来像被测代码卡住了，其实是判据自己的超时机制没生效**。
- *   ⇒ 正确做法是让定时器**保持 ref**（这样它一定会触发），并在 `finally` 里清掉它
- *     （这样正常返回时它不会把进程多吊住 `timeoutMs` 那么久）。
- */
-function withDeadline(promise, timeoutMs, message) {
-  let timer = null;
-  const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), Math.max(1, Number(timeoutMs) || 1));
-  });
-  return Promise.race([promise, deadline]).finally(() => { if (timer) clearTimeout(timer); });
-}
+// 🆕 2026-10-06（第四十六对话 · wheel-gate 复查）：`withDeadline` 原来定义在本文件里，
+// 同款实现当时还有一份在 `app.js`、这一轮又在 `tools.js` 出现了第三份 ⇒ 已抽到 `util.js`
+// 做**唯一一份**（连同那条"为什么不能用最简写法"的实测注释一起搬过去了 —— 那条注释就是
+// 这个坑的全部知识，散在多处迟早只剩一份是对的）。
+import { withDeadline } from './util.js';
 
 /**
  * 现问 OneBot 拉一次好友列表，替换名字表。

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getConfig, DATA_DIR } from './config.js';
-import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes } from './util.js';
+import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes, withDeadline } from './util.js';
 // 用量 / 花费自检（2026-09-26 第二十四对话，提案 f789b40e）：
 // **复用 `/api/status` 用的那几个函数**，不自己抄一份统计口径 —— 本项目对"两套口径"栽过跟头
 // （控制台一个数、她嘴里另一个数，事后没法对账）。`resolveApiKey` 只用于发余额请求。
@@ -2471,8 +2471,20 @@ export function toOpenAiTools(defs) {
   }));
 }
 
+/**
+ * 单工具超时（🆕 2026-10-06 第四十六对话 · 第三方报告 M6① 复核后落地）。
+ *
+ * ⚠️ 如实说清它**做不到**什么：`Promise.race` **不会取消**底层工具 —— 那个工具可能还在跑
+ *    （要真取消得让它支持 `AbortSignal`，那是各工具自己的事）。这里解决的是"**别再等了**"：
+ *    改前一个不 settle 的工具会把 session **永久**挂住、`runningChats` 不释放、
+ *    同群后续消息全被挡在门外，而且一句日志都没有。
+ * ℹ️ 真正套上限的是 `util.js` 的 `withDeadline`（**唯一一份**超时实现；那条"定时器不能 unref、
+ *    否则叫不醒 await"的实测结论写在它上面 —— ⛔ 别在这儿再写一份）。
+ */
+const TOOL_TIMEOUT_MS = 120_000;
+
 /** 找到并执行一个工具调用。返回 { content, isError }，content 为 string 或 parts 数组。 */
-export async function executeTool(defs, ctx, name, argsJson) {
+export async function executeTool(defs, ctx, name, argsJson, { timeoutMs = TOOL_TIMEOUT_MS } = {}) {
   const def = defs.find((d) => d.name === name);
   if (!def) return { content: `错误：未知工具 ${name}`, isError: true };
   let args = {};
@@ -2483,7 +2495,12 @@ export async function executeTool(defs, ctx, name, argsJson) {
     return { content: `错误：工具 ${name} 的参数不是合法 JSON：${String(raw).slice(0, 200)}`, isError: true };
   }
   try {
-    return await def.execute(ctx, args ?? {});
+    return await withDeadline(
+      def.execute(ctx, args ?? {}),
+      timeoutMs,
+      `工具 ${name} 超过 ${Math.round(timeoutMs / 1000)} 秒没有返回 —— 已放弃等它，本轮继续`
+        + '（⚠️ 只是不再等：副作用可能已经发生，工具本身也未必真的停了）'
+    );
   } catch (error) {
     return { content: `错误：${error?.message ?? error}`, isError: true };
   }
