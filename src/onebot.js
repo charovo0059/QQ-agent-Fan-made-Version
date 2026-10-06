@@ -47,6 +47,68 @@ function isTimeoutError(error) {
   return name === 'TimeoutError' || /aborted due to timeout|operation was aborted/i.test(msg);
 }
 
+// ── 入站去重 + 静默判定（🆕 2026-10-06 第四十六对话 · 第三方报告 S5 复核后落地）──────────
+//
+// 报告说这两条缺了，**核实成立**：
+//   · 没有存活检测 ⇒ "假在线"（连接对象还在、但事件一个都收不到），机器人长时间丢消息且无告警；
+//   · 没有入站 `message_id` 去重 ⇒ 协议端重投 / 重连重放时，同一条消息被处理两次
+//     （重复调模型 + 重复发言）。
+//
+// 🔴 为什么抽成**独立类 / 纯函数**：判据要能**真跑**它们，而不是起一个真的 WS ——
+//    这也是本项目"判据要能验真实现"的一贯要求。
+// ⚠️ 报告建议的三件事里，**离线消息队列有意不抄**（它自己也这么说）：`sender.js` 已有失败登记与重发
+//    （`data/send-failures.json`），再加一层会出现"两套失败账"，违反本项目"单一口径"的原则。
+
+/** 入站消息 id 的 LRU（Map 的插入序 = 时间序，从头部淘汰）。 */
+export class InboundDedupe {
+  #map = new Map();
+  #max;
+  #ttlMs;
+  constructor({ max = 2000, ttlMs = 10 * 60 * 1000 } = {}) {
+    this.#max = Math.max(1, Number(max) || 2000);
+    this.#ttlMs = Math.max(1000, Number(ttlMs) || 600000);
+  }
+  /** true = 这条**见过**（调用方应当丢掉）；首次见到返回 false 并记账。 */
+  seen(id, now = Date.now()) {
+    const key = String(id);
+    // 先按时间把过期的从头清掉（插入序就是时间序 ⇒ 遇到没过期的就能停）
+    for (const [k, ts] of this.#map) {
+      if (now - ts <= this.#ttlMs) break;
+      this.#map.delete(k);
+    }
+    if (this.#map.has(key)) return true;
+    this.#map.set(key, now);
+    while (this.#map.size > this.#max) this.#map.delete(this.#map.keys().next().value);
+    return false;
+  }
+  get size() { return this.#map.size; }
+  clear() { this.#map.clear(); }
+}
+
+/**
+ * 静默判定的**纯函数**（把"什么时候**不**该重连"写死在一处，判据好钉）。
+ * @returns {{reconnect: boolean, reason: string}}
+ */
+export function judgeSilence({ heartbeatCount, heartbeatGapMs, lastEventAtMs, nowMs, minLimitMs = 90000 }) {
+  // 🔴 关键的安全阀：**没见过 ≥2 次心跳就绝不判定**。
+  //    有些 OneBot 实现（或某些配置）根本不推心跳；不设这道闸的话，"静默检测"会变成
+  //    "每 90 秒无脑重连一次"，把好端端的连接反复掐断 —— **比原来的问题更糟**。
+  if (!(Number(heartbeatCount) >= 2)) {
+    return { reconnect: false, reason: '还没见到 ≥2 次心跳 ⇒ 不做静默判定（服务端可能根本不发心跳）' };
+  }
+  const gap = Math.max(0, Number(heartbeatGapMs) || 0);
+  const limit = Math.max(Number(minLimitMs) || 90000, gap * 3);   // 3 倍心跳间隔，且不低于 90s
+  const silent = Math.max(0, Number(nowMs) - Number(lastEventAtMs));
+  if (silent <= limit) {
+    return { reconnect: false, reason: `静默 ${Math.round(silent / 1000)}s ≤ 上限 ${Math.round(limit / 1000)}s` };
+  }
+  return {
+    reconnect: true,
+    reason: `静默 ${Math.round(silent / 1000)}s > 上限 ${Math.round(limit / 1000)}s`
+      + `（见过 ${heartbeatCount} 次心跳、间隔约 ${Math.round(gap / 1000)}s ⇒ 链路多半已经死了）`
+  };
+}
+
 export class OneBotClient {
   constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
     this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
@@ -64,9 +126,18 @@ export class OneBotClient {
     this.statusListeners = new Set();
     this.reconnectDelayMs = RECONNECT_MIN_MS;   // 退避当前档位（连上一次就复位）
     this.reconnectTimer = null;                 // 待重连的定时器句柄（close() 要能真的取消它）
+    // 🆕 S5：存活信号（`#lastEventAt` 初值给"现在"，免得刚连上就被判成静默）
+    this.#lastEventAt = Date.now();
   }
 
   #closedByUs;
+  // 🆕 S5：入站去重 + 心跳统计（都只在这个实例里，不跨连接共享）
+  #inbound = new InboundDedupe();
+  #lastEventAt = 0;     // 最近一次**收到任何事件**的时刻
+  #hbCount = 0;         // 见过几次心跳（`post_type === 'meta_event'`）
+  #hbPrevAt = 0;        // 上一次心跳的时刻（用来量间隔）
+  #hbGapMs = 0;         // 心跳间隔估计（最近两次心跳之差）
+  #livenessTimer = null;   // 每 30 秒看一眼"还活着吗"（unref，不吊住事件循环）
 
   onStatus(fn) {
     this.statusListeners.add(fn);
@@ -115,6 +186,52 @@ export class OneBotClient {
    *    `close()` 之后只要还处在那 3 秒窗口里，它就会**把连接重新拉起来**
    *    （症状："我明明关了，它自己又连上了"）。现在统一走这里，并且句柄留着、`close()` 真的能取消。
    */
+  // ── 🆕 S5：存活性巡检（每 30 秒看一眼"还活着吗"）────────────────────────────
+  /** 记一次"链路还活着"；`meta_event` 额外用来量心跳间隔。 */
+  #noteEvent(event) {
+    const now = Date.now();
+    this.#lastEventAt = now;
+    if (event?.post_type === 'meta_event') {
+      // ⚠️ 各种实现给的 `meta_event_type` 不一样（heartbeat / lifecycle / …）⇒ **一律当心跳**。
+      if (this.#hbPrevAt) this.#hbGapMs = now - this.#hbPrevAt;
+      this.#hbPrevAt = now;
+      this.#hbCount += 1;
+    }
+  }
+
+  #startLiveness() {
+    this.#stopLiveness();
+    // ⚠️ unref：别拿它吊住事件循环（本项目在 fs.watch / 300 秒定时器上踩过两次）
+    this.#livenessTimer = setInterval(() => this.#checkLiveness(), 30000);
+    if (typeof this.#livenessTimer.unref === 'function') this.#livenessTimer.unref();
+  }
+
+  #stopLiveness() {
+    if (this.#livenessTimer) { clearInterval(this.#livenessTimer); this.#livenessTimer = null; }
+  }
+
+  /**
+   * 巡检：判定"假在线"（连接对象还在、事件一个都收不到）并主动重连。
+   * 判定规则全在 `judgeSilence` 那个纯函数里（判据直接真跑它，⛔ 别把规则抄回这里）。
+   */
+  #checkLiveness() {
+    const verdict = judgeSilence({
+      heartbeatCount: this.#hbCount,
+      heartbeatGapMs: this.#hbGapMs,
+      lastEventAtMs: this.#lastEventAt,
+      nowMs: Date.now()
+    });
+    if (!verdict.reconnect) return;
+    console.warn(`[onebot] 判定链路已死：${verdict.reason} ⇒ 主动重连`);
+    const dead = this.socket;
+    // 先作废旧 socket：它迟到的 close / message 都会被 `isCurrent` 挡掉（不会重复重连、也不重复处理事件）
+    this.socket = null;
+    this.#stopLiveness();
+    try { dead?.terminate ? dead.terminate() : dead?.close(); } catch { /* ignore */ }
+    this.#setStatus(false);
+    this.#scheduleReconnect();
+  }
+
   #scheduleReconnect() {
     if (this.#closedByUs) return;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -155,6 +272,12 @@ export class OneBotClient {
       this.lastConnectError = '';
       this.#setStatus(true);
       this.reconnectDelayMs = RECONNECT_MIN_MS;   // 连上了 ⇒ 退避复位（下次断线仍从 3s 起）
+      // 🆕 S5：新连接按"刚活过"起算，并启动存活性巡检（见 #checkLiveness）。
+      // ⚠️ 必须在这里重置 `#lastEventAt`/`#hbPrevAt`：否则重连之后第一次巡检会拿着**旧连接**的
+      //    静默时长立刻又判一次"死了"，变成重连风暴。
+      this.#lastEventAt = Date.now();
+      this.#hbPrevAt = 0;
+      this.#startLiveness();
       try {
         this.selfInfo = await this.call('get_login_info');
       } catch (error) {
@@ -166,10 +289,21 @@ export class OneBotClient {
       let event = null;
       try { event = JSON.parse(String(data)); } catch { return; }
       if (!event || typeof event !== 'object') return;
+      // 🆕 S5-①：任何事件都算"链路还活着"；`meta_event` 额外用来量心跳间隔。
+      this.#noteEvent(event);
+      // 🆕 S5-②：入站去重 —— 协议端重投 / 重连重放同一条消息时不重复处理，且**出声**。
+      if (event.post_type === 'message' && event.message_id !== undefined && event.message_id !== null) {
+        if (this.#inbound.seen(event.message_id)) {
+          console.warn(`[onebot] 丢掉重复入站消息（message_id=${event.message_id}）——`
+            + ' 协议端重投或重连重放；同一条只处理一次（防重复调模型 + 重复发言）');
+          return;
+        }
+      }
       try { this.onEvent(event); } catch (error) { console.error('[onebot] 事件处理出错:', error); }
     });
     socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
+      this.#stopLiveness();
       this.#setStatus(false);
       this.#scheduleReconnect();      // 内部会看 #closedByUs（`close()` 之后不再重连）
     });
@@ -185,6 +319,7 @@ export class OneBotClient {
 
   close() {
     this.#closedByUs = true;
+    this.#stopLiveness();          // 🆕 S5：巡检也跟着停（不然它到点还会去判一次、再去重连）
     // 🆕 2026-09-24：把**待重连的定时器**也取消掉。不然它到点点火又去连一次，
     // 而 `close()` 的语义是"我这次真的不要它了"（原来只有 close 事件那条路看了 #closedByUs，
     // 同步抛异常那条路没看 ⇒ "关了又自己连上"）。

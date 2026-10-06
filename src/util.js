@@ -4,6 +4,32 @@ export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+/**
+ * 给一个 Promise 加"死线"：超时就以给定消息 reject，**定时器无论成败都会被清掉**。
+ *
+ * 🔴 为什么不能用 `Promise.race([p, timeout])` 那种最简写法（本项目 2026-09-29 实测踩到）：
+ *   直白的写法要给定时器 `unref()`（"别吊住事件循环"——本项目在 fs.watch/定时器上的老规矩），
+ *   但 **unref 过的定时器在事件循环没别的活干时根本不会触发** —— 事件循环直接空掉，
+ *   于是"超时"永远不会发生：`await` 挂在那里，Node 报
+ *   `Detected unsettled top-level await` 然后退出（退出码 13）。
+ *   症状极具误导性：**看起来像被测代码卡住了，其实是判据自己的超时机制没生效**。
+ *   ⇒ 正确做法是让定时器**保持 ref**（这样它一定会触发），并在 `finally` 里清掉它
+ *     （这样正常返回时它不会把进程多吊住 `timeoutMs` 那么久）。
+ *
+ * ℹ️ 2026-10-06（第四十六对话 · wheel-gate 复查）：这段实现原来只住在 `qq-contacts.js` 里，
+ *    而 `app.js` 另有一份同款、这一轮我又在 `tools.js` 写了第三份 ⇒ 抽到这里做**唯一一份**。
+ *    ⚠️ 同一个坑那一轮又被踩了一次（给工具超时套定时器时顺手 unref 了）——
+ *    可见"注释写在调用点旁边"不如"只有一份实现"管用。
+ *    ⛔ 要加新的"超时/死线"就调这里，别再写第四份。
+ */
+export function withDeadline(promise, timeoutMs, message) {
+  let timer = null;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(1, Number(timeoutMs) || 1));
+  });
+  return Promise.race([promise, deadline]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
 export function randInt(min, max) {
   const lo = Math.ceil(Math.min(min, max));
   const hi = Math.floor(Math.max(min, max));
