@@ -109,6 +109,33 @@ function mediaTag(media, text = '') {
   return parts.length ? `[${parts.join(' ')}]` : '';
 }
 
+/**
+ * 把"内联在正文里的元信息"摘出来（2026-10-06 第四十七对话 · 用户拍板 B8a）。
+ *
+ * 🔴 为什么必须动它（不是锦上添花）——**回复关系与合并转发都不是结构化字段**：
+ *   · `m.reply` 这个字段**存在但恒为 null**（唯一写入点 `app.js` 的 `appendIncoming` 没传它）；
+ *   · 真实关系/摘要被 `onebot.js` **内联进 `text`**：
+ *     `[引用 昵称：正文 #被引用id]`（`onebot.js:844` 生成，随消息段顺序出现，实际都在开头）
+ *     与 `[合并转发 共N条]`（`onebot.js:934`，是**首行**）。
+ *   而 `#digest` 原来是"**先拼接、后 `.slice(0, PER_MSG_CUT)`**" ⇒ 这两段标记先吃掉几十个字的
+ *   预算，正文被切在半句上 —— 而"回想今天"最需要的恰恰是正文。
+ *   ⇒ 摘出来单独放（整段保留、⛔ 不截断），正文再按预算切。
+ *
+ * ⛔ **不新增采集、不碰存档**：数据本来就在 `text` 里（`media` 张数另外由 `mediaTag` 给）。
+ * ⚠️ 只认**开头**那一段：万一标记出现在正文中间，就当它是正文的一部分（⛔ 不做全文替换，
+ *    那会把"引用别人说的那句 [引用 …]"这种正常正文也改掉）。
+ */
+function splitInlineMeta(raw) {
+  let t = String(raw ?? '');
+  let quote = '';
+  let fwd = '';
+  const q = t.match(/^\[引用[^\]]*\]\s*/);
+  if (q) { quote = q[0].trim(); t = t.slice(q[0].length); }
+  const f = t.match(/^\[合并转发[^\]]*\]\s*/);
+  if (f) { fwd = f[0].trim(); t = t.slice(f[0].length); }
+  return { quote, fwd, body: t };
+}
+
 const SYSTEM_PROMPT = [
   '现在是深夜，群里都安静了。没有人跟你说话，你也不用回复任何人。',
   '你要写一条只给管理员看的短笔记 —— 像睡前随手记的一笔。',
@@ -389,10 +416,13 @@ export class Dreamer {
    */
   whyNot() {
     const cfg = getConfig();
-    if (cfg.dream?.enabled !== true) return '梦里功能关着';
+    // ⚠️ 面向**用户界面**的拒绝原因 —— 2026-10-06（第四十七对话 · 用户拍板 B8a）统一改口成「日记」：
+    //    用户原话"现在更像在写日记"。⛔ 配置键 `dream.*` 与工具名 `dream_recall` 都**不改**
+    //    （改键要迁移、改工具名要动约 15 条断言，收益不抵代价）。
+    if (cfg.dream?.enabled !== true) return '日记功能关着';
     if (!String(cfg.api?.model || '').trim()) return '还没设置模型';
-    if (this.running) return '正在做梦';
-    if (this.state.lastDay === todayKey()) return '今天已经做过梦了';
+    if (this.running) return '正在写日记';
+    if (this.state.lastDay === todayKey()) return '今天已经写过日记了';
     if (!this.#inWindow()) return `还没到夜里（设定 ${cfg.dream?.startHour ?? 2} 点 ~ ${cfg.dream?.endHour ?? 6} 点）`;
     const idle = this.#idleMinutes();
     const need = Math.max(0, Number(cfg.dream?.minIdleMinutes ?? 60));
@@ -451,6 +481,9 @@ export class Dreamer {
       for (const m of msgs) {
         const text = sanitize(m.text);
         const tag = mediaTag(m.media, text);    // 只在能补充信息时才加，见 mediaTag 注释
+        // 🆕 2026-10-06（第四十七对话 · 用户拍板 B8a）：把内联的**回复关系**与**合并转发摘要**
+        //    摘出来单独成列 —— 原来它们会被 `PER_MSG_CUT` 切在半句上（见 splitInlineMeta 注释）。
+        const { quote, fwd, body } = splitInlineMeta(text);
         if (!text && !tag) continue;
         const t = new Date(m.ts);
         rows.push({
@@ -458,8 +491,10 @@ export class Dreamer {
           hh: String(t.getHours()).padStart(2, '0'),
           mm: String(t.getMinutes()).padStart(2, '0'),
           who: m.self ? '我' : (sanitize(m.senderName) || String(m.senderId ?? '?')),
-          // 正文与媒体标记拼在一起：`[图片×2] 配文…`
-          text: [tag, text].filter(Boolean).join(' ').slice(0, PER_MSG_CUT)
+          // 顺序：媒体张数 → 引用（回的是谁）→ 合并转发摘要 → 正文。
+          // ⚠️ **只对正文本体裁剪**：三个标记整段保留（它们是"元信息"，
+          //    切一半的 `[引用 甲：说了一半` 比没有更坏）。
+          text: [tag, quote, fwd, body.slice(0, PER_MSG_CUT)].filter(Boolean).join(' ')
         });
       }
       if (!rows.length) continue;
@@ -532,7 +567,7 @@ export class Dreamer {
    */
   async runNow({ force = false } = {}) {
     const cfg = getConfig();
-    if (this.running) return { ok: false, reason: '正在做梦，等这次做完' };
+    if (this.running) return { ok: false, reason: '正在写日记，等这次写完' };
     if (!force) {
       const why = this.whyNot();
       if (why) return { ok: false, reason: why };

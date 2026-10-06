@@ -148,15 +148,14 @@ function memoryRules() {
   //   ⚠️ **为什么不写进 `toolProtocol()`**：那一段**线上有覆盖版**（QQ 侧 512 字，
   //      实测 `overrideCounts.qq = 5`）⇒ 改内置版对 QQ 侧**完全不生效**（改了个寂寞）。
   //      而 `memoryRules` 这一段**没有被覆盖** ⇒ 改这里 QQ / 微信两侧都立刻生效。
-  //   ⚠️ 两句都**跟着各自的开关走**（与上面 get_my_self_elsewhere 同一条纪律：
-  //      关掉功能就别在提示词里教她调）—— 默认开 ⇒ 判定写 `!== false`，写反的症状是"没这个键就整句不见"。
   //   ⚠️ 改这两行要同步登记 `测试-现行\test-skills基础设施.mjs` 的 ADDED_LINES（见该文件注释）。
+  //   🔴 2026-10-06 追改（同一天 · 用户拍板 B2）：**核心记忆那句不再跟着开关走** ——
+  //      `coreMemory.enabled` 这个键**已废弃**（用户："记忆系统没必要做阻拦"），改常开。
+  //      原来这里写的是 `if (getConfig()?.coreMemory?.enabled !== false)` ⇒ 去掉外壳、无条件 push。
   if (getConfig()?.dream?.enabled !== false) {
-    lines.push('你深夜写的那些「梦」（只给管理员看的笔记）用 dream_recall 才翻得到：想看某一天传 day，想找某个话题或某个人传 keyword，传 currentChat=true 就只看当前这个会话那一章（推荐带上它，免得把别处的事拿到这里说）。');
+    lines.push('你深夜写下的那些「日记」（只给管理员看的笔记）用 dream_recall 才翻得到：想看某一天传 day，想找某个话题或某个人传 keyword，传 currentChat=true 就只看当前这个会话那一章（推荐带上它，免得把别处的事拿到这里说）。');
   }
-  if (getConfig()?.coreMemory?.enabled !== false) {
-    lines.push('「核心记忆」是你自己挑出来、原样留着的那几段（像相册）；存错了或者不想留了，用 delete_core_memory 删掉。');
-  }
+  lines.push('「核心记忆」是你自己挑出来、原样留着的那几段（像相册）；存错了或者不想留了，用 delete_core_memory 删掉。');
   return lines.join('\n');
 }
 
@@ -1065,9 +1064,9 @@ export function buildUserPrompt(ctx) {
 
   // ② 表情包目录：只在表情库变化时才变（用一次表情可能让常用榜重排）
   // 活跃度档位已并入系统提示的【表情包策略】段，这里不再重复引导。
-  const stickerBlock = cfg.sticker?.enabled === false
-    ? ''
-    : (buildStickerContext(ctx.stickerEntries || [], Number(cfg.sticker?.promptMaxStickers) || 10) || '');
+  // 🆕 2026-10-06（第四十七对话 · 用户拍板 B3①）：`sticker.enabled` 那道闸**已废弃**
+  //    —— 表情包常开（"表情属于聊天系统，随便她发"）⇒ 这里回归"有目录就注入"。
+  const stickerBlock = buildStickerContext(ctx.stickerEntries || [], Number(cfg.sticker?.promptMaxStickers) || 10) || '';
 
   // ③ 记忆：只注入与本次对话相关群友的印象（触发者 + 最近活跃成员），控制 token
   const relevantUserIds = new Set();

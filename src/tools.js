@@ -721,8 +721,6 @@ export function refineIllustrationList(list, { require = 'any', onlySafe = false
  * @param {object} cfg 当前配置
  * @param {{visionEnabled?: boolean}} opts 视觉是否可用（由 orchestrator 结合模型探测结果算出来）
  */
-/** 核心记忆那一组工具（开关一次管四个，别漏）。 */
-const CORE_MEMORY_TOOLS = new Set(['save_core_memory', 'list_core_memories', 'read_core_memory', 'delete_core_memory']);
 
 export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
   const searchEnabled = cfg?.webSearch?.enabled !== false;
@@ -756,9 +754,13 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
     //       症状是"界面上关了它还在跑"（本项目记作"接线正确 ≠ 行为改变"）。
     //       `test-余额与用量自检.mjs` 里有一条变异验证专门钉这个方向。
     if (d.name === 'get_my_usage' && cfg?.usage?.enabled !== true) return false;
-    // 🆕 2026-09-26 第二十五对话（提案 c7486672）：核心记忆是**默认开**的（她提的、已采纳），
-    //    所以判定是 `!== false` —— 与上面那条默认关的写法**有意相反**，两边都别改错方向。
-    if (CORE_MEMORY_TOOLS.has(d.name) && cfg?.coreMemory?.enabled === false) return false;
+    // 🔴 2026-10-06（第四十七对话 · 用户拍板 B2）：这里原来有一道核心记忆的闸
+    //    （`CORE_MEMORY_TOOLS` 那个 Set 一次管四个工具），**已删**。
+    //    用户拍板的是"**把开关删掉**"而不是"把它修成硬开关" —— 原话："记忆系统没必要做阻拦"。
+    //    ⇒ 四个工具（save_core_memory / list_core_memories / read_core_memory / delete_core_memory）
+    //      **常开**，这里不再有分支。
+    //    ⚠️ 老 `config.json` 里残留的 `coreMemory.enabled:false` **一律视为开**（全仓已无读取点）。
+    //    ⚠️ `.inject` / `.injectMaxChars` / `.crossChat` 仍然有效（它们管"注入什么"，不是"允不允许"）。
     // 🆕 2026-10-04（第四十对话 · 批 3，方案 §3.2）：「别处的我」是**默认开**的开关
     //    ⇒ 判定写 `=== false`（与上面 usage 那条**有意相反**，别改错方向）。
     //    ⚠️ 提示词里那一句跟着这个开关走（见 `prompt.js` 的 memoryRules）—— 关掉工具就不能再提它。
@@ -1973,8 +1975,11 @@ export function buildToolDefs() {
       }
     },
     {
+      // ⚠️ 工具名保持 `dream_recall`（2026-10-06 第四十七对话 · 用户拍板 B8a 时明确"改名与否
+      //    由执行者按代价判断"）：它在 ~15 条断言与存档里出现过，改名要动一大片；
+      //    而**面向她的说法**已经统一成「日记」（用户原话："现在更像在写日记"）。
       name: 'dream_recall',
-      description: '翻你自己的「梦」—— 深夜安静时你回想当天写下的笔记（只给管理员看的那些）。'
+      description: '翻你自己的「日记」—— 深夜安静时你写下当天的事（只给管理员看的那些笔记）。'
         + '想看某一天就传 day；想找某个话题/某个人的事就传 keyword。'
         + '**传 currentChat=true 时只给你当前这个会话那一章 + 你自己的总感想** —— '
         + '这样你就不会看到别的群/私聊里的事（那些本来也不该拿到这里说）。'
@@ -1998,7 +2003,7 @@ export function buildToolDefs() {
           chatKey: args.currentChat === true ? String(ctx.chatKey || '') : ''
         });
         if (!brief.total) {
-          return ok({ notes: [], note: '你还没有写过任何梦（`data/dreams.json` 里是空的）。这不是错误，只是还没到能做的时候。' });
+          return ok({ notes: [], note: '你还没有写过任何日记（`data/dreams.json` 里是空的）。这不是错误，只是还没到能做的时候。' });
         }
         if (!brief.matched) {
           return ok({

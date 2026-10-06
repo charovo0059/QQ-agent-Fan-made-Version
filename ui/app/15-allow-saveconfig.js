@@ -653,7 +653,12 @@ async function saveConfig({ quiet = false } = {}) {
     };
     patch.sticker = {
       ...c.sticker,
-      enabled: chk('#cfg-sticker', c.sticker?.enabled !== false),
+      // 🆕 2026-10-06（第四十七对话 · 用户拍板 B3①）：**不再写 `enabled`** ——
+      //    那个键已废弃（表情包常开，界面上也没有对应控件了）。
+      //    ⚠️ `...c.sticker` 保留：它是"这一节没渲染的键不被一次保存抹掉"的保险
+      //       （`promptMaxStickers` / `collectEnabled` / `maxCollectPerHour` 都靠它活着）。
+      //    老 config.json 里残留的 `enabled:false` 会跟着 `...c.sticker` 原样回写、
+      //    但**没有任何读取点** ⇒ 一律视为开（deepMerge 不会自动删键）。
       // 先取界面实时值（没这个控件时才退回已保存配置），再钳到 0~3
       encourage: Math.min(3, Math.max(0, Number(
         $('#cfg-sticker-encourage') ? $('#cfg-sticker-encourage').value : (c.sticker?.encourage ?? 1)
