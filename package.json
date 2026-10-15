@@ -53,8 +53,8 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^26.15.3"
+    "electron": "^44.7.2",
+    "electron-builder": "^26.17.0"
   },
   "license": "MIT",
   "author": "Kondius",

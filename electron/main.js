@@ -444,8 +444,17 @@ function createWindow(port) {
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error('[window] 渲染进程崩溃:', JSON.stringify(details));
   });
-  mainWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
-    if (level >= 2) console.log(`[renderer] ${message} (${sourceId}:${line})`);
+  // 🆕 2026-10-16（第四十九对话 · Electron 33 → 44 升级）：**必须**用新签名。
+  //   35.0 起 'console-message' 的第一个参数变成**单个 details 对象**
+  //   （{ message, level, lineNumber, sourceId, frame }），旧的 (_e, level, message, line, sourceId)
+  //   虽标 Deprecated 但仍会下发 ⇒ 只是**悄悄变味**：新签名里 `level` 是**字符串**
+  //   （'verbose' | 'info' | 'warning' | 'error'），旧的 `level >= 2` 数值比较**永远为 false**
+  //   ⇒ 症状是"渲染进程报错再也进不了主进程日志"，且**不报任何错**（静默失效）。
+  mainWindow.webContents.on('console-message', (details) => {
+    const level = String(details?.level ?? '');
+    if (level === 'warning' || level === 'error') {
+      console.log(`[renderer] ${details.message} (${details.sourceId}:${details.lineNumber})`);
+    }
   });
   mainWindow.loadURL(`http://127.0.0.1:${port}/`).catch((error) => console.error('[window] loadURL 失败:', error));
   // 外部链接（金句墙/意见墙/上传成功提示里的网址等）一律交给系统默认浏览器，不在应用内弹新窗口
