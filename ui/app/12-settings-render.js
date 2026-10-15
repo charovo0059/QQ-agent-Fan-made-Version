@@ -196,6 +196,20 @@ function renderApiSection(c) {
       <div class="hint" id="price-feed-status" style="margin-top:4px"></div>
     </div>
 
+    <!-- ── 余额/额度耗尽（HTTP 402）时给她看的那句话（2026-10-16 第五十一对话 · 用户拍板"甲"）──
+         起因：402 的报错原文是「模型 API HTTP 402：{…500 字的原始 JSON…}」，她看到的是一坨 JSON。
+         这里把它做成**她能自己改**的文案（配置键 api.balanceHint，留空 = 内置默认）。
+         ⚠️ 说明走既有的两级载体（折叠 hint-more）—— 本页的棘轮判据钉着"常显 .hint 只减不增"，
+            ⛔ 这里绝不能加一处常显 .hint。
+         ⚠️⚠️ 这段注释**在模板字符串里面**：⛔ 注释里不许出现反引号（会把模板字符串提前截断 ⇒
+            "Unexpected identifier" 语法错，实测本段第一版就踩了）。 -->
+    <div class="field" style="margin-top:12px"><label>余额耗尽时（HTTP 402）显示的那句话</label>
+      <textarea id="cfg-balance-hint" rows="2" placeholder="留空 = 用内置默认" style="width:100%;box-sizing:border-box;font-size:12px">${esc(c.api.balanceHint || '')}</textarea>
+      <details class="hint-more"><summary>这句话什么时候出现？</summary>
+        <div class="hint-more-body">只在<b>上游返回 HTTP 402</b>（余额 / 额度耗尽）时出现 —— 它就是她在会话详情里看到的那句报错。⚠️ 状态码与上游原文仍会附在它后面（排查要用）；其余错误码（401 / 400 / 404…）的原文<b>一个字都不改</b>。输入框里预填的是内置文案，<b>清空</b>就回到内置那句。</div>
+      </details>
+    </div>
+
     <!-- 当前模型的价格卡片：切换模型时内容跟着变 -->
     <div class="price-card" id="model-price-card">
       <div class="pc-head">

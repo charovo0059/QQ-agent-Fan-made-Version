@@ -1,6 +1,6 @@
 // OpenAI 兼容 Chat Completions 客户端（非流式）。
 // 支持工具调用、usage 统计、可自选模型 —— 这是与 DSH 解耦后的"大脑"接口。
-import { getConfig } from './config.js';
+import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { resolveModelPrice, priceAt } from './model-prices.js';
 import { skillManager } from './skills/manager.js';
 
@@ -164,7 +164,10 @@ export function isRetryableError(error) {
   if (/aborted|中止|已取消|cancel/i.test(msg)) return false;
 
   // 明确的客户端错误：重试也不会变好，只会白烧额度
-  if (/HTTP\s*(401|400|403|404|405|409|413|422)/i.test(msg)) return false;
+  // ⚠️ 402 是**显式**加进来的（2026-10-16 第五十一对话）：余额/额度耗尽重试也是白烧额度，
+  //    而 402 的报错文案现在是用户可改的自由文本（api.balanceHint）⇒ 不能只靠"落末尾兜底"，
+  //    否则她填的文案里只要出现"限流""quota"这类词，这里就会误判成可重试。
+  if (/HTTP\s*(401|400|402|403|404|405|409|413|422)/i.test(msg)) return false;
   if (/unauthorized|forbidden|invalid api.?key|incorrect api.?key/i.test(msg)) return false;
 
   // 明确的暂时性故障
@@ -414,6 +417,17 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     // 回报账号池：失败要降权，限流还要冷却
     if (poolAccountId) {
       reportPoolFeedback({ accountId: poolAccountId, ok: false, status: res.status, error: res.text.slice(0, 300) });
+    }
+    // ── 402（余额/额度耗尽）单独走一条：把 500 字的原始 JSON 换成**她自己能改**的一句话 ──
+    // 2026-10-16 第五十一对话 · 用户拍板"甲"。⛔ 除 402 外**一个状态码都不动**：
+    // 401/400/404… 的原文（网关到底回了什么）对排查更有用，改成人话反而丢信息。
+    // ⚠️ 状态码与上游原文**必须保留**：提示可以人话，排查依据不能丢。
+    // ⚠️ 为什么非要把 402 显式写进 isRetryableError 的"不重试"名单（见下）：
+    //    balanceHint 是她自己填的自由文本，万一里面出现"限流"/"quota"/"HTTP 5xx"之类字样，
+    //    就会掉进那条兜底档被当成暂时性故障**重试**（白烧额度）。
+    if (res.status === 402) {
+      const hint = String(getConfig()?.api?.balanceHint ?? '').trim() || DEFAULT_CONFIG.api.balanceHint;
+      throw new Error(`${hint}（HTTP 402｜上游原文：${res.text.slice(0, 500)}）`);
     }
     throw new Error(`模型 API HTTP ${res.status}：${res.text.slice(0, 500)}`);
   }

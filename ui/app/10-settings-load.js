@@ -740,7 +740,7 @@ function renderSettingsSidebar() {
   sidebar.querySelector('#qrcode-egg-btn')?.addEventListener('click', () => {
     const ov = document.createElement('div');
     ov.className = 'qrcode-egg-overlay';
-    ov.innerHTML = '<img src="group-qrcode.jpg" alt="群二维码" />';
+    ov.innerHTML = '<img src="group-qrcode.png" alt="群二维码" />';
     ov.addEventListener('click', () => ov.remove());
     document.body.appendChild(ov);
   });

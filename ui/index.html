@@ -14,7 +14,7 @@
            是写 CSP 之前把 `https://<host>` 全量 grep 一遍才捞出来的。
            ⚠️ 除它之外页面**没有任何**外部网络目标（已 grep：无外链脚本/样式/字体/图片）。
          · object-src / base-uri / form-action 'none' —— 插件、<base> 劫持、表单外发
-         · img-src 'self' data: blob: —— 实测页面只有三类图：同源 `/api/stickers/…` 与 `group-qrcode.jpg`、
+         · img-src 'self' data: blob: —— 实测页面只有三类图：同源 `/api/stickers/…` 与 `group-qrcode.png`、
            `data:`、以及本地预览用的 `blob:`（`URL.createObjectURL`）；UI 里**没有** `background-image`/`url(`
        ⚠️ 两处**不得不**留 `'unsafe-inline'`（理由都写在这儿，别顺手删）：
          ① 下面那段**内联**主题预置脚本（首屏防闪白/闪黑，晚一步就会闪一下）；

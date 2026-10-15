@@ -244,7 +244,10 @@ async function saveConfig({ quiet = false } = {}) {
       // 全局兜底单价：仅当没有模型级价格时生效
       priceInputPerM: Number(val('#cfg-price-in', c.api.priceInputPerM ?? 0)) || 0,
       priceOutputPerM: Number(val('#cfg-price-out', c.api.priceOutputPerM ?? 0)) || 0,
-      priceCachedPerM: Number(val('#cfg-price-cached', c.api.priceCachedPerM ?? 0)) || 0
+      priceCachedPerM: Number(val('#cfg-price-cached', c.api.priceCachedPerM ?? 0)) || 0,
+      // 余额耗尽（HTTP 402）时给她看的那句话（2026-10-16 第五十一对话 · 用户拍板"甲"）。
+      // 🔴 这里**不用** `|| 默认值` 兜底：留空 = 那正是"回到内置默认"的表达方式（渲染侧预填内置文案）。
+      balanceHint: val('#cfg-balance-hint', c.api.balanceHint || '').trim()
     };
     // 把当前模型的单价存进 modelPrices[模型]（只影响这一个模型，不动内置官方表）。
     // 若开关是打开的，则不应写入 —— 那时输入框是禁用的，读到的值就是官方价，
