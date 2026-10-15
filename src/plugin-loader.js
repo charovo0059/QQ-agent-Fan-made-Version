@@ -187,6 +187,58 @@ function lintKindPlacement(kind, { manifest, toolIds, providers, hooks }, log) {
 }
 
 /**
+ * 🔴 入口静态扫描：危险能力**必须显式声明**才能用（2026-10-15 第四十八对话 · 交接 §A4②）。
+ *
+ * ── 先把定位说清：**这是绊线，不是沙箱** ──────────────────────────────────────
+ *   · 只读**入口文件本身**的文本 ⇒ 它 import 进来的本地模块**不在扫描范围内**。
+ *     随包的 `skills/doujin-lookup/index.js` 就 import 了 `../../src/jm-bridge.js`，
+ *     而那个模块里有真正的文件/进程操作 —— 扫描器看不见它，也**不该**因此拒绝加载
+ *     （那会变成"越正规的扩展越容易被拦"）。
+ *   · 动态拼出来的模块名（`require('node:' + 'child' + '_process')`）同样绕过。
+ *   · ⇒ 它把"随手把一个插件丢进目录就获得进程控制权"变成**一道要显式签字的关卡**，
+ *     ⛔ **不等于**"接进来的代码一定安全"。别在文档或界面上把它说成隔离/沙箱。
+ *
+ * ── 为什么需要它 ──────────────────────────────────────────────────────────
+ *   扩展模块是在**主进程内直接执行**的（见下面 `await import(...)`），
+ *   而 `permissions` 白名单此前**只门控 loader 交给它的那个 `fetch` 对象** ——
+ *   模块自己 `import('node:child_process')` 不受任何限制（交接 §A4 点名的那个缺口）。
+ *
+ * ── 声明方式 ──────────────────────────────────────────────────────────────
+ *   在 `skill.json` / `plugin.json` 的 `permissions` 数组里写能力名：
+ *     "permissions": ["web_fetch", "child_process"]
+ *   ⛔ 不声明就**拒绝加载**（技能页会显示原因，不是静默消失）；声明了就放行 + 打一条 warn。
+ */
+const DANGEROUS_CAPABILITY_RULES = [
+  { need: 'child_process', label: '起子进程', re: /(?:from|require\s*\()\s*['"](?:node:)?child_process['"]/ },
+  { need: 'vm', label: '在当前进程里执行动态代码', re: /(?:from|require\s*\()\s*['"](?:node:)?vm['"]/ },
+  { need: 'worker_threads', label: '起线程', re: /(?:from|require\s*\()\s*['"](?:node:)?worker_threads['"]/ },
+  {
+    need: 'fs-write', label: '写文件系统',
+    // 只认"写"那一族调用名：读文件（readFileSync / existsSync）既常见又无害，
+    // 拦它只会制造噪音、逼所有人无条件声明，反而让这道关卡失去意义。
+    re: /\b(?:fs|fsp|fsPromises|nodeFs)\s*\.\s*(?:writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|mkdir|mkdirSync|rename|renameSync|copyFile|copyFileSync|createWriteStream|chmod|chmodSync|truncate|truncateSync|utimes|utimesSync)\b/
+  }
+];
+
+/**
+ * 扫一段入口源码，返回它用到的危险能力。**纯函数**（不碰文件系统）⇒ 判据可以直接喂字符串。
+ * @param {string} source 入口文件文本
+ * @returns {{needs: string[], hits: {need: string, line: number, evidence: string}[]}}
+ */
+export function scanEntryForDangerousCapabilities(source) {
+  const lines = String(source ?? '').split(/\r?\n/);
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    // 去掉行尾注释再匹配：注释里提到 `child_process`（例如"本插件不需要它"）不该被拦
+    const code = lines[i].replace(/\/\/.*$/, '');
+    for (const rule of DANGEROUS_CAPABILITY_RULES) {
+      if (rule.re.test(code)) hits.push({ need: rule.need, line: i + 1, evidence: rule.label });
+    }
+  }
+  return { needs: [...new Set(hits.map((h) => h.need))], hits };
+}
+
+/**
  * 加载单个 Skill 目录。
  *
  * 失败语义（两条都要成立，缺一不可）：
@@ -301,6 +353,35 @@ async function loadSkillDir(dir, { log = console.log, kind = null } = {}) {
     return r;
   }
 
+  // ⚠️ `permissions` 提前到这里求值（原来在 import 之后）：入口扫描要用它判断
+  //    "这个危险能力声明过没有"。白名单目前只用于门控 fetch，危险能力见下面的扫描。
+  const permissions = Array.isArray(found.raw.permissions) ? found.raw.permissions : [];
+
+  // ── 入口静态扫描：危险能力必须显式声明（2026-10-15 · 交接 §A4②）──────────────
+  // 语义与 entry 越界那几条一致：**安全拒绝**，即使旧实例在跑也不沿用（磁盘上这份
+  // 已经不是上次跑的那份了）。理由与"绊线而非沙箱"的定位见 scanEntryForDangerousCapabilities。
+  try {
+    const entryText = fs.readFileSync(entryPath, 'utf8');
+    const scan = scanEntryForDangerousCapabilities(entryText);
+    if (scan.needs.length) {
+      const undeclared = scan.needs.filter((n) => !permissions.includes(n));
+      if (undeclared.length) {
+        const detail = scan.hits
+          .filter((h) => undeclared.includes(h.need))
+          .map((h) => `第 ${h.line} 行 ${h.evidence}`)
+          .join('；');
+        const error = `入口用了未声明的高危能力（${detail}）。`
+          + `确实需要的话，请在清单的 permissions 里显式声明 [${undeclared.map((n) => `"${n}"`).join(', ')}]`
+          + ' —— 扩展代码是在**主进程内直接执行、没有沙箱**的，声明即表示你认可这一点';
+        const r = failRegister(manifest.id, error);
+        log(`[skill] ⛔ ${manifest.id}：${error}`);
+        return r;
+      }
+      log(`[skill] ⚠️ ${manifest.id} 声明并使用了高危能力：${scan.needs.join('、')}`
+        + '（它在主进程内直接执行、没有沙箱 ⇒ 只放你信任的扩展）');
+    }
+  } catch { /* 读不了入口（权限 / 编码）就交给下面的 import 统一报错，别在这里假装成功 */ }
+
   let mod;
   try {
     const entryUrl = pathToFileURL(entryPath).href;
@@ -331,7 +412,7 @@ async function loadSkillDir(dir, { log = console.log, kind = null } = {}) {
     return r;
   }
 
-  const permissions = Array.isArray(found.raw.permissions) ? found.raw.permissions : [];
+  // ⚠️ `permissions` 已在上面（入口扫描之前）求值，这里不再重复声明。
   const api = createSkillApi(manifest.id, permissions);
 
   // ── 新旧交替的顺序闸（2026-09 修订版）────────────────────────────────────
