@@ -796,12 +796,17 @@ function renderSpeedPanel() {
   }
 
   if (!targets.length) {
-    list.innerHTML = '<div class="muted" style="padding:6px 0">主模型还没设置 —— 先在上面选好模型，这里才有可测的东西。</div>';
+    list.innerHTML = '<div class="muted fb-empty">主模型还没设置 —— 先在上面选好模型，这里才有可测的东西。</div>';
   } else {
     list.innerHTML = targets.map((t) => {
       const r = results[t.key];
       const isMain = t.fallbackIndex < 0;
-      let badge = '<span class="muted speed-badge">未测</span>';
+      // 行结构与降级链同构：显示名（本地模型目录里那个）/ 来自哪个端点 / 真值 model。
+      // ⚠️ 以前第一列直接用后端给的 t.label（"model @ pid（主模型）"），和后面两列 + 「主模型」
+      //    徽标把同一件事说了三遍。2026-10-16 第五十二对话改成与 renderFallbackRows 完全一致的取法。
+      const p = (state.providers || []).find((x) => x.id === t.providerId);
+      const show = (p && (p.modelNames || {})[t.model]) || t.model;
+      let badge = '<span class="speed-badge">未测</span>';
       if (r) {
         badge = r.ok
           ? `<span class="speed-badge ok">✓ ${Number.isFinite(r.latencyMs) ? r.latencyMs + 'ms' : '通'}</span>`
@@ -809,20 +814,30 @@ function renderSpeedPanel() {
       }
       return `<label class="fb-row speed-row" data-key="${esc(t.key)}">
         <input type="checkbox" class="speed-pick" data-key="${esc(t.key)}"${picked[t.key] ? ' checked' : ''} />
-        <span class="fb-name">${esc(t.label || t.model)}</span>
+        <span class="fb-name">${esc(show)}</span>
         <span class="fb-where muted">${esc(t.providerId || '主模型端点')}</span>
-        ${isMain ? '<span class="speed-badge main">主模型</span>' : ''}
-        ${badge}
+        <span class="fb-model muted">${esc(t.model)}</span>
+        <span class="speed-flags">${isMain ? '<span class="speed-badge main">主模型</span>' : ''}${badge}</span>
       </label>`;
     }).join('');
   }
 
   const pickedCount = targets.filter((t) => picked[t.key]).length;
+  // 「上次测速 HH:MM」= 这批目标里最新的一条 checkedAt。
+  // ⚠️ 以前这里写的是「上次测速时间看右侧结果」—— 用户得自己一行行扫右边的徽标才知道是什么时候测的；
+  //    而速度记录里本来就有 checkedAt（见 src/speed-scan.js 的 modelSpeed 注释）。
+  const stamps = targets.map((t) => results[t.key]).filter(Boolean)
+    .map((r) => Number(r.checkedAt)).filter((n) => Number.isFinite(n) && n > 0);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const lastAt = stamps.length ? new Date(Math.max(...stamps)) : null;
+  const lastText = lastAt
+    ? '上次测速 ' + pad2(lastAt.getMonth() + 1) + '-' + pad2(lastAt.getDate()) + ' ' + pad2(lastAt.getHours()) + ':' + pad2(lastAt.getMinutes())
+    : '还没测过';
   if (runBtn) runBtn.disabled = !!state.speedScanning || pickedCount === 0;
   if (status) {
     status.textContent = state.speedScanning
-      ? `测速中…（${pickedCount} 个）`
-      : (pickedCount ? `已勾选 ${pickedCount} 个模型；上次测速时间看右侧结果` : '没有勾选任何模型');
+      ? `测速中…（已勾选 ${pickedCount} 个）`
+      : (pickedCount ? `已勾选 ${pickedCount} 个模型 · ${lastText}` : '没有勾选任何模型 —— 勾几个再点「开始测速」');
   }
 
   // 建议顺序：只在有降级链时才有意义（主模型不在建议范围内 —— 用户拍板只管降级链顺序）

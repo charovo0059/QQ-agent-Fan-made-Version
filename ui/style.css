@@ -1372,6 +1372,24 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
   border-radius: 7px; padding: 6px 9px; font-size: 12px;
 }
 .mm-search input:focus { border-color: var(--accent); }
+/* ── 第五十二对话（2026-10-16）：弹窗左列模型计数 + 降级链/测速两块的收尾 ──
+   ⚠️ 这一批**全是新增类**，既有选择器（.fb-row / .speed-row / .mm-prov 那几条）一个字没动 ——
+      它们被 测试-现行\test-删供应商与两处界面小修.mjs 与 test-降级链编辑器与测速.mjs 钉着。 */
+.mm-prov .mm-prov-n { flex: none; font-size: 11px; color: var(--muted); opacity: .8; }
+.fb-toolbar .spacer { flex: 1 1 auto; }
+/* 空态（降级链 / 测速列表共用）：以前是两处各写一份 inline style，对不齐。 */
+.fb-empty { border: 1px dashed var(--border); border-radius: 7px; padding: 8px 10px; font-size: 12px; }
+/* 测速行右侧那组徽标（主模型 / ✓ 132ms）—— 与降级链的 .fb-ops 同一个位置。 */
+.speed-row .speed-flags { display: flex; gap: 6px; align-items: center; flex: none; margin-left: auto; }
+/* 🔴 测速行是 <label>，而它住在 .field 里 —— `.field label { display: block }`（0,1,1）会压过
+   `.fb-row { display: flex }`（0,1,0），整行退化成「一行文字」、徽标也不再右对齐。
+   实测（chromium 计算样式）：row 的 display 是 block、.speed-flags 的 margin-left:auto 被算成 0px。
+   ⇒ 这里用高一档的选择器把它掰回 flex，并把强度交还给名字那一列（其余保持正常字重）。 */
+.field label.speed-row { display: flex; align-items: center; gap: 8px; margin-bottom: 0; font-weight: 400; }
+.speed-row .fb-name { font-weight: 500; }
+/* 建议顺序那一行：原来是最小号灰字，看不出这是结论。 */
+.speed-suggestion { margin-top: 6px; font-size: 12px; line-height: 1.6; color: var(--muted);
+  border-left: 3px solid var(--accent); background: var(--bg-2); border-radius: 0 7px 7px 0; padding: 6px 10px; }
 .field-row { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
 .field { flex: 1; min-width: 220px; }
 /* 2026-10-06（第四十六对话 · 第四阶段 条目 1）：label 升层 —— 标签不再与说明同色。

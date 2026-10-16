@@ -101,7 +101,9 @@ function parseFallbackModels(text) {
 function renderFallbackRows(list) {
   const arr = Array.isArray(list) ? list.filter((f) => f && f.model) : [];
   if (!arr.length) {
-    return '<div class="muted" id="fb-empty" style="padding:6px 0">还没有备选模型 —— 主模型失败时这一轮就到此为止。</div>';
+    // ⚠️ 样式走 .fb-empty 类（2026-10-16 第五十二对话）：以前是 inline style，
+    //    与下面 #speed-list 的空态各写一份，两处永远对不齐。
+    return '<div class="muted fb-empty" id="fb-empty">还没有备选模型 —— 主模型失败时这一轮就到此为止。</div>';
   }
   const provs = (typeof state !== 'undefined' && state.providers) ? state.providers : [];
   return arr.map((f, i) => {
@@ -236,18 +238,23 @@ function renderApiSection(c) {
 
     <!-- 一键统一响应测试（2026-10-16 第五十一对话）。为什么要有它：降级链里混着好几家
          供应商，「哪个模型还能用、哪个快」以前只能靠一次次真实失败才撞见。
-         🔴 它**只给建议**，绝不自动改用户的降级链 —— 用户拍板"先给建议顺序，我看了再点应用"。 -->
+         🔴 它**只给建议**，绝不自动改用户的降级链 —— 用户拍板"先给建议顺序，我看了再点应用"。
+         2026-10-16 第五十二对话：这一块与降级链编辑器一起按应用既有风格重排（范围按钮靠左、
+         动作按钮靠右、行样式与降级链同构、状态行补"上次测速时间"）。 -->
     <div class="field"><label>一键统一响应测试</label>
       <div class="hint status" id="speed-test-status">正在读取…</div>
+      <!-- 2026-10-16 第五十二对话重排：左边是"测哪些"（范围），右边是"去测 / 用建议"（动作）——
+           原来五个按钮等宽排一排，"开始测速"和"全不选"看起来一样重。 -->
       <div class="fb-toolbar">
         <button class="btn btn-small" id="speed-select-default-btn" type="button">只选主模型与降级链</button>
         <button class="btn btn-small" id="speed-select-all-btn" type="button">全选</button>
         <button class="btn btn-small" id="speed-select-none-btn" type="button">全不选</button>
-        <button class="btn btn-small" id="speed-run-btn" type="button">开始测速</button>
+        <span class="spacer"></span>
+        <button class="btn btn-small btn-primary" id="speed-run-btn" type="button">开始测速</button>
         <button class="btn btn-small" id="speed-apply-btn" type="button" disabled>应用建议顺序</button>
       </div>
       <div class="fb-list" id="speed-list"></div>
-      <div class="muted" id="speed-suggestion" style="margin-top:6px;font-size:11px"></div>
+      <div class="speed-suggestion" id="speed-suggestion"></div>
       <details class="hint-more"><summary>它到底测什么、会不会改我的降级链？</summary>
         <div class="hint-more-body">给每个勾上的「模型 @ 提供商」真发一句最小请求（就是「测试连通性」用的那条路），记下通不通与耗时。默认只勾<b>主模型 + 现有降级链里的</b>，你可以自己全选（某家供应商 200 多个模型会测一阵子，所以默认不动它）。建议顺序的规则是确定的：<b>测通了按快慢排 → 没测过的保持原位 → 测不通的沉到最后</b>。⚠️ 它**绝不会**自己改配置：跑完只是给你一个建议 + 一个「应用建议顺序」按钮，点不点在你。</div>
       </details>

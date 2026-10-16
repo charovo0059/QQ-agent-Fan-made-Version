@@ -384,6 +384,34 @@ function openModelPicker({ onPick = null } = {}) {
   // ⚠️ 别指望模板/渲染里用可选链就会怎样 —— 这两行只是把"可能为空的链"收成一个明确对象，
   //    顺手让下面那句过滤条件读起来短一点；行为与原来逐字相同（provider 都是同一处来源）。
   const curApi = state.config && state.config.api ? state.config.api : {};
+  // 当前配置里的提供商（决定左列谁高亮）——
+  // ⚠️ 下面 activePid / renderLeft / current 这三段是 2026-10-16 第五十一对话加右列搜索框时**被误删**的
+  //    （tools.edit 的区间把 378-386 整段吃掉了），而 443 行仍写着 renderLeft();
+  //    ⇒ 外壳已 append 进 DOM 之后才抛 ReferenceError: renderLeft is not defined，
+  //    结果弹窗只剩标题 + 取消、左右两栏全空（第五十二对话用户报的就是这个）。
+  //    ⛔ 以后改这个函数：renderLeft / activePid / current 三个名字一个都不能少 ——
+  //    判据见 测试-现行\test-模型选择弹窗可渲染.mjs（它真的调一次 openModelPicker，看两栏有没有内容）。
+  const current = curApi.provider;
+  let activePid = current || providers[0].id;
+  /** 左列：提供商。点一行 ⇒ 换 activePid、清掉搜索词、两栏重画。 */
+  function renderLeft() {
+    left.innerHTML = providers.map((p) => {
+      const n = Array.isArray(p.models) ? p.models.length : 0;
+      return '<div class="mm-prov' + (p.id === activePid ? ' active' : '') + '" data-pid="' + esc(p.id) + '">'
+        + '<span class="mm-prov-name">' + esc(p.displayName || p.id) + '</span>'
+        + '<span class="mm-prov-n">' + n + '</span>'
+        + '</div>';
+    }).join('');
+    left.querySelectorAll('.mm-prov').forEach((el) => {
+      el.addEventListener('click', () => {
+        activePid = el.dataset.pid;
+        // 换了一家 ⇒ 上一家的搜索词在这里没有意义（否则右列会空着却不说为什么）
+        search = '';
+        renderLeft();
+        renderRight();
+      });
+    });
+  }
   /**
    * 只重画"模型行"那一块（#mm-list）。
    * ⚠️ **不能**在这里重画整个右列：搜索框若被一起重建，每敲一个字焦点就丢一次。
