@@ -886,6 +886,23 @@ export class Orchestrator {
       addUsage(session.usage, response.usage);
       session.usage.calls += 1;
 
+      // ── 「这一轮临时换了模型」——降级发生时她自己要知道（2026-10-16 第五十一对话）──
+      // 用户拍板：不给她可编辑的台词框，只给**一行事实**，具体说什么由她发挥；
+      // 而且要在**降级的那一轮**告诉她（没降级就一个字都不加，不白花 token）。
+      //
+      // 🔴 时间序：提示词在**发请求之前**就组装好了（见上方 buildSystemPrompt/buildUserPrompt/
+      //    messages 的构造）⇒ 事后追改这一轮的 system/user 提示词已经晚了。
+      //    但降级链的候选是**逐个试**的（llm.js:chatCompletionWithRetry 的 ci 循环），
+      //    所以「同一轮里下一次模型调用」才是她真正还能看见它的时机 —— 工具结果之后、
+      //    下一轮推理之前。于是这里把提醒 push 进 messages（**不进 session.messages 的对话流**，
+      //    否则重放会把系统提醒当成她说过的话），并单独落一条降级台账。
+      if (response._degraded) {
+        const usedLabel = response._fallbackLabel || response._usedModel || '(备选模型)';
+        session.model = response._usedModel || session.model;   // 降级后 model 以实际用上的为准
+        messages.push({ role: 'system', content: DEGRADED_NOTICE(usedLabel) });
+        session.messages.push({ degradedModels: { label: usedLabel, round: round + 1, at: Date.now() } });
+      }
+
       const msg = response.message;
       const finalContent = typeof msg.content === 'string' ? msg.content : (msg.content ?? null);
       const finalToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length ? msg.tool_calls : undefined;
@@ -1867,6 +1884,24 @@ const PLACEHOLDER_NAMES = new Set([
 const NUDGE_TEXT = '[系统：你刚才写了一段话，但**没有调用 send_message** —— 那样不会发出去，群友看不到。\n'
   + '如果那是你想说的：现在调用 send_message 把它发出去，原样发即可，不用重写。\n'
   + '如果你本来就决定这次不说话：直接结束就好，什么都不用做。]';
+
+/**
+ * 降级提醒（2026-10-16 第五十一对话 · 用户拍板）。
+ *
+ * 用户原话要的是「不用她说具体的话，只让她知道换了模型」+「降级那一轮就告诉她」。
+ * ⇒ 这里只陈述**事实**（临时换了模型 / 主模型不可用、换了另一条路），
+ *   ⛔ 不给话术、⛔ 不新增可编辑台词框 —— 具体说什么由她自己发挥。
+ *
+ * ⚠️ 措辞里**不能**出现"要让用户知道""请告诉用户"这类指令：那会诱导她主动去解释
+ *    "我换了模型"，而用户明确说不需要她说具体的话。这里只让她**知道**这件事，
+ *    免得她把换了模型的语气/能力差异当成自己的问题。
+ * ⚠️ 用 role:'system'（不是 user）：它不是用户说的话，不该混进对话流被重放。
+ */
+function DEGRADED_NOTICE(label) {
+  return '[系统：这一轮主模型重试后仍然不可用，已经临时换到另一条路（'
+    + String(label || '备选模型')
+    + '）。你这一轮看到/说出的内容不受影响，正常继续即可；不用特意向对方解释这件事。]';
+}
 
 /**
  * 从模型输出里稳健提取 JSON 对象。

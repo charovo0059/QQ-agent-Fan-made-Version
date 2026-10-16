@@ -170,7 +170,7 @@ function providerKeyValue(provider, cfg) {
 }
 
 /** 提供商对象里 apiKey 可能是掩码/引用，请求前必须解出真实 key。 */
-function withResolvedKey(p, cfg = getConfig()) {
+export function withResolvedKey(p, cfg = getConfig()) {
   const real = providerKeyValue(p, cfg);
   return { ...p, apiKey: real };
 }

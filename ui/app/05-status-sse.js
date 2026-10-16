@@ -219,6 +219,42 @@ function connectSSE() {
       refreshSnowlumaLogs();
     }
   });
+  // 一键统一响应测试的进度（2026-10-16 第五十一对话）。
+  // 后端在 /api/speeds/scan 里逐条 emit('speed-scan', { key, providerId, model, ok, latencyMs, done, total })，
+  // 开头/结尾另有 { phase: 'start' | 'done' | 'error' }。
+  // ⚠️ 与其它监听器同一纪律：JSON.parse 必须包 try（半截帧会让整段回调抛错）。
+  es.addEventListener('speed-scan', (ev) => {
+    let d = {};
+    try { d = JSON.parse(ev.data); } catch { return; }
+    const onApiPage = state.tab === 'settings' && (state.settingsSection || 'api') === 'api';
+    if (d.phase === 'start') {
+      state.speedScanning = true;
+      if (onApiPage) renderSpeedPanel();
+      return;
+    }
+    if (d.phase === 'done' || d.phase === 'error') {
+      state.speedScanning = false;
+      if (d.phase === 'error') console.warn('[测速]', d.error || '测速失败');
+      // 收尾必须**向后端重取一次**：建议顺序（changed / order）是后端算的，
+      // 逐条结果只够更新徽标，靠它拼不出"现在该不该改顺序"。
+      api('/api/speeds/results').then((r) => {
+        state.speedResults = r.results || {};
+        state.speedTargets = Array.isArray(r.targets) ? r.targets : state.speedTargets;
+        state.speedSuggestion = r.suggestion || null;
+        if (onApiPage) renderSpeedPanel();
+      }).catch(() => { if (onApiPage) renderSpeedPanel(); });
+      return;
+    }
+    if (d.key) {
+      state.speedResults = Object.assign({}, state.speedResults, {
+        [d.key]: {
+          providerId: d.providerId, model: d.model, ok: d.ok === true,
+          latencyMs: d.latencyMs, note: d.note || '', checkedAt: Date.now()
+        }
+      });
+      if (onApiPage) renderSpeedPanel();
+    }
+  });
   es.addEventListener('feedback', (ev) => {
     let d;
     try { d = JSON.parse(ev.data); } catch { return; }

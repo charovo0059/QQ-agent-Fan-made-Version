@@ -85,6 +85,47 @@ function parseFallbackModels(text) {
 }
 
 /**
+ * 降级链的**结构化**列表渲染（2026-10-16 第五十一对话 · 用户拍板"一个一个手填太麻烦"）。
+ *
+ * 背景：原来这里是一个 textarea，要人手打「模型id @ 提供商id」。用户的供应商里有
+ * 200+ 个模型 ⇒ 手填既慢又容易打错。改成"从已有模型里挑 + 上下移动排序"。
+ *
+ * 🔴 持久化仍是**同一个** `#cfg-fallback-models`（隐藏的 input），
+ *    保存侧照旧 `parseFallbackModels(val('#cfg-fallback-models',''))` —— 一行不改。
+ *    理由：`测试-现行\test-专用模型输入框.mjs` 钉着这个 id 与那条保存正则；
+ *    把持久化格式换掉等于同时改判据与保存逻辑，风险大而收益为零。
+ *    本函数产出的只是**外壳**，真值仍由 `fallbackModelsText()` 序列化进隐藏框。
+ *
+ * ⚠️ 这里**只渲染**，点击/排序在 `13-settings-events.js` 里接线（那是 innerHTML 之后的时机）。
+ */
+function renderFallbackRows(list) {
+  const arr = Array.isArray(list) ? list.filter((f) => f && f.model) : [];
+  if (!arr.length) {
+    return '<div class="muted" id="fb-empty" style="padding:6px 0">还没有备选模型 —— 主模型失败时这一轮就到此为止。</div>';
+  }
+  const provs = (typeof state !== 'undefined' && state.providers) ? state.providers : [];
+  return arr.map((f, i) => {
+    const model = String(f.model);
+    const pid = String(f.provider || '');
+    const p = provs.find((x) => x.id === pid);
+    // 显示名只用于**看**；真值（发给接口的那个模型 id）永远显示在右边，免得改了显示名就认不出来。
+    const show = pid ? ((p && (p.modelNames || {})[model]) || model) : model;
+    const where = pid ? `${esc(pid)}` : '主模型端点';
+    return `<div class="fb-row" data-idx="${i}">
+      <span class="fb-idx">${i + 1}</span>
+      <span class="fb-name">${esc(show)}</span>
+      <span class="fb-where muted">${esc(where)}</span>
+      <span class="fb-model muted">${esc(model)}</span>
+      <span class="fb-ops">
+        <button class="btn btn-small fb-up" type="button"${i === 0 ? ' disabled' : ''} title="上移">↑</button>
+        <button class="btn btn-small fb-down" type="button"${i === arr.length - 1 ? ' disabled' : ''} title="下移">↓</button>
+        <button class="btn btn-small fb-del" type="button" title="从链里去掉">×</button>
+      </span>
+    </div>`;
+  }).join('');
+}
+
+/**
  * `api.videoMode` 的合法值。
  * ⚠️ 这里是**第二份**（第一份是 `src/video-reader.js:25` 的 `export const VIDEO_MODES`）——
  *    前端是经典 script、后端是 ESM，没法共用一个常量。两份的一致性由
@@ -175,10 +216,40 @@ function renderApiSection(c) {
     <details class="hint-more"><summary>这几种方式有什么区别？</summary>
       <div class="hint-more-body">只在<b>消息里真的出现了</b>图片 / 视频部件时才切过去，纯文本对话一律用主模型（不会白花贵模型的额度）。视频优先于图片。视频那一路还要 <code>api.videoMode</code> 决定"原生发送 / 抽帧 / 只看元信息"：<code>auto</code> 看上面「视频输入专用模型」填没填，<code>native</code> / <code>frames</code> 强行指定，<code>off</code> 完全不喂画面。</div>
     </details>
-    <div class="field"><label>备选模型降级链（一行一个；主模型重试后仍失败时按顺序换）</label>
-      <textarea id="cfg-fallback-models" rows="3" placeholder="每行一个：模型id　或　模型id @ 提供商id" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${esc(fallbackModelsText(c.api.fallbackModels))}</textarea>
+    <!-- 备选模型降级链 —— 2026-10-16（第五十一对话）从 textarea 改成结构化编辑器。
+         起因（用户原话）：某个供应商"有200多个模型可选"，"一个一个手填还是太麻烦了"。
+         🔴 隐藏框 cfg-fallback-models 仍是**唯一**的真值载体，保存侧一行未改；
+            本块只是给它加了一层"挑 + 排"的界面。
+         ⚠️ 这段注释住在 return 反引号模板里 ⇒ 注释里**不能出现反引号**（会把模板提前截断，
+            2026-10-16 现场踩过一次：node --check 报 SyntaxError: Unexpected identifier）。 -->
+    <div class="field"><label>备选模型降级链（主模型重试后仍失败时，从上到下按顺序换）</label>
+      <div class="fb-list" id="fb-list">${renderFallbackRows(c.api.fallbackModels)}</div>
+      <div class="fb-toolbar">
+        <button class="btn btn-small" id="fb-add-btn" type="button">添加备选模型…</button>
+        <span class="muted" style="font-size:11px">用 ↑ ↓ 调顺序；挑来的模型默认留在它自己的提供商端点（跨提供商降级）</span>
+      </div>
+      <input type="hidden" id="cfg-fallback-models" value="${esc(fallbackModelsText(c.api.fallbackModels))}" />
       <details class="hint-more"><summary>降级链怎么写、降级会发生什么？</summary>
-        <div class="hint-more-body">一行一个。写 <code>模型id @ 提供商id</code> = 换到<b>那个提供商</b>的端点（跨提供商降级，用它的 baseUrl 与 Key）；不写 <code>@ 提供商</code> 则沿用主模型端点、只换模型 id。留空 = 不降级。⚠️ 降级发生时，本轮实际用的渠道会写进会话的 <code>vendor</code>（成本看板按它聚合）。</div>
+        <div class="hint-more-body">从上到下按顺序试。用「添加备选模型…」挑出来的，默认写的是 <code>模型id @ 提供商id</code> = 换到<b>那个提供商</b>的端点（跨提供商降级，用它的 baseUrl 与 Key）；也可以手工只写 <code>模型id</code>，那就沿用主模型端点、只换模型。两种写法等价，保存时都存成同一份列表。留空 = 不降级。⚠️ 降级发生时，本轮实际用的渠道会写进会话的 <code>vendor</code>（成本看板按它聚合），而<b>她那一轮会收到一行"临时换了模型"的事实提醒</b>（只让她知道，不会去向你解释）。</div>
+      </details>
+    </div>
+
+    <!-- 一键统一响应测试（2026-10-16 第五十一对话）。为什么要有它：降级链里混着好几家
+         供应商，「哪个模型还能用、哪个快」以前只能靠一次次真实失败才撞见。
+         🔴 它**只给建议**，绝不自动改用户的降级链 —— 用户拍板"先给建议顺序，我看了再点应用"。 -->
+    <div class="field"><label>一键统一响应测试</label>
+      <div class="hint status" id="speed-test-status">正在读取…</div>
+      <div class="fb-toolbar">
+        <button class="btn btn-small" id="speed-select-default-btn" type="button">只选主模型与降级链</button>
+        <button class="btn btn-small" id="speed-select-all-btn" type="button">全选</button>
+        <button class="btn btn-small" id="speed-select-none-btn" type="button">全不选</button>
+        <button class="btn btn-small" id="speed-run-btn" type="button">开始测速</button>
+        <button class="btn btn-small" id="speed-apply-btn" type="button" disabled>应用建议顺序</button>
+      </div>
+      <div class="fb-list" id="speed-list"></div>
+      <div class="muted" id="speed-suggestion" style="margin-top:6px;font-size:11px"></div>
+      <details class="hint-more"><summary>它到底测什么、会不会改我的降级链？</summary>
+        <div class="hint-more-body">给每个勾上的「模型 @ 提供商」真发一句最小请求（就是「测试连通性」用的那条路），记下通不通与耗时。默认只勾<b>主模型 + 现有降级链里的</b>，你可以自己全选（某家供应商 200 多个模型会测一阵子，所以默认不动它）。建议顺序的规则是确定的：<b>测通了按快慢排 → 没测过的保持原位 → 测不通的沉到最后</b>。⚠️ 它**绝不会**自己改配置：跑完只是给你一个建议 + 一个「应用建议顺序」按钮，点不点在你。</div>
       </details>
     </div>
     <div class="settings-divider"></div>

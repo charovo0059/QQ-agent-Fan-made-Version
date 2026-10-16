@@ -1344,6 +1344,34 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .mm-model .mm-del { margin-left: auto; border: 1px solid rgba(var(--red-rgb),.5); color: var(--red); background: none; border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
 .mm-model .mm-del:hover { background: rgba(var(--red-rgb),.12); }
 .model-modal-foot { display: flex; gap: 10px; justify-content: flex-end; }
+/* ── 备选模型降级链的结构化编辑器 + 一键统一响应测试列表（2026-10-16 第五十一对话）──
+   两处共用一套 .fb-* 行样式：序号 / 名字 / 来自哪个端点 / 真值 model / 操作按钮。
+   ⚠️ 只**新增**类，不动任何既有选择器 —— .mm-prov / .mm-model 那片被别的判据钉着。 */
+.fb-list { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.fb-row {
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--bg-2); font-size: 12px;
+}
+.fb-row .fb-idx { width: 18px; color: var(--muted); text-align: right; flex: none; }
+.fb-row .fb-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-row .fb-where { flex: none; font-size: 11px; }
+.fb-row .fb-model { flex: none; font-size: 11px; max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-row .fb-ops { display: flex; gap: 4px; flex: none; }
+.fb-row .fb-ops .btn { padding: 2px 7px; font-size: 11px; }
+.fb-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.speed-row { cursor: pointer; }
+.speed-row input[type=checkbox] { flex: none; margin: 0; width: auto; }
+.speed-badge { flex: none; font-size: 11px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--border); color: var(--muted); }
+.speed-badge.ok { color: var(--green); border-color: rgba(var(--green-rgb),.5); }
+.speed-badge.bad { color: var(--red); border-color: rgba(var(--red-rgb),.5); }
+.speed-badge.main { color: var(--accent-strong); border-color: rgba(var(--accent-rgb),.5); }
+/* 模型选择弹窗右列的搜索框（同一天加的：某个供应商 200+ 个模型，右列没法看） */
+.mm-search { padding: 0 4px 8px 0; }
+.mm-search input {
+  width: 100%; background: var(--bg-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 7px; padding: 6px 9px; font-size: 12px;
+}
+.mm-search input:focus { border-color: var(--accent); }
 .field-row { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
 .field { flex: 1; min-width: 220px; }
 /* 2026-10-06（第四十六对话 · 第四阶段 条目 1）：label 升层 —— 标签不再与说明同色。

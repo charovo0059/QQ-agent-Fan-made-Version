@@ -83,6 +83,11 @@ export const DEFAULT_CONFIG = {
   dshProviderKeys: {},   // providerId -> 真实 API Key（providers[] 里不再存明文 Key）
   providersSourceYaml: '',
   providersImported: true,
+  // ── 一键统一响应测试的结果（2026-10-16 第五十一对话）────────────────────
+  // 键 = `providerId|||modelId`（与 modelVision 同一套键约定），值形如
+  // `{ providerId, model, ok, latencyMs, note, checkedAt }`。
+  // 只存“实测过什么、快不快”，**不改用户的降级链** —— 建议顺序由界面按钮显式应用。
+  modelSpeeds: {},
   // ── 看图（视觉）的体积上限 ──
   // 以前这四个数字是写死在 tools.js 里的常量，只能改代码；现在挂到配置里，设置页可调。
   //

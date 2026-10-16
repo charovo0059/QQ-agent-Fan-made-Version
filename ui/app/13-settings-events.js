@@ -757,4 +757,113 @@ function bindSettingsEvents(c) {
     try { await api('/api/snowluma/open-folder', { method: 'POST', body: '{}' }); }
     catch (e) { $('#snowluma-hint').textContent = `失败：${e.message}`; }
   });
+
+  // ── 备选模型降级链：结构化编辑器（2026-10-16 第五十一对话）────────────────────
+  // 🔴 持久化仍是隐藏框 #cfg-fallback-models（保存侧 parseFallbackModels 一行未改）。
+  //    这里只把它换成"能挑、能排序"的界面：每次改动**立刻回写**隐藏框，
+  //    所以「保存」按钮的行为与改前逐字一致（编辑期间不写盘、不打任何接口）。
+  const fbList = $('#fb-list');
+  const fbHidden = $('#cfg-fallback-models');
+  // 编辑中的链（真值来源）。用渲染侧同一个 parseFallbackModels 解出来 ⇒
+  // "界面上显示的顺序"与"保存会写下去的顺序"永远是同一份数据（不会各算一份）。
+  let fbs = parseFallbackModels(fbHidden ? fbHidden.value : '');
+  function commitFbs() {
+    if (fbHidden) fbHidden.value = fallbackModelsText(fbs);
+    if (fbList) fbList.innerHTML = renderFallbackRows(fbs);
+  }
+  if (fbList) {
+    // 用**事件委托**而不是给每行绑：上下移动之后整块会重画，逐行绑就得重绑一遍（容易漏）。
+    fbList.addEventListener('click', (e) => {
+      const row = e.target.closest('.fb-row');
+      if (!row) return;
+      const i = Number(row.dataset.idx);
+      if (!Number.isInteger(i) || i < 0 || i >= fbs.length) return;
+      const up = e.target.classList.contains('fb-up');
+      const down = e.target.classList.contains('fb-down');
+      const del = e.target.classList.contains('fb-del');
+      if (del) fbs.splice(i, 1);
+      else if (up && i > 0) { const [x] = fbs.splice(i, 1); fbs.splice(i - 1, 0, x); }
+      else if (down && i < fbs.length - 1) { const [x] = fbs.splice(i, 1); fbs.splice(i + 1, 0, x); }
+      else return;
+      commitFbs();
+    });
+    // 「添加备选模型…」复用**同一个**模型选择器（回调模式）—— 见 14-modals.js 的函数头注释：
+    // 要加"选模型"一律走那里，⛔ 别再抄一份。
+    const fbAddBtn = $('#fb-add-btn');
+    if (fbAddBtn) fbAddBtn.addEventListener('click', () => openModelPicker({
+      onPick: ({ pid, model }) => {
+        // 挑来的默认**带提供商** ⇒ 就是"跨提供商降级"（用户的原话：换到那个更稳的 API）。
+        // 重复的不加第二遍：同一个 (模型, 提供商) 在链里出现两次，只会在降级时把同一个
+        // 死端点连试两遍，纯浪费轮次。
+        const pidS = String(pid || '');
+        const dup = fbs.some((f) => f.model === model && String(f.provider || '') === pidS);
+        if (!dup) fbs.push(pidS ? { model, provider: pidS } : { model });
+        commitFbs();
+      }
+    }));
+  }
+
+  // ── 一键统一响应测试（2026-10-16 第五十一对话）──────────────────────────────
+  // 🔴 纪律：这套按钮**只**做三件事 —— 勾、发一次测速请求、点"应用建议顺序"。
+  //    ⛔ 不自动改配置、⛔ 不在后端偷偷改（服务端 /api/speeds/apply 自己重算建议）。
+  const speedListEl = $('#speed-list');
+  if (speedListEl) {
+    speedListEl.addEventListener('change', (e) => {
+      const cb = e.target.closest('.speed-pick');
+      if (!cb) return;
+      state.speedPicked = state.speedPicked || {};
+      state.speedPicked[cb.dataset.key] = cb.checked;
+      renderSpeedPanel();
+    });
+  }
+  const setSpeedPick = (fn) => {
+    state.speedPicked = {};
+    for (const t of (state.speedTargets || [])) state.speedPicked[t.key] = !!fn(t);
+    state.speedPickedInit = true;   // 手动选过之后，别再被"默认勾选"覆盖
+    renderSpeedPanel();
+  };
+  const speedDefaultBtn = $('#speed-select-default-btn');
+  if (speedDefaultBtn) speedDefaultBtn.addEventListener('click', () => setSpeedPick((t) => t.isDefault !== false));
+  const speedAllBtn = $('#speed-select-all-btn');
+  if (speedAllBtn) speedAllBtn.addEventListener('click', () => setSpeedPick(() => true));
+  const speedNoneBtn = $('#speed-select-none-btn');
+  if (speedNoneBtn) speedNoneBtn.addEventListener('click', () => setSpeedPick(() => false));
+
+  const speedRunBtn = $('#speed-run-btn');
+  if (speedRunBtn) speedRunBtn.addEventListener('click', async () => {
+    const targets = (state.speedTargets || []).filter((t) => (state.speedPicked || {})[t.key]);
+    const status = $('#speed-test-status');
+    if (!targets.length) return;
+    speedRunBtn.disabled = true;
+    if (status) status.textContent = `测速中…（${targets.length} 个）`;
+    try {
+      await api('/api/speeds/scan', {
+        method: 'POST',
+        body: JSON.stringify({ targets: targets.map((t) => ({ providerId: t.providerId, model: t.model })) })
+      });
+      // ⚠️ 202 只说明"已经在后台跑了"；结果**不在这里等** —— 逐条由 speed-scan SSE 推回来
+      //    （见 05-status-sse.js 的 speed-scan 监听器）。按钮也不在这里恢复：由 SSE 的 done 收尾。
+      state.speedScanning = true;
+    } catch (e) {
+      state.speedScanning = false;
+      speedRunBtn.disabled = false;
+      if (status) status.textContent = `测速失败：${e.message}`;
+    }
+  });
+
+  const speedApplyBtn = $('#speed-apply-btn');
+  if (speedApplyBtn) speedApplyBtn.addEventListener('click', async () => {
+    const status = $('#speed-test-status');
+    speedApplyBtn.disabled = true;
+    try {
+      const r = await api('/api/speeds/apply', { method: 'POST', body: '{}' });
+      // 必须重拉一次设置页：降级链的真值在隐藏框里，而这个框是渲染时按配置画的。
+      await loadSettings();
+      const s2 = $('#speed-test-status');
+      if (s2) s2.textContent = r.changed ? '已按实测速度重排降级链 ✓' : '顺序本来就是最合适的，没有改动';
+    } catch (e) {
+      speedApplyBtn.disabled = false;
+      if (status) status.textContent = `应用失败：${e.message}`;
+    }
+  });
 }

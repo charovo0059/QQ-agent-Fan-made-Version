@@ -64,6 +64,7 @@ import { recordFailure, listFailures, getFailure, removeFailure, clearFailures }
 // 「核心记忆」（提案 c7486672）：只读 + 删。存是她自己的工具干的（tools.js）。
 import { listCoreMemories, getCoreMemory, removeCoreMemory, coreMemoryLoadError, coreMemoryFile, coreMemoryPromptBlocks, coreMemorySourceLabel } from './core-memory.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
+import { scanModelSpeeds, speedResults, buildSpeedSuggestions, speedScanTargets } from './speed-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey } from './util.js';
 // 系统提示：管理端「人设 → 系统提示自定义」用它读取内置段落与当前生效文本。
@@ -603,6 +604,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
 
   // ── 组件 ──
   const visionScan = { running: false };   // 模型图片输入能力扫描的运行状态
+  const speedScan = { running: false };    // 一键统一响应测试（测速）的运行状态
   const store = new ChatStore(cfg.store?.maxMessagesPerChat ?? 0);   // 0 = 不限
   const memory = new MemoryStore();
   const sessions = new SessionRegistry(cfg.store?.keepSessionFiles ?? 0);   // 0 = 不限
@@ -3047,6 +3049,66 @@ export function createApp({ log = console.log, resume = [] } = {}) {
           .catch((error) => emit('vision-scan', { phase: 'error', error: String(error?.message ?? error) }))
           .finally(() => { visionScan.running = false; });
         return json(res, 202, { ok: true, started: true });
+      }
+
+      // ── 一键统一响应测试（测速，2026-10-16 第五十一对话）────────────────────
+      // 与上面 /api/vision/scan 同一套形状（running 守卫 + 409 + 后台跑 + emit 进度 + 202），
+      // 差别只在"测什么"：vision 探测能不能看图，这里测**响应延迟**（底座 providers.testModelChat）。
+      // 🔴 它**只写 config.modelSpeeds**（实测结果），绝不碰 api.fallbackModels ——
+      //    建议顺序由 GET 计算、由界面按钮显式应用（用户拍板："先给建议顺序，我看了再点应用"）。
+      if (pathname === '/api/speeds/results' && method === 'GET') {
+        const all = speedResults();
+        return json(res, 200, {
+          results: all,
+          scanning: speedScan.running,
+          // 默认测速范围（主模型 + 现有降级链），界面用它预勾选与列表
+          targets: speedScanTargets(getConfig()),
+          suggestion: buildSpeedSuggestions(getConfig())
+        });
+      }
+
+      if (pathname === '/api/speeds/scan' && method === 'POST') {
+        if (speedScan.running) return json(res, 409, { ok: false, error: '已有一次测速正在进行' });
+        const body = await readBody(req).catch(() => ({}));
+        const targets = Array.isArray(body?.targets) ? body.targets : null;
+        speedScan.running = true;
+        emit('speed-scan', { phase: 'start' });
+        scanModelSpeeds({
+          providers: currentProviders(),
+          targets,
+          emit,
+          limit: Number.isFinite(Number(body?.limit)) && Number(body.limit) > 0 ? Math.min(Number(body.limit), 8) : 3
+        })
+          .then(({ total }) => emit('speed-scan', { phase: 'done', total }))
+          .catch((error) => emit('speed-scan', { phase: 'error', error: String(error?.message ?? error) }))
+          .finally(() => { speedScan.running = false; });
+        return json(res, 202, { ok: true, started: true });
+      }
+
+      // ── 「应用建议顺序」（2026-10-16 第五十一对话）──────────────────────────────
+      // 🔴 这是本功能里**唯一**会改 api.fallbackModels 的地方，而且：
+      //    ① 它**不采信客户端传上来的 order** —— 服务端现算一遍建议，这既是"所见即所改"，
+      //       也堵死了"拿这个接口当随便改降级链的后门"（界面/脚本都不能凭空塞顺序）。
+      //    ② 没测出**任何**结果时直接拒（409）：用户拍板是"测完给建议再应用"，
+      //       一条都没测就点应用，那只是把原顺序原样写回去，白写一次盘。
+      if (pathname === '/api/speeds/apply' && method === 'POST') {
+        const cfg = getConfig();
+        const sug = buildSpeedSuggestions(cfg);
+        // ⚠️ 两条 409 的**判定顺序**有讲究（2026-10-16 写判据时发现的死分支）：
+        //    降级链为空时 rows 也为空 ⇒ tested 必然 0，两条同时成立。
+        //    原先先判"没有测速结果"，于是"链被清空了、她刚测过"这种场面会拿到
+        //    一句**原因说错**的话（让她去点测速，而真正该做的是先往链里放模型）。
+        //    ⇒ 先判空链，两条分支各自可达、文案各自指向该动的那一步。
+        if (!sug.order.length) {
+          return json(res, 409, { ok: false, error: '降级链是空的，没有可应用的顺序' });
+        }
+        const tested = sug.rows.filter((r) => r.tested).length;
+        if (!tested) {
+          return json(res, 409, { ok: false, error: '还没有任何测速结果 —— 先点「开始测速」' });
+        }
+        // 写盘走既有的 updateConfig（"配置只有一个写入口"的既有纪律），不自己碰文件。
+        updateConfig({ api: { fallbackModels: sug.order } });
+        return json(res, 200, { ok: true, applied: sug.order, changed: sug.changed });
       }
 
       // ── 自定义搜索提供商（可添加多个，交互沿用模型提供商那套）──

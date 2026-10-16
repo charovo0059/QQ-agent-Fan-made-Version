@@ -375,26 +375,42 @@ function openModelPicker({ onPick = null } = {}) {
   });
   const left = overlay.querySelector('#mm-left');
   const right = overlay.querySelector('#mm-right');
-  const current = state.config?.api?.provider;
-  let activePid = current || providers[0].id;
-  function renderLeft() {
-    left.innerHTML = providers.map((p) =>
-      `<div class="mm-prov ${p.id === activePid ? 'active' : ''}" data-pid="${esc(p.id)}">${esc(p.displayName || p.id)}</div>`).join('');
-    left.querySelectorAll('.mm-prov').forEach((el) => {
-      el.addEventListener('click', () => { activePid = el.dataset.pid; renderLeft(); renderRight(); });
-    });
-  }
-  function renderRight() {
+  // 右列搜索框（2026-10-16 第五十一对话）。为什么现在才加：某个供应商一次能拉回
+  // 200+ 个模型（用户原话："有200多个模型可选"），右列就是一长条没法看 —— 之前只能滚。
+  // ⚠️ 只过滤**右列**（模型），不动左列（提供商）的既有结构：
+  //    左列那个 .mm-prov / .mm-prov-del 形态被 测试-现行\\test-删供应商与两处界面小修.mjs 钉着。
+  let search = '';
+  // 本函数里的局部拷贝：原来这里直接读 `state.config?.api?.model`。
+  // ⚠️ 别指望模板/渲染里用可选链就会怎样 —— 这两行只是把"可能为空的链"收成一个明确对象，
+  //    顺手让下面那句过滤条件读起来短一点；行为与原来逐字相同（provider 都是同一处来源）。
+  const curApi = state.config && state.config.api ? state.config.api : {};
+  /**
+   * 只重画"模型行"那一块（#mm-list）。
+   * ⚠️ **不能**在这里重画整个右列：搜索框若被一起重建，每敲一个字焦点就丢一次。
+   *    所以搜索框由 renderRight() 建一次，输入时只调本函数换行。
+   */
+  function renderList() {
     const p = providers.find((x) => x.id === activePid);
-    if (!p) { right.innerHTML = ''; return; }
+    const listBox = right.querySelector('#mm-list');
+    if (!p || !listBox) return;
     const names = p.modelNames || {};
-    right.innerHTML = p.models.map((m) => `
+    const all = Array.isArray(p.models) ? p.models : [];
+    // 过滤大小写不敏感，同时匹配 id 与显示名（列表显示的是显示名，只搜 id 会"明明看得见却搜不到"）
+    const q = search.trim().toLowerCase();
+    const list = q
+      ? all.filter((m) => String(m).toLowerCase().includes(q) || String(names[m] || '').toLowerCase().includes(q))
+      : all;
+    const rows = list.map((m) => `
       <div class="mm-model" data-pid="${esc(p.id)}" data-model="${esc(m)}">
-        <span class="mm-check">${m === state.config?.api?.model && p.id === current ? '✓' : ''}</span>
+        <span class="mm-check">${m === curApi.model && p.id === current ? '✓' : ''}</span>
         <span>${esc(names[m] || m)}</span>
         <span class="muted" style="font-size:11px">${esc(m)}</span>
-      </div>`).join('') || '<div class="muted" style="padding:10px">该提供商下没有模型</div>';
-    right.querySelectorAll('.mm-model').forEach((el) => {
+      </div>`).join('');
+    const empty = q
+      ? `<div class="muted" style="padding:10px">没有匹配「${esc(search)}」的模型（共 ${all.length} 个）</div>`
+      : '<div class="muted" style="padding:10px">该提供商下没有模型</div>';
+    listBox.innerHTML = rows || empty;
+    listBox.querySelectorAll('.mm-model').forEach((el) => {
       el.addEventListener('click', async () => {
         const pid = el.dataset.pid;
         const model = el.dataset.model;
@@ -414,6 +430,15 @@ function openModelPicker({ onPick = null } = {}) {
         }
       });
     });
+  }
+  function renderRight() {
+    const p = providers.find((x) => x.id === activePid);
+    if (!p) { right.innerHTML = ''; return; }
+    right.innerHTML = `<div class="mm-search"><input type="text" id="mm-search" placeholder="搜模型 id / 显示名…" value="${esc(search)}" /></div>`
+      + '<div id="mm-list"></div>';
+    const box = right.querySelector('#mm-search');
+    if (box) box.addEventListener('input', () => { search = box.value; renderList(); });
+    renderList();
   }
   renderLeft();
   renderRight();

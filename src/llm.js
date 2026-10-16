@@ -224,6 +224,13 @@ export async function chatCompletionWithRetry(args, retries = 2) {
         // 把"这次实际用的端点"一并带回去：备选模型可能来自**另一个 provider**，
         // 调用方要据此同步 vendor，否则成本看板的「渠道：模型」聚合会串味。
         r._usedApi = overrides ?? getConfig().api;
+        // ── 「本轮降级过」这个事实（2026-10-16 第五十一对话加）─────────────────
+        // 为什么必须显式带回去：降级只发生在**本函数内部**，调用方拿到的是一个
+        // 完全正常的成功响应 —— 它无从判断"这一次是主模型答的，还是换过一条路"。
+        // 而用户拍板要「降级那一轮就告诉她」，那就必须让同一轮的下一次模型调用看得见它。
+        // ⚠️ 只加字段、不改任何既有行为（_usedModel / _usedApi / model 一字未动）。
+        r._degraded = ci > 0;
+        r._fallbackLabel = ci > 0 ? label : '';
         return r;
       } catch (error) {
         lastError = error;

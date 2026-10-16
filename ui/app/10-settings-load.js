@@ -1,11 +1,15 @@
 'use strict';
 // 第 11/18 段：10-settings-load（拆自 ui/app.js，2026-09-25 第十七对话；加载顺序见 ui/index.html）
 async function loadSettings() {
-  const [cfg, tplData, provData, visionData, priceData, sysPromptData] = await Promise.all([
+  const [cfg, tplData, provData, visionData, speedData, priceData, sysPromptData] = await Promise.all([
     api('/api/config'),
     api('/api/persona-templates').catch(() => ({ templates: [] })),
     api('/api/providers').catch(() => ({ providers: [] })),
     api('/api/vision/results').catch(() => ({ results: {}, scanning: false })),
+    // 一键统一响应测试的现场（2026-10-16 第五十一对话）：上次测速结果 + 默认要测的目标 + 建议顺序。
+    // ⚠️ `.catch` 必须有：老后端（或接口挂了）时这一路失败会把整个 Promise.all 拖垮，
+    //    设置页就整页白屏 —— 这一页其余六路都带 catch，照抄它的口径。
+    api('/api/speeds/results').catch(() => ({ results: {}, scanning: false, targets: [], suggestion: null })),
     api('/api/model-prices').catch(() => ({ prices: [], current: null })),
     api('/api/system-prompt').catch(() => null)
   ]);
@@ -13,6 +17,12 @@ async function loadSettings() {
   state.providers = provData.providers || [];
   state.visionResults = visionData.results || {};
   state.visionScanning = !!visionData.scanning;
+  // 测速：results 是 { 提供商id|||模型id: { ok, latencyMs, note, checkedAt } }；
+  // targets 是后端算出来的"默认勾选范围"（主模型 + 现有降级链），界面不自己算一份（避免两套真相源）。
+  state.speedResults = speedData.results || {};
+  state.speedScanning = !!speedData.scanning;
+  state.speedTargets = Array.isArray(speedData.targets) ? speedData.targets : [];
+  state.speedSuggestion = speedData.suggestion || null;
   state.modelPrices = priceData || { prices: [], current: null };
   state.systemPrompt = sysPromptData && Array.isArray(sysPromptData.segments) ? sysPromptData : null;
   state.personaTemplates = {};
@@ -753,6 +763,83 @@ function renderSettingsSidebar() {
   });
 }
 
+/**
+ * 「一键统一响应测试」面板（2026-10-16 第五十一对话）。
+ *
+ * 数据全部来自后端，界面**不自己算**默认范围与建议顺序（避免两套真相源）：
+ *   · `state.speedTargets`    —— 后端给的"默认勾选范围"（主模型 + 现有降级链）
+ *   · `state.speedResults`    —— 已存盘的实测结果（键 providerId|||model）
+ *   · `state.speedSuggestion` —— 建议顺序（{ order, changed, rows }）
+ *
+ * ⚠️ 必须在 `renderSettings()` 的 innerHTML **之后**调（和 loadProactiveStatus 同一个原因：
+ *    这里要查 #speed-list 等真实 DOM 元素，模板求值阶段它们还没进 DOM）。
+ * ⚠️ 勾选状态放 `state.speedPicked`（键 → true/false）。第一次渲染时用默认范围填满；
+ *    之后【全选 / 全不选 / 只选默认】三个按钮整体重置它。
+ */
+function renderSpeedPanel() {
+  const list = $('#speed-list');
+  if (!list) return;
+  const targets = state.speedTargets || [];
+  const results = state.speedResults || {};
+  const picked = state.speedPicked || (state.speedPicked = {});
+  // 默认范围由后端标（targets[i].isDefault，见 src/speed-scan.js:speedScanTargets）——
+  // 界面只负责"是不是第一次进来"这一件事。
+  const status = $('#speed-test-status');
+  const sugBox = $('#speed-suggestion');
+  const applyBtn = $('#speed-apply-btn');
+  const runBtn = $('#speed-run-btn');
+
+  // 第一次进来（或后端换了范围）：默认把"主模型 + 现有降级链"全勾上 —— 用户拍板 ④。
+  if (!state.speedPickedInit) {
+    state.speedPickedInit = true;
+    for (const t of targets) if (t.isDefault !== false) picked[t.key] = true;
+  }
+
+  if (!targets.length) {
+    list.innerHTML = '<div class="muted" style="padding:6px 0">主模型还没设置 —— 先在上面选好模型，这里才有可测的东西。</div>';
+  } else {
+    list.innerHTML = targets.map((t) => {
+      const r = results[t.key];
+      const isMain = t.fallbackIndex < 0;
+      let badge = '<span class="muted speed-badge">未测</span>';
+      if (r) {
+        badge = r.ok
+          ? `<span class="speed-badge ok">✓ ${Number.isFinite(r.latencyMs) ? r.latencyMs + 'ms' : '通'}</span>`
+          : `<span class="speed-badge bad" title="${esc(r.note || '')}">✗ 不通</span>`;
+      }
+      return `<label class="fb-row speed-row" data-key="${esc(t.key)}">
+        <input type="checkbox" class="speed-pick" data-key="${esc(t.key)}"${picked[t.key] ? ' checked' : ''} />
+        <span class="fb-name">${esc(t.label || t.model)}</span>
+        <span class="fb-where muted">${esc(t.providerId || '主模型端点')}</span>
+        ${isMain ? '<span class="speed-badge main">主模型</span>' : ''}
+        ${badge}
+      </label>`;
+    }).join('');
+  }
+
+  const pickedCount = targets.filter((t) => picked[t.key]).length;
+  if (runBtn) runBtn.disabled = !!state.speedScanning || pickedCount === 0;
+  if (status) {
+    status.textContent = state.speedScanning
+      ? `测速中…（${pickedCount} 个）`
+      : (pickedCount ? `已勾选 ${pickedCount} 个模型；上次测速时间看右侧结果` : '没有勾选任何模型');
+  }
+
+  // 建议顺序：只在有降级链时才有意义（主模型不在建议范围内 —— 用户拍板只管降级链顺序）
+  const sug = state.speedSuggestion;
+  if (sugBox) {
+    if (!sug || !sug.rows || !sug.rows.length) {
+      sugBox.textContent = '降级链是空的 ⇒ 没有可排的顺序。先挑几个备选模型。';
+    } else if (!sug.changed) {
+      sugBox.textContent = '实测结果看：现在的顺序已经是最合适的了（快的在前、不通的在最后）—— 不需要改。';
+    } else {
+      const names = sug.order.map((o, i) => `${i + 1}. ${o.model}${o.provider ? ' @ ' + o.provider : ''}`).join('　');
+      sugBox.textContent = `建议顺序（点了右边按钮才会真的改）：${names}`;
+    }
+  }
+  if (applyBtn) applyBtn.disabled = !(sug && sug.changed);
+}
+
 function renderSettings() {
   const c = state.config;
   const box = $('#settings-form');
@@ -764,6 +851,9 @@ function renderSettings() {
   // ⚠️ 必须在 innerHTML **之后**调：事件委托要挂到 **#settings-form**（真实容器）上，
   //    元素得先在 DOM 里。别写 #settings-page —— 那个 id 不存在（踩过，见 bindAllowChips）。
   bindAllowChips();
+  // 「一键统一响应测试」面板：与 loadProactiveStatus 同一个道理 —— 它要查 #speed-list
+  // 这些真实元素，必须在 innerHTML 之后画（模板求值阶段元素还没进 DOM）。
+  renderSpeedPanel();
   // ⚠️ 必须在 innerHTML **之后**再读状态 —— loadProactiveStatus 是去查 DOM 元素再填内容的，
   //    放在 renderSettingsSection 里面（模板字符串求值阶段）时元素还没进 DOM，
   //    于是它查不到 #proactive-status、静默什么都不做（界面上就永远停在"正在读当前状态…"）。
