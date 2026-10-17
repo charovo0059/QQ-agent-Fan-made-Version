@@ -18,14 +18,7 @@ QQ 群 AI 机器人（桌面版）：事件驱动的无状态 Agent，接 OpenAI
 
 ## 界面
 
-![会话页](docs/images/screenshot-sessions.png)
-
-![模型 API 设置（含降级链与一键统一响应测试）](docs/images/screenshot-settings-api.png)
-
-![用量与成本](docs/images/screenshot-usage.png)
-
-> 三张都是**离线渲染的界面示意**（拿真实渲染函数 + 真实 CSS + 脱敏后的配置数据跑出来的），
-> 不是真机截图 —— 所以里面的人名、群号、Key 全是编的。
+> 截图整理中 —— 控制台前端还在优化，稍后补上。
 
 ## 她能干什么
 
