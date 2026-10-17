@@ -3,7 +3,7 @@
 **⚠️ 非官方修改版（Fan-made Version）**
 
 ![性质](https://img.shields.io/badge/性质-非官方修改版-orange)
-![规模](https://img.shields.io/badge/code-32.4k%20lines-blue)
+![规模](https://img.shields.io/badge/code-47.5k%20lines-blue)
 ![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Electron-lightgrey)
 ![技术栈](https://img.shields.io/badge/stack-Node.js%20%7C%20原生前端-orange)
 
@@ -25,8 +25,14 @@
 
 ### 这一版改了什么
 
-与**上游当前版本 0.4.0** 逐字节比对的结果（上游 `main` 分支的 `11577ba`，2026-09-26；
-上游**没有给 0.4.0 打 tag**，版本号取自它的 `package.json`）：
+与**上游当前版本 0.4.0** 逐字节比对的结果（上游 `main` 分支的 `fdfd325e`，2026-10-17；
+上游**没有给 0.4.0 打 tag**，版本号取自它的 `package.json`；它打过的 tag 只有 `v0.3.0` 和 `qq-portable-2026-09`）：
+
+> ℹ️ **上游自上次对表以来动了什么**：上一版这组数字算在上游 `11577ba`（2026-09-26）上。
+> 之后上游只多了 **2 个内容提交**（外加 1 个 PR 合并提交），而且 `src/` `ui/` `electron/` `scripts/` `build/`
+> 和 `package.json` **代码一行没动** —— 新增的只是 `.github/workflows/upload-portable.yml`（便携包往 OSS
+> 中转上传的 CI），另把 README 里的克隆地址从 `Kondius/qq-agent` 改成 `K0nd1us/QQ-agent`。
+> 所以下表相对上一次的变化，**全部来自本版自己长出来的部分**，不是上游改了。
 
 > ⚠️ **基线为什么用 0.4.0 而不是 v0.3.0**：本版**最初基于上游 v0.3.0**，但之后
 > **合并过上游 0.4 系列的一部分**（0.4 preview 的若干增量 + 一次 85 项逐条审计）。
@@ -36,42 +42,48 @@
 | 类别 | 数量 | 备注 |
 |---|---|---|
 | 逐字节相同 | **3** | 两个图标 + `scripts/export-prices.mjs` |
-| 本版独有（上游 0.4.0 里没有） | **38** | 见下 |
-| 双方都有、内容不同 | **53** | 见下 |
-| 上游 0.4.0 有、本版没有 | **92** | 见下 |
+| 本版独有（上游 0.4.0 里没有） | **45** | 见下 |
+| 双方都有、内容不同 | **52** | 见下 |
+| 上游 0.4.0 有、本版没有 | **94** | 见下 |
 
-**本版独有（上游 0.4.0 里没有）：**
+对账口径：本版跟踪 **100** 个文件、上游跟踪 **149** 个（100 = 3 + 45 + 52，149 = 3 + 52 + 94；
+按 `git ls-files` 的文件名逐个比，同名再比 sha256）。
 
-- **微信通道** —— `src/wechat-channel.js`（通道生命周期）、`wechat-contacts.js`（联系人名字主动同步）+ 前端页
-- **记忆增强** —— `src/core-memory.js`（核心记忆，与会话存档解耦）、`dream.js`（「做梦」整理）、`memory-preview.js`（召回预览）
-- **群管理三件** —— `src/mutes.js`（禁言表）、`proposals.js`（提案）、`send-failures.js`（发送失败可见 / 可重发）
-- **图片与视频** —— `src/image-search.js`（图搜）、`ffmpeg-path.js`、`cf-fetch.js`、`zip.js`、`gif.js`
+**本版独有（上游 0.4.0 里没有，45 个）：**
+
+- **微信通道** —— `src/wechat-channel.js`（通道生命周期）、`src/wechat-contacts.js`（联系人名字主动同步）+ 前端页
+- **记忆增强** —— `src/core-memory.js`（核心记忆，与会话存档解耦）、`src/dream.js`（「做梦」整理）、`src/memory-preview.js`（召回预览）
+- **群管理三件** —— `src/mutes.js`（禁言表）、`src/proposals.js`（提案）、`src/send-failures.js`（发送失败可见 / 可重发）
+- **图片与视频** —— `src/image-search.js`（图搜）、`src/ffmpeg-path.js`、`src/cf-fetch.js`、`src/zip.js`、`src/gif.js`
 - **JM 桥** —— `src/jm-bridge.js` + 随包技能 `skills/doujin-lookup/`、`skills/合并转发发送/`
-- **前端拆分** —— ⚠️ 上游 0.4.0 **也把前端拆了**，但拆法不同（`00-core` + `01-boot` … `12-concept2-ui` 共 13 段）；
-  本版是**另外一套**：`ui/app/00-core.js` … `17-init.js` 共 **18 段**，`ui/app.js` 只留作路标
-- 另有 `electron/preload.js`（上游用的是 `preload.cjs`）、`plugins/README.md`、`prices.json`（上游 0.4.0 已删掉它，改用远程价格源）
+- **运行支撑** —— `src/proxy.js`（全仓库**唯一**一处解释 `config.proxy` 的分流判定）、`src/qq-contacts.js`（QQ 号 ↔ 人名的名字表）、
+  `src/tier-defaults.js`（新进白名单的会话默认响应档位）、`src/speed-scan.js`（模型响应速度扫描 / 「一键统一响应测试」后端）
+- **前端拆分** —— ⚠️ 上游 0.4.0 **也把前端拆了**，但它那套是 `00-core` + `01-boot` … `12-concept2-ui` 共 **13 段**；
+  本版是**另外一套**：`ui/app/00-core.js` … `19-proposals.js` 共 **20 段**，`ui/app.js` 只留作路标
+- 另有 `electron/preload.js`（上游用的是 `preload.cjs`）、`plugins/README.md`、`prices.json`（上游 0.4.0 已删掉它，改用远程价格源），
+  以及 `ui/group-qrcode.png`（上游那份 `ui/group-qrcode.jpg` 是**后缀写着 jpg、内容其实是 PNG** 的假扩展名，本版已改成真扩展名）
 
-**双方都有、内容不同（53 个）—— 这才是"分叉"的主体：**
+**双方都有、内容不同（52 个）—— 这才是"分叉"的主体：**
 
 `src/skills/` 六个模块 + `plugin-loader.js` + `tool-registry.js`（⚠️ **技能 / 插件系统上游 0.4.0 也有**，
 两边是**各自实现的同名子系统**，不是本版独有的发明）、`image-compress.js` / `image-type.js` /
 `gif-to-video.js` / `video-reader.js`（同样两边都有），以及 `app.js`、`orchestrator.js`、`prompt.js`、
-`memory.js`、`tools.js`、`personas.js`、`llm.js`、`server.js`、`ui/landing.html`、`ui/style.css`、
-`ui/index.html`、`.gitignore`、`package.json`、`package-lock.json`、`build/installer.nsh` 等。
+`memory.js`、`tools.js`、`personas.js`、`llm.js`、`server.js`、`config.js`、`store.js`、`web-search.js`、`safe-fetch.js`、
+`ui/landing.html`、`ui/style.css`、`ui/index.html`、`.gitignore`、`package.json`、`package-lock.json`、`build/installer.nsh` 等。
 
-**上游 0.4.0 有、本版没有（92 个）—— 有意未收录：**
+**上游 0.4.0 有、本版没有（94 个）—— 有意未收录：**
 
 | 类别 | 数量 | 内容 |
 |---|---|---|
 | `test/` | 34 | 上游的测试套件（含 `_harness.mjs` / `_ui-load.mjs` / 5 个 `coverage-*` / `selftest.mjs` 等） |
-| `ui/` | 18 | `ui/app/01-boot.js` … `12-concept2-ui.js`（上游那套拆分）、`captcha-sw.js`、`persona-plaza/`、`plugin-market/`、`skill-market/`、`vendor/` |
+| `ui/` | 19 | `ui/app/01-boot.js` … `12-concept2-ui.js`（上游那套拆分）、`captcha-sw.js`、`persona-plaza/`、`plugin-market/`、`skill-market/`、`vendor/`、`group-qrcode.jpg` |
 | `scripts/` | 14 | 4 个 `setup*.mjs`、`pack-qq-portable.mjs`、`new-skill.mjs`、`export-prices-md.mjs`、`gen-icon.mjs`、`apply-vision-docs.mjs`、`judge-check.mjs`、`preload-check.mjs`、`protocol-check.mjs`、`lib/`（2 个）、`link-runtime-junctions.ps1` |
 | `src/` | 12 | `community.js`、`market.js`、`profile.js`、`reminders.js`、`routes.js`、`thinking.js`、`reply-rescue.js`、`instance-lock.js`、`logger.js`、`holidays.js`、`media-links.js`、`zip-install.js` |
 | `doc/` | 9 | 扩展开发文档（skill / plugin / prompt-pipeline / video-modes 等） |
-| 其它 | 5 | `server/`（2，社区后端）、`.zcodeignore`、`community.key.example`、`electron/preload.cjs` |
+| 其它 | 6 | `server/`（2，社区后端）、`.github/workflows/upload-portable.yml`（便携包 CI，本版自己打包不走它）、`.zcodeignore`、`community.key.example`、`electron/preload.cjs` |
 
 未收录的理由分三类：① **依赖单文件 `ui/app.js`** —— 上游那 3 个测试（`render-test` / `scroll-test` /
-`usage-e2e`）直接读它，而本版已拆成 18 段 ⇒ 收进来**一跑就红**（补一堆失败的测试比没有测试更糟）；
+`usage-e2e`）直接读它，而本版已拆成 20 段 ⇒ 收进来**一跑就红**（补一堆失败的测试比没有测试更糟）；
 ② **属于上游 0.4.0 的新功能面**（社区 / 市场 / 人设广场 / 插件市场）—— 本版**有意不跟**；
 ③ `link-runtime-junctions.ps1` 里硬编码的是**上游作者的本机路径**，不适合收进别人的仓库。
 
@@ -80,7 +92,9 @@
 这几个是**与 v0.3.0 对齐**；它们与 0.4.0 的同名文件仍有差异，所以上表把它们算作"内容不同"。
 其中 `package-lock.json` 是按本版 `package.json` 重新生成的。
 
-代码规模约 **32.4k 行**（`src/` 19.8k + `ui/` JS 9.1k + CSS 3.5k）。
+代码规模约 **47.5k 行**（`src/` 31.3k + `ui/` JS 12.5k + CSS 3.7k；按 `git ls-files` 跟踪的源码统计，
+不含 `package-lock.json` / `prices.json` 这类数据文件）。同一个口径下上游 0.4.0 约 **33.1k 行**
+（`src/` 20.7k + `ui/` JS 10.6k + CSS 1.8k）。
 架构取向与原版一致：**无状态会话、按次计费、零框架前端**，这些仍然是原版的设计。
 
 ### 许可与署名
