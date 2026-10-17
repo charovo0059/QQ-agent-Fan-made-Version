@@ -1104,7 +1104,8 @@ function renderAbilitiesSection(c) {
         </div>
         <div class="field"><label>单次运行最多真搜几次</label>
           <input type="number" id="cfg-imagesearch-max" min="1" max="10" value="${esc(img.maxPerRun ?? 2)}" />
-          ${hintLine('上限只统计真正打到引擎的次数，参数写错不占额度。')}
+          ${hintLine('上限只统计真正打到引擎的次数，参数写错不占额度。'
+            + '改了**立刻生效**；只是她提示词里那句话里的数字，要**重启应用**才会跟着变。')}
           <details class="hint-more">
             <summary>说明：为什么要设这个上限</summary>
             <div class="hint-more-body">
@@ -1115,7 +1116,8 @@ function renderAbilitiesSection(c) {
       </div>
       <div class="field"><label>单次运行最多找几次图</label>
         <input type="number" id="cfg-imagesearch-keyword-max" min="1" max="10" value="${esc(img.keywordMaxPerRun ?? 2)}" />
-        ${hintLine('与上面「单次运行最多真搜几次」各算各的：一次运行里"查出处的图"和"找新图"是两件事。')}
+        ${hintLine('与上面「单次运行最多真搜几次」各算各的：一次运行里"查出处的图"和"找新图"是两件事。'
+          + '同样改了立刻生效，提示词里的数字要重启才刷新。')}
       </div>
       <!-- 🆕 2026-10-05（第四十四对话 · **她自己的提案 f3bebcf7**）：把这两个数从"写死在代码里"
            挪到界面上。她原话：「单次返回张数上限（默认 6，上限 12）只写在提示词和内核默认值里，

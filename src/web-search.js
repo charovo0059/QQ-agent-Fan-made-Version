@@ -768,6 +768,59 @@ export function parseSafebooruImages(body, limit = 12) {
 }
 
 /**
+ * 🆕 2026-10-17（第四十九对话 · 她提案 `d048d48e` / `04d1d2fb`）：从候选池里按 `offset` / `random` 取一段。
+ *
+ * 为什么做成**纯函数**：这两件事在**两条检索路**（pixiv / Safebooru）上各写一份迟早会漂
+ * （本项目的既有教训：路由判定写两份 ⇒ 两份判定不一致）。而且随机**必须可注入 `rng`**
+ * 才测得出"是不是真的洗了牌"（否则判据只能验"两次不一样"，那 SHA 都能过）。
+ *
+ * ⚠️ 缺省（`offset=0` / `random=false`）⇒ 逐字节等于原来的 `pool.slice(0, limit)`。
+ */
+export function sliceCandidates(pool, { offset = 0, random = false, limit = 8, rng = Math.random } = {}) {
+  const all = Array.isArray(pool) ? pool : [];
+  const n = Math.max(1, Math.min(50, Number(limit) || 8));
+  const off = Math.max(0, Math.floor(Number(offset) || 0));
+  let seq = all;
+  if (random) {
+    // Fisher–Yates 洗**副本**（⛔ 不动传进来的数组：调用方还要用 `total` 说"池子有多大"）
+    seq = all.slice();
+    for (let i = seq.length - 1; i > 0; i--) {
+      // 🔴 `rng()` 可能返回 1 / 负数 / NaN（测试注入写错、或将来换成别的源）⇒ 必须钳，
+      //    否则下标越界只会让"洗牌少洗几下"——而那是最难发现的一类错（看着随机、其实有偏）。
+      const r = Number(rng());
+      const j = Number.isFinite(r) ? Math.min(i, Math.max(0, Math.floor(r * (i + 1)))) : 0;
+      const t = seq[i]; seq[i] = seq[j]; seq[j] = t;
+    }
+  }
+  return { list: seq.slice(off, off + n), offset: off, total: all.length };
+}
+
+/** 把 `skipIds`（Set 或数组，元素可能是数字）归一成"非空字符串"的 Set。 */
+function toSkipIdSet(skipIds) {
+  if (skipIds instanceof Set) return skipIds;
+  return new Set((Array.isArray(skipIds) ? skipIds : [])
+    .map((x) => String(x ?? '').trim()).filter(Boolean));
+}
+
+/**
+ * 🆕 2026-10-17（她提案 `04d1d2fb` 第 ② 条 / `d048d48e` 的验收标准）：
+ * 把**本轮已经给她看过的作品 id** 从候选池里剔掉。
+ *
+ * 🔴 为什么用"作品 id"而不是"图片地址"去重：同一作品的多页是**不同地址**，按地址去重
+ *   在开了多页之后等于没去重（第 2 页会当成新图再给一遍）。
+ * ⚠️ 没有 id 的条目（老路的百度/必应结果）**一律保留**（它们本来就没这个概念）。
+ */
+export function filterSkipped(list, skipIds) {
+  const src = Array.isArray(list) ? list : [];
+  const skip = toSkipIdSet(skipIds);
+  if (!skip.size) return src.slice();
+  return src.filter((x) => {
+    const id = String(x?.id ?? '').trim();
+    return !(id && skip.has(id));
+  });
+}
+
+/**
  * 插画路搜索（Safebooru）。
  *
  * @param {object} o
@@ -784,7 +837,9 @@ export async function safebooruImageSearch(query, {
   // 🆕 2026-10-05（第四十四对话 · 她提案 123d9c1c）：`'safe'` = 只要全年龄 / `'r18'` = 只要擦边及更露骨
   //   / `'any'`（缺省）= 不过滤。⚠️ 缺省 `'any'` ⇒ 不传它时行为与加这个参数之前**逐字节相同**。
   requireLevel = 'any',
-  maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch
+  maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch,
+  // 🆕 2026-10-17（第四十九对话 · 她提案 `d048d48e` / `04d1d2fb`）：候选池要多大（缺省 0 = 与以前一样）。
+  poolLimit = 0
 } = {}) {
   const base = (Array.isArray(tags) ? tags : [tags]).map((x) => String(x ?? '').trim()).filter(Boolean);
   if (!base.length) throw new Error('插画搜索缺少 tag');
@@ -797,13 +852,19 @@ export async function safebooruImageSearch(query, {
   //    而"筛完再切"会让池子不够 ⇒ 这里先要 `2n`（Safebooru 单请求上限 50，`safebooruSearchUrl` 会钳）。
   //    ⚠️ 不这么做的话，`requireLevel='safe'` 时可能只回来 1~2 张（池子被切掉了）。
   const want = String(requireLevel ?? 'any').toLowerCase() === 'any' ? n : Math.min(50, n * 2);
+  // 🆕 2026-10-17：翻页 / 随机 / 去重要先拿一个**更大的候选池**，否则"跳过前 N 张"根本跳不动
+  //   （池子只有 n 张时 offset>0 必然空手，而"这个 tag 没图"是错的）。
+  //   ⚠️ 刻意**不改上面那行** `? n : Math.min(50, n * 2)` —— `test-插画分级过滤与张数上限.mjs`
+  //      用正则钉着那个表达式（"要筛就多要一倍"这条意图）。改成在它之后加一个派生值。
+  //   ⚠️ 缺省 `0` ⇒ `wantPool === want` ⇒ 与加这个参数之前**逐字节相同**。
+  const wantPool = Math.max(want, Math.min(50, Number(poolLimit) || want));
   const out = [];
   const seen = new Set();
   const errors = [];
   for (const round of rounds) {
     try {
-      const { body } = await fetcher(safebooruSearchUrl(round, { limit: want }), { browseLocked, maxBytes, headers: SAFEBOORU_HEADERS });
-      for (const it of parseSafebooruImages(body, want)) {
+      const { body } = await fetcher(safebooruSearchUrl(round, { limit: wantPool }), { browseLocked, maxBytes, headers: SAFEBOORU_HEADERS });
+      for (const it of parseSafebooruImages(body, wantPool)) {
         if (seen.has(it.url)) continue;             // 两轮之间按地址去重（同一个 post 可能两边都出现）
         seen.add(it.url);
         out.push(it);
@@ -953,6 +1014,11 @@ export async function illustrationSearch(query, {
   cache = null, browseLocked = false, maxBytes = IMAGE_SEARCH_MAX_BYTES,
   // 🆕 2026-10-05（第四十四对话 · 她提案 123d9c1c）：分级过滤（同 pixiv 那条路的口径）。
   requireLevel = 'any',
+  // 🆕 2026-10-17（第四十九对话 · 她提案 `d048d48e` / `04d1d2fb`）：
+  //   `offset` = 跳过前几张；`random` = 在候选池里随机取样；`skipIds` = 本轮已给过、要剔掉的作品 id；
+  //   `rng` **只为测试注入**（默认 `Math.random`）。
+  //   🔴 四个都缺省 ⇒ 与加它们之前**逐字节相同**（这条写进了判据）。
+  offset = 0, random = false, skipIds = null, rng = Math.random,
   fetcher = safeFetch, prober = null
 } = {}) {
   const candidates = illustrationTagCandidates(query, { tags, extraTags });
@@ -976,7 +1042,12 @@ export async function illustrationSearch(query, {
     if (okTag) { hit = t; break; }
   }
   if (!hit) return { ok: false, reason: 'no-tag', tried };
-  const pool = await safebooruImageSearch(query, { tags: [hit], rating, limit, requireLevel, browseLocked, maxBytes, fetcher });
+  // 🆕 2026-10-17：翻页/随机/去重要先要够大的池子（缺省时 wantPool === 原来的 want）。
+  const off = Math.max(0, Math.floor(Number(offset) || 0));
+  const skip = toSkipIdSet(skipIds);
+  const nWin = Math.max(1, Math.min(12, Number(limit) || 8));
+  const wantPool = Math.min(50, nWin + off + (random ? nWin : 0) + skip.size);
+  const pool = await safebooruImageSearch(query, { tags: [hit], rating, limit: nWin, requireLevel, browseLocked, maxBytes, fetcher, poolLimit: wantPool });
 
   // 🆕 2026-10-05（她提案 123d9c1c）：按分级**真筛一层**（Safebooru 这条路）。
   //   口径与 pixiv 那条路**完全一致**：`general` / `safe` = 安全，其余（sensitive/questionable…）算 r18。
@@ -993,11 +1064,16 @@ export async function illustrationSearch(query, {
       : pool;
   // 🔴 要 r18 但一张都没有 ⇒ 如实退回全部（带 `levelFallback`），⛔ 不空手而归。
   const fallback = level === 'r18' && !kept.length && before > 0;
-  const list = (fallback ? pool : kept).slice(0, Math.max(1, Math.min(12, Number(limit) || 8)));
+  // 🆕 2026-10-17：去重 → 翻页/随机取窗口。
+  //   ⚠️ 缺省时 `filterSkipped` 原样返回、`sliceCandidates` 就是 `slice(0, n)`
+  //      ⇒ 与原来那一行**逐字节等价**（`nWin` 就是这个 n）。
+  const win = sliceCandidates(filterSkipped(fallback ? pool : kept, skip), { offset: off, random, limit: nWin, rng });
   return {
-    ok: true, tag: hit, tried, list,
+    ok: true, tag: hit, tried, list: win.list,
     levelDropped: fallback ? 0 : (before - kept.length),
-    levelFallback: fallback
+    levelFallback: fallback,
+    // 这两个读数是给她判断"是不是翻到底了"用的（新增字段，旧调用方忽略即可）
+    poolTotal: win.total, poolOffset: win.offset
   };
 }
 
@@ -1028,6 +1104,8 @@ export const PIXIV_DEFAULT_HEAT = 5000;
 /** pixiv 搜索响应的大小（见上面事实 ④）。 */
 export const PIXIV_TEXT_MAX_BYTES = 2 * 1024 * 1024;
 const PIXIV_PAGES_MAX_BYTES = 256 * 1024;
+/** 🆕 2026-10-17（她提案 `3c6a3ea4`）：结果里最多附带**前几页**的直链（其余用 pid+page 现取）。 */
+const PIXIV_RESULT_MAX_PAGES = 3;
 /** ⚠️ `referer` 是**这个站要求的**（不是可选美化）：ajax 与图床都认它。 */
 const PIXIV_HEADERS = { referer: 'https://www.pixiv.net/', accept: 'application/json,*/*' };
 
@@ -1107,6 +1185,80 @@ export function parsePixivPages(body) {
 }
 
 /**
+ * 🆕 2026-10-17（第四十九对话 · 她提案 `3c6a3ea4` / `7ff9042c`）：把 `/pages` **整份**解析出来。
+ *
+ * 为什么加它：`parsePixivPages` 只取 `body[0].urls` ⇒ 多页作品的其余页被**整批丢掉**，
+ * 而这份响应里本来就有全部页（`body` 数组一项 = 一页）⇒ 取多页**不多发任何请求**。
+ * ⚠️ `parsePixivPages` **一个字都不改**（它被旧判据钉着，且"只取第 0 页"仍有调用方）。
+ *
+ * @returns {Array<{page:number, original:string, regular:string, small:string, thumbMini:string, width:number, height:number}>}
+ *   `page` 是 **1 基**（第 1 页 = 原来那个 `body[0]`）。空体 / 非 JSON 数组 ⇒ `[]`。
+ */
+export function parsePixivPagesAll(body) {
+  const text = String(body ?? '').trim();
+  if (!text) return [];
+  let j;
+  try { j = JSON.parse(text); } catch { throw new Error('pixiv /pages 返回的不是 JSON（可能改版或被拦）'); }
+  const arr = Array.isArray(j?.body) ? j.body : [];
+  return arr.map((p, i) => {
+    const u = p?.urls || {};
+    return {
+      page: i + 1,
+      original: String(u.original || ''),
+      regular: String(u.regular || ''),
+      small: String(u.small || ''),
+      thumbMini: String(u.thumb_mini || ''),
+      width: Number(p?.width) || 0,
+      height: Number(p?.height) || 0
+    };
+  });
+}
+
+/**
+ * 🆕 2026-10-17（她提案 `7ff9042c`）：从"纯数字 pid"或"pixiv 作品页链接"里认出**作品 id**（纯函数）。
+ *
+ * 🔴 为什么必须**只认这几种形态**：这个 id 会被拿去拼 `/ajax/illust/<id>/pages` 并**直接下载**，
+ *   等于"由内核自己产出一条可信图片地址"。放宽成"任意字符串"就成了任意 URL 拼接口。
+ * ⚠️ 域名锚在**开头**（`^(https?://)?(www.)?pixiv.net/`）⇒ `pixiv.net.evil.com`、
+ *   `evil.com/?x=pixiv.net/artworks/1` 都不匹配（与 `isPixivHost` 那条踩过的坑同一个形状）。
+ *
+ * @param {string|number} raw
+ * @returns {string} 纯数字 id
+ * @throws 认不出来就抛（错误文案给人话，工具层原样转述）
+ */
+export function normalizePixivPid(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) throw new Error('pixiv 作品 id 为空');
+  const m = /^(\d{1,12})$/.exec(s)
+    || /^(?:https?:\/\/)?(?:www\.)?pixiv\.net\/(?:[a-z]{2}\/)?artworks\/(\d{1,12})/i.exec(s);
+  if (!m) throw new Error(`认不出这是 pixiv 作品 id：${s}（要给纯数字，或 https://www.pixiv.net/artworks/<数字>）`);
+  return m[1];
+}
+
+/**
+ * 🆕 2026-10-17（她提案 `7ff9042c`）：**按 pid 去取这个作品的每一页直链**。
+ *
+ * ⚠️ headers / 代理 / 浏览锁定**全部留在本文件**（与 `pixivIllustrationSearch` 同一套）——
+ *   工具层只管"拿结果、登记白名单、交给 sender"，⛔ 不许它自己拼 URL 或加头。
+ * @returns {Promise<{id:string, pages:Array}>}
+ */
+export async function fetchPixivPages(pid, {
+  fetcher = safeFetch, browseLocked = false, maxBytes = PIXIV_PAGES_MAX_BYTES
+} = {}) {
+  const id = normalizePixivPid(pid);
+  // 🆕 2026-10-17（第四十九对话）：「有没有代理」这个判定**只能有一份**，就放在这里
+  //   （`pixivIllustrationSearch` :1301 那份是同一口径）。⛔ 工具层不许再判一次 ——
+  //   `test-illustration-pixiv源.mjs` 明写着「工具层出现第二份走哪条的判定」会红。
+  //   ⚠️ 拦在**发请求之前**：否则症状是一句看不懂的网络错误（她只会以为"取图坏了"）。
+  if (!resolveProxyFor('www.pixiv.net')) {
+    throw new Error('要能访问 pixiv 才能按 pid 取图，但现在的配置里没有能路由到 www.pixiv.net 的代理。'
+      + '要么先在管理端的代理设置里把 pixiv 配好，要么改用 url 发 search_images 已经给出的链接。');
+  }
+  const { body } = await fetcher(pixivPagesUrl(id), { browseLocked, maxBytes, headers: PIXIV_HEADERS });
+  return { id, pages: parsePixivPagesAll(body) };
+}
+
+/**
  * 一条 pixiv 搜索结果 → **与 Safebooru 路同形状**的条目（`illustrationImagesFor` 直接能用）。
  * ⚠️ `url`（全尺寸）留空，等 `/pages` 回来再填；`sampleUrl` 先放搜索响应里的缩略图兜底。
  */
@@ -1146,6 +1298,9 @@ export async function pixivIllustrationSearch(query, {
   // 🆕 2026-10-05（第四十四对话 · 她提案 123d9c1c）：`'safe'` = 只要全年龄 / `'r18'` = 只要擦边及更露骨
   //   / `'any'`（缺省）= 不过滤。⚠️ 缺省 `'any'` ⇒ 不传它时行为与加这个参数之前**逐字节相同**。
   requireLevel = 'any',
+  // 🆕 2026-10-17（第四十九对话 · 她提案 `d048d48e` / `04d1d2fb`）：与 Safebooru 那条路同一口径的
+  //   `offset` / `random` / `skipIds` / `rng`。四个都缺省 ⇒ 与加它们之前**逐字节相同**。
+  offset = 0, random = false, skipIds = null, rng = Math.random,
   maxBytes = PIXIV_TEXT_MAX_BYTES, fetcher = safeFetch, pagesFetcher = null
 } = {}) {
   // ⚠️ 用 `let`：下面在"要 r18 但一条都没有"时会把它置 true（如实报"退回了全年龄"）。
@@ -1265,17 +1420,34 @@ export async function pixivIllustrationSearch(query, {
     if (onlyR18.length) pool = onlyR18;
     else { pool = ordered; levelFallback = true }
   }
-  const chosen = pool.slice(0, n);
+  // 🆕 2026-10-17（她提案 `d048d48e` / `04d1d2fb` 的验收标准："同一 tag 连要两轮，第二轮不再全是上一轮那几张"）：
+  //   先按"本轮已给过的作品 id"剔掉，再按 offset / random 取窗口。
+  //   ⚠️ 缺省（offset=0 / random=false / skipIds 空）⇒ `pool.slice(0, n)`，与加它之前**逐字节相同**。
+  const win = sliceCandidates(filterSkipped(pool, skipIds), { offset, random, limit: n, rng });
+  const chosen = win.list;
 
   const list = await Promise.all(chosen.map(async ({ row, hot }) => {
     const item = pixivRowToItem(row);
     let fullSize = false;
     try {
       const { body } = await pages(pixivPagesUrl(item.id), { browseLocked, maxBytes: PIXIV_PAGES_MAX_BYTES, headers: PIXIV_HEADERS });
-      const u = parsePixivPages(body);
+      // 🆕 2026-10-17（她提案 `3c6a3ea4`）：这份响应里**本来就有全部页**，以前只取第 0 页
+      //   ⇒ 多页作品的其它页被整批丢掉（"只发第一张、图不对题"的根）。
+      //   ⚠️ 这一改**不多发任何请求**：`/pages` 这次调用本来就在发。
+      const all = parsePixivPagesAll(body);
+      const u = all[0] || { original: '', regular: '', small: '' };
       if (u.original) { item.url = u.original; fullSize = true; }
       if (u.regular) item.sampleUrl = u.regular;
       else if (u.small) item.sampleUrl = u.small;
+      if (all.length > 1) {
+        item.pageCount = Math.max(Number(item.pageCount) || 1, all.length);
+        // ⚠️ 只带**前 3 页**：一次回 200 条直链会把上下文撑爆（其余页用 pid + page 现取，见 `send_image`）。
+        item.pages = all.slice(0, PIXIV_RESULT_MAX_PAGES).map((p) => ({
+          page: p.page,
+          url: p.original || p.regular || p.small || '',
+          sampleUrl: p.regular || p.small || p.original || ''
+        }));
+      }
     } catch { fullSize = false; }
     // 原图接口没给 ⇒ 至少留一个**能用**的链接（缩略图），并把这件事如实往上带
     if (!item.url) item.url = item.sampleUrl;
@@ -1316,7 +1488,10 @@ export async function pixivIllustrationSearch(query, {
     //   `levelDropped` = 因为"只要 safe / 只要 r18"被剔掉的条数（对着**切片前**的池子数）；
     //   `levelFallback` = 要 r18 但一条都没有 ⇒ 已如实退回全年龄（工具层必须说明这件事）。
     levelDropped,
-    levelFallback
+    levelFallback,
+    // 🆕 2026-10-17：池子有多大 / 这次从第几条开始取（她判断"翻到底了没有"要用的读数）
+    poolTotal: win.total,
+    poolOffset: win.offset
   };
 }
 
@@ -1463,6 +1638,8 @@ export async function illustrationSearchAnySource(query, {
   limit = 8, maxProbe = 4, cache = null, browseLocked = false,
   // 🆕 2026-10-05（她提案 123d9c1c）：`'safe'` / `'r18'` / `'any'`（缺省）。透传给 pixiv 那条路。
   requireLevel = 'any',
+  // 🆕 2026-10-17（她提案 `d048d48e` / `04d1d2fb`）：原样透传给两条检索路（缺省 ⇒ 行为不变）。
+  offset = 0, random = false, skipIds = null, rng = Math.random,
   maxBytes = IMAGE_SEARCH_MAX_BYTES, fetcher = safeFetch, pixivPagesFetcher = null, prober = null
 } = {}) {
   const src = ['auto', 'pixiv', 'safebooru'].includes(String(source)) ? String(source) : 'auto';
@@ -1482,6 +1659,7 @@ export async function illustrationSearchAnySource(query, {
     try {
       const p = await pixivIllustrationSearch(query, {
         tags, heat, limit, browseLocked, rating, requireLevel,
+        offset, random, skipIds, rng,
         maxBytes: PIXIV_TEXT_MAX_BYTES, fetcher, pagesFetcher: pixivPagesFetcher
       });
       if (p.ok) {
@@ -1517,6 +1695,7 @@ export async function illustrationSearchAnySource(query, {
           popularCount: p.popularCount, hotCount: p.hotCount,
           fullSizeMiss: p.fullSizeMiss, r18Dropped: p.r18Dropped, r18Kept: p.r18Kept,
           levelDropped: p.levelDropped, levelFallback: p.levelFallback,
+          poolTotal: p.poolTotal, poolOffset: p.poolOffset,
           mode: p.mode, loggedIn: p.loggedIn
         };
       }
@@ -1532,7 +1711,8 @@ export async function illustrationSearchAnySource(query, {
 
   if (!wantBooru) return { ok: false, source: null, reason: 'no-source', tried: [], notes };
   const b = await illustrationSearch(query, {
-    tags, extraTags, rating, limit, maxProbe, cache, browseLocked, maxBytes, fetcher, prober, requireLevel
+    tags, extraTags, rating, limit, maxProbe, cache, browseLocked, maxBytes, fetcher, prober, requireLevel,
+    offset, random, skipIds, rng
   });
   // 🆕 2026-10-05（她提案 123d9c1c）：Safebooru 这条路的"分级过滤"读数也如实报出来（与 pixiv 同一口径）。
   if (b.ok) {

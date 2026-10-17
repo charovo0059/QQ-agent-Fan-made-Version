@@ -14,7 +14,10 @@ import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes, withDeadli
 import { estimateCost, cacheHitRate, resolveApiKey } from './llm.js';
 import { formatStickerList } from './stickers.js';
 import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
-import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint, illustrationCapabilityHint } from './web-search.js';
+// 🆕 2026-10-17（第四十九对话 · 她提案 `7ff9042c`）：按 pid 取图这条路要用的两件（`fetchPixivPages` /
+//   `normalizePixivPid`）。⚠️ headers / 代理判定 / 浏览锁定全在 `web-search.js` 里，工具层只拿结果 ——
+//   ⛔ 别在这儿拼 URL、加头，也别在这里做「有没有代理」的判定（那个判定只能有一份）。
+import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint, illustrationCapabilityHint, fetchPixivPages, normalizePixivPid } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
 import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
 import { firstFrameOnly, countFrames } from './gif.js';
@@ -566,11 +569,30 @@ function rememberImageUrls(ctx, urls) {
  */
 export function illustrationImagesFor(ctx, list) {
   const rows = Array.isArray(list) ? list : [];
-  rememberImageUrls(ctx, rows.flatMap((x) => [x?.url, x?.sampleUrl]));
+  // 🆕 2026-10-17（她提案 `3c6a3ea4`）：**多页的其它页也要登记**。
+  //   否则症状是"明明给了她第 2 页的链接，一发就拒绝" —— 那看起来像发图坏了（本项目最忌的静默失败）。
+  rememberImageUrls(ctx, rows.flatMap((x) => [
+    x?.url, x?.sampleUrl,
+    ...(Array.isArray(x?.pages) ? x.pages.flatMap((p) => [p?.url, p?.sampleUrl]) : [])
+  ]));
   return rows.map((x, i) => ({
     n: i + 1,
     url: x?.url ?? '',
     ...(x?.sampleUrl ? { sampleUrl: x.sampleUrl } : {}),
+    // 🆕 2026-10-17（她提案 `3c6a3ea4` / `04d1d2fb`）：作品 id 与页数是"翻页/去重/按 pid 再取"的钥匙。
+    //   ⚠️ 只在**真有**的时候才加这个键（`'id' in x` 这种判据在旧判据里钉着：
+    //      "没有的字段不该编一个出来"）。老路（百度/必应）没有 id ⇒ 一个键都不多。
+    ...(x?.id !== undefined && x?.id !== null && String(x.id).trim() ? { id: String(x.id).trim() } : {}),
+    ...(Number(x?.pageCount) > 0 ? { pageCount: Number(x.pageCount) } : {}),
+    ...(Array.isArray(x?.pages) && x.pages.length
+      ? {
+        pages: x.pages.map((p) => ({
+          page: Number(p?.page) || 0,
+          ...(p?.url ? { url: p.url } : {}),
+          ...(p?.sampleUrl ? { sampleUrl: p.sampleUrl } : {})
+        }))
+      }
+      : {}),
     ...(x?.rating ? { rating: x.rating } : {}),
     // 🆕 2026-10-05（第四十三对话 · **她自己的提案**）：给每条加一个**统一两档**的 `level`。
     //   她在 20:25 的提案里写得清清楚楚：
@@ -1324,7 +1346,14 @@ export function buildToolDefs() {
         + '搜之前先 get_message_images 看清图，再按图的类型选引擎：动画截图→tracemoe（给番名+集数+时间点）；二次元插画/头像/画师图→saucenao（pixiv/推特出处，最准）或 iqdb；本子/漫画页→soutubot；拿不准→auto（插画类引擎自动串联）。'
         + '⚠️ tracemoe 对**任何**图都会返回最像的 3 条，而且它的相似度**不能当可信度**（实测纯色图也能得 100%）—— 只有你确认这张图**确实是动画截图**时才采信它，否则当它没搜到；报出处也要带不确定语气。'
         + '真人照片 / 游戏截图这类**三次元图目前没有可用引擎**（原来那两条实测不可靠、已移除）：直接如实说"这类图我搜不了"，不要硬试。'
-        + '**同一次运行最多搜 2 次**：一个引擎没结果就换一个再试，还不行就如实告诉群友"没搜到"，不要把所有引擎挨个试一遍。'
+        // 🆕 2026-10-17（第四十九对话 · 她提案 f3bebcf7 的收尾）：这里原来**写死**「最多搜 2 次」，
+        //   而真正的上限是 `imageSearch.maxPerRun`（管理端可改）⇒ 描述与代码能说两套话。
+        //   ⚠️ 描述是**模块加载时**一次性注册的（工具定义是常量）⇒ 这里算的是**启动那一刻**的配置值；
+        //      真正的判定（`execute` 里那行）每次调用都现读配置 ⇒ 改了立刻生效，只有这句话要等重启刷新。
+        + (() => {
+          const cap = Math.max(1, Number(getConfig().imageSearch?.maxPerRun) || 2);
+          return `**同一次运行最多搜 ${cap} 次**（以管理端当前配置为准）：一个引擎没结果就换一个再试，还不行就如实告诉群友"没搜到"，不要把所有引擎挨个试一遍。`;
+        })()
         + '结果用一两句口语报给群友，不要把原始 JSON 发出去。',
       parameters: {
         type: 'object',
@@ -1473,6 +1502,31 @@ export function buildToolDefs() {
             enum: ['off', '1000', '5000', '10000'],
             description: '可选，仅插画路用（只对 pixiv 那条路生效）：热度门槛，默认 5000（=「5000users入り」）。'
               + 'off=不按收藏数收窄。搜不到会**自动降档**（5000→1000→不加门槛），返回里会说明。'
+          },
+          // 🆕 2026-10-17（第四十九对话 · 她提案 d048d48e / 04d1d2fb）：翻页 / 随机 / 去重。
+          //   ⚠️ 四个都**不传**时，输出与加它们之前**逐字节相同**（这条写成了判据）。
+          offset: {
+            type: 'integer',
+            description: '可选，仅插画路用：跳过候选池里前几张（默认 0）。'
+              + '同一批结果里想往后翻就用它（比如上一批给了 6 张，这次 offset=6）。'
+              + '翻到底了会如实说「候选池到底了」，不会拿旧图凑数。'
+          },
+          random: {
+            type: 'boolean',
+            description: '可选，仅插画路用：true=在这一轮候选池里随机取样（默认 false=按原站顺序）。'
+              + '同一个 tag 反复要、想要不一样的就打开它。和 offset 一起用时是"先跳过前几张，再随机"。'
+          },
+          excludeIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '可选，仅插画路用：不要出现的作品 id 列表（就是返回里每条带的 id）。'
+              + '⚠️ 本轮的自动去重已经打开了（同一次运行里给过的作品会自己跳过），'
+              + '只有当你想额外排除**别的**作品、或者想跨轮去重时才需要传它。'
+          },
+          includeRepeats: {
+            type: 'boolean',
+            description: '可选，仅插画路用：true=关掉自动去重，允许再次返回本轮已经给过的作品（默认 false）。'
+              + '⚠️ 只有"就要刚才那张"时才用 true；正常情况下别动它。'
           }
         },
         required: ['query']
@@ -1502,6 +1556,12 @@ export function buildToolDefs() {
           const limMax = Math.max(limDefault, Number(cfg.resultLimitMax) || 12);
           const limit = Math.max(1, Math.min(limMax, Number(args.limit) || limDefault));
           const kind = String(args.kind ?? 'auto').trim().toLowerCase();
+          // 🆕 2026-10-17（她提案 d048d48e / 04d1d2fb）：翻页 / 随机 / 去重的三个开关。
+          //   ⚠️ 全部缺省（offset=0 / random=false / includeRepeats=false 且没传 excludeIds）
+          //      ⇒ 走到检索层的参数与加它们之前**完全一样**（判据钉着"缺省输出逐字节相同"）。
+          const offArg = Math.max(0, Math.floor(Number(args.offset) || 0));
+          const wantRandom = args.random === true;
+          const includeRepeats = args.includeRepeats === true;
 
           // ── 插画路（2026-10-04 第四十对话 · 批 1，方案 §2；🆕 第四十二对话加了 pixiv 源）──
           if (kind === 'illustration') {
@@ -1542,9 +1602,22 @@ export function buildToolDefs() {
             const onlySafe = safeGate !== null;
             // ⚠️ 硬闸时不把 `requireLevel` 传成 safe：由**工具层**筛（见下面 refineIllustrationList），
             //    这样"被拦了几张"这件事是我们自己数出来的，不依赖上游各条路各自实现。
+            // 🆕 2026-10-17（她裁决"默认自动去重"）：**同一次运行里给过的作品 id 自动跳过**。
+            //   🔴 这条必须收在工具层：跨两次 search_images 调用的记忆只有 ctx 上有。
+            //   ⚠️ includeRepeats === true 就**不**自动剔（她要复述"刚才那张"时用）；
+            //      excludeIds 无论开关如何都剔（那是她显式点的名）。
+            if (!(ctx.__shownIllustIds instanceof Set)) ctx.__shownIllustIds = new Set();
+            const skipIds = new Set();
+            for (const x of (Array.isArray(args.excludeIds) ? args.excludeIds : [])) {
+              const s = String(x ?? '').trim();
+              if (s) skipIds.add(s);
+            }
+            if (!includeRepeats) for (const s of ctx.__shownIllustIds) skipIds.add(s);
             const r = await illustrationSearchAnySource(q, {
               source: wantSource,
               heat,
+              // 🆕 2026-10-17：翻页/随机/去重（不传 ⇒ 检索层走的就是原来的 slice(0, n)）
+              offset: offArg, random: wantRandom, skipIds,
               tags: Array.isArray(args.tags) ? args.tags : [],
               extraTags: cfg.extraTags || {},
               rating,
@@ -1572,6 +1645,16 @@ export function buildToolDefs() {
                 + '⛔ 别拿不相干的图凑数。');
             }
             if (!r.list.length) {
+              // 🆕 2026-10-17（她提案 d048d48e 的验收标准）：翻页翻过头 / 去重去没了
+              //   ⇒ **如实说"池子到底了"**，⛔ 别混进"搜不到图"里 —— 那是两回事：
+              //   前者是"换个拿法还有"，后者是"这个词就是没图"；她照着错误原因换词只会更糟。
+              if (Number(r.poolTotal) > 0) {
+                return err(`插画路 tag「${r.tag}」的候选池翻到底了：去掉本轮已经给过的之后，池子里一共只剩 `
+                  + `${r.poolTotal} 条，而这次是从第 ${Number(r.poolOffset) + 1} 条往后取的 ⇒ 没有新的了。`
+                  + '要更多就换个更宽的 tag（比如只留角色名、别带作品名），'
+                  + '或者把 offset 调回 0、random 换成 true 再看一遍。'
+                  + '⛔ 别拿不相干的图凑数。');
+              }
               return err(`插画路搜到 tag「${r.tag}」但这次没有返回图片，换个更常见的角色/作品名再试（英文或罗马字）。`
                 + '⛔ 别拿不相干的图凑数。');
             }
@@ -1595,6 +1678,12 @@ export function buildToolDefs() {
               const removed = pruneSeenImageUrls(images, refined.list, seenImageUrls(ctx));
               if (removed) refined.reason += `（这些链接也从"本轮可发"里撤掉了 ${removed} 条）`;
             }
+            // 🆕 2026-10-17（她裁决"默认自动去重"）：**只记真给出去的那批**（refined 之后）。
+            //   ⚠️ 必须放在分级过滤**之后**：被硬闸剔掉的图她根本没看见，
+            //      记进来会让下一轮凭空白少几张（那看起来又像"搜不到图"）。
+            for (const im of refined.list) {
+              if (im && im.id !== undefined && String(im.id).trim()) ctx.__shownIllustIds.add(String(im.id).trim());
+            }
             return ok({
               query: q,
               kind: 'illustration',
@@ -1616,6 +1705,8 @@ export function buildToolDefs() {
                 : {}),
               count: refined.list.length,
               images: refined.list,
+              // 🆕 2026-10-17：池子有多大 / 这次从第几条开始取的（她判断"还能不能再翻"的直接依据）
+              ...(Number(r.poolTotal) > 0 ? { poolTotal: r.poolTotal, poolOffset: r.poolOffset } : {}),
               ...(r.notes && r.notes.length ? { notes: r.notes } : {}),
               tip: (r.source === 'pixiv'
                 // 🆕 2026-10-05（第四十三对话）：原来这里写死"这些是 pixiv 的图：**只有全年龄**
@@ -1673,17 +1764,42 @@ export function buildToolDefs() {
       parameters: {
         type: 'object',
         properties: {
-          url: { type: 'string', description: '图片链接（必须来自 search_images 或 get_message_images）' },
+          url: { type: 'string', description: '图片链接（必须来自 search_images 或 get_message_images，逐字照抄）' },
+          // 🆕 2026-10-17（第四十九对话 · 她提案 7ff9042c）：按 pixiv 作品 id 直发。
+          //   🔴 白名单**没放宽**：这条路是"内核自己去取"的受控入口 —— 取回来立刻登记进
+          //      "本轮见过的图片"，所以发出去的仍然是"程序自己列出来的地址"。
+          pid: {
+            type: ['integer', 'string'],
+            description: '可选：pixiv 作品 id（纯数字，比如 12345678；也可以是 pixiv.net/artworks/12345678 这种链接）。'
+              + '给了它就由我自己去 pixiv 取那张图来发，不用先 search_images。'
+              + '⚠️ url 和 pid 只能给一个。多页作品用 page 指定第几页（不给就是第 1 页）。'
+          },
+          page: {
+            type: 'integer',
+            description: '可选，只配 pid 用：要发这个作品的第几页（从 1 开始数，默认 1）。'
+              + '页数超过作品实际页数时会如实报错，不会随便发一张顶替。'
+          },
           note: { type: 'string', description: '可选：一句话说明这是什么图（只写进你自己的记录，不发给对方；方便下次知道发过什么）' },
           replyToMessageId: { type: ['integer', 'string'], description: '可选：要引用的消息 id（聊天记录里的 #数字）' },
           atUserId: { type: ['integer', 'string'], description: '可选：要 @ 的 QQ 号' }
         },
-        required: ['url']
+        required: []
       },
       async execute(ctx, args) {
         try {
-          const raw = String(args.url ?? '').trim();
-          if (!raw) return err('图片链接为空');
+          const rawUrl = String(args.url ?? '').trim();
+          // 🆕 2026-10-17（第四十九对话 · 她提案 7ff9042c）：新的第二个入口 —— **按 pixiv 作品 id 直发**。
+          //   由来：她「翻到一张图想发，但手里没有直链，只有一个 pid」时，现在只能先 search_images
+          //   碰运气搜回来（还未必是同一张）；有 pid 反而发不出去。
+          //   ⚠️ 这不是"放宽白名单"：走 pid 时是**我们自己去 pixiv 把地址取回来**、
+          //      取完立刻 `rememberImageUrls` 登记 ⇒ 发出去的依然是程序自己列过的地址。
+          const pidRaw = args.pid === undefined || args.pid === null ? '' : String(args.pid).trim();
+          if (!rawUrl && !pidRaw) {
+            return err('要发哪张图？`url`（search_images / get_message_images 给的链接）和 `pid`（pixiv 作品 id）得给一个。');
+          }
+          if (rawUrl && pidRaw) {
+            return err('`url` 和 `pid` 只能给一个：给了 `pid` 就由我自己去 pixiv 取，别再同时给链接。');
+          }
           // 🆕 2026-10-05（第四十四对话 · 她提案 f3bebcf7 的"单次运行最多发送图片数"）：
           //   它与"找图次数上限"**不是一回事** —— 那个限制**搜**几次，这个限制**发**几张
           //   （一次搜索能返回多张，她可能把 limit 张全发出去）。
@@ -1698,9 +1814,48 @@ export function buildToolDefs() {
             }
             ctx.__imageSentCount = sentAlready + 1;
           }
+          // 🆕 2026-10-17（她提案 7ff9042c）：按 pid 自己去取。取完就登记 ⇒ 下面那道闸照旧。
+          let raw = rawUrl;
+          let pidInfo = null;
+          if (!raw && pidRaw) {
+            let pid;
+            try {
+              pid = normalizePixivPid(pidRaw);
+            } catch (error) {
+              return err(`${error?.message ?? error}。pid 可以是纯数字（比如 12345678），也可以是 pixiv.net/artworks/12345678 这种链接。`);
+            }
+            const pageNo = Math.max(1, Math.floor(Number(args.page) || 1));
+            // ⚠️ pixiv 在国内直连不通 ⇒ "配没配代理"这一关由 `fetchPixivPages` 自己拦（那句人话也在那边），
+            //    ⛔ 工具层**不做**走哪条/代理的判定：那个判定只能有一份（`test-illustration-pixiv源.mjs` 钉着）。
+            let pages = [];
+            try {
+              const got = await fetchPixivPages(pid, { browseLocked: true });
+              pages = Array.isArray(got?.pages) ? got.pages : [];
+            } catch (error) {
+              return err(`去 pixiv 取「${pid}」这个作品失败了：${error?.message ?? error}`);
+            }
+            if (!pages.length) {
+              return err(`pixiv 作品「${pid}」没取到任何一页（可能已删除 / 仅登录可见 / 被版权限制）。`);
+            }
+            if (pageNo > pages.length) {
+              return err(`pixiv 作品「${pid}」一共只有 ${pages.length} 页，没有第 ${pageNo} 页（page 从 1 开始数，不给就是第 1 页）。`);
+            }
+            const p = pages[pageNo - 1] || {};
+            // original → regular → small 兜底：有些页只给其中一种尺寸（与检索那条路的取舍一致）
+            const picked = String(p.original || p.regular || p.small || '').trim();
+            if (!picked) {
+              return err(`pixiv 作品「${pid}」第 ${pageNo} 页没有给出能下载的地址（可能只有缩略图）。`);
+            }
+            // 🔴 登记**同一张图的三种尺寸**：万一原图太大发不出去，她还能改发 regular/small，
+            //    不必再去 pixiv 取一次（那次失败会被她当成"取图坏了"）。
+            rememberImageUrls(ctx, [p.original, p.regular, p.small].map((x) => String(x ?? '').trim()).filter(Boolean));
+            raw = picked;
+            pidInfo = { pid, page: pageNo, pageCount: pages.length };
+          }
           // ① 安全边界：只允许发"本轮她真的见过"的地址（见 rememberImageUrls 的注释）
+          //   ⚠️ 走 pid 时上面刚登记过、`pidInfo` 非空 ⇒ 免检（地址是我们自己从 pixiv 取的，不是她编的）。
           const seen = seenImageUrls(ctx);
-          if (!seen.has(raw)) {
+          if (!pidInfo && !seen.has(raw)) {
             return err('这个链接不是本轮你自己找回来/看到过的图片，已拒绝发送。'
               + '要发图请先用 search_images 找（或 get_message_images 看那条消息里的图），再用它给出的链接。'
               + '链接必须逐字一致，不要自己改。');
@@ -1737,7 +1892,19 @@ export function buildToolDefs() {
           const sizeNote = result?.compressed && result?.originalBytes && result?.sentBytes
             ? `原图 ${fmtBytes(result.originalBytes)}，上传前压到了 ${fmtBytes(result.sentBytes)}（她那边看到的是压过的）。`
             : '';
-          return ok({ sent: true, messageId: result?.message_id ?? null, note: `图发出去了。${sizeNote}` });
+          return ok({
+            sent: true,
+            messageId: result?.message_id ?? null,
+            // 🆕 2026-10-17（她提案 7ff9042c）：按 pid 发的要说清楚"发的是哪个作品的第几页"
+            //   —— 否则她只知道"发出去了"，不知道是不是自己要的那一张（本项目最忌的静默）。
+            ...(pidInfo
+              ? { source: 'pid', pid: pidInfo.pid, page: pidInfo.page, pageCount: pidInfo.pageCount }
+              : {}),
+            note: `图发出去了。${sizeNote}`
+              + (pidInfo
+                ? `（pixiv 作品 ${pidInfo.pid} 的第 ${pidInfo.page}/${pidInfo.pageCount} 页）`
+                : '')
+          });
         } catch (error) {
           return err(error?.message ?? error);
         }
