@@ -298,6 +298,14 @@ async function saveConfig({ quiet = false } = {}) {
     const enteredBochaKey = val('#cfg-bocha-key', '').trim();
     const enteredBaiduKey = val('#cfg-baidu-key', '').trim();
     const enteredMetasoKey = val('#cfg-metaso-key', '').trim();
+    // 原生搜索的两个数字：**空串 = 保持默认**，填了才夹到范围内（注意 minScore 可以是 0，
+    // 所以不能用 `Number(x) || def` —— 那会把用户填的 0 当成没填）。
+    const searchNum = (sel, def, lo, hi) => {
+      const raw = String(val(sel, '')).trim();
+      if (!raw) return def;
+      const n = Number(raw);
+      return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : def;
+    };
     patch.webSearch = {
       ...c.webSearch,
       // ⛔ `enabled` **不在这里**：它 2026-10-05 搬去了「她的能力」（交接 §3-105）。
@@ -309,7 +317,13 @@ async function saveConfig({ quiet = false } = {}) {
       deepseek: {
         ...(c.webSearch?.deepseek || {}),
         ...(enteredDsKey && enteredDsKey !== '******' ? { apiKey: enteredDsKey } : {}),
-        model: val('#cfg-ds-searchmodel', c.webSearch?.deepseek?.model || 'deepseek-v4-flash').trim() || 'deepseek-v4-flash'
+        // 🔴 2026-10-17（第四十九对话）：这里原来写的是 model: val('#cfg-ds-searchmodel', …)。
+        //    「模型」输入框已经删了（原生搜索不再用模型），而**元素不存在时 val() 会返回
+        //    兜底值** ⇒ 每点一次保存都会把 model 悄悄写成 deepseek-v4-flash。
+        //    现在不写 model：上面的展开已经把旧值原样带过去，
+        //    旧路（provider='deepseek-responses'）的配置一个字都不会被改。
+        count: searchNum('#cfg-ds-searchcount', c.webSearch?.deepseek?.count ?? 6, 1, 50),
+        minScore: searchNum('#cfg-ds-searchminscore', c.webSearch?.deepseek?.minScore ?? 1.5, 0, 3)
       },
       zhipu: {
         ...(c.webSearch?.zhipu || {}),

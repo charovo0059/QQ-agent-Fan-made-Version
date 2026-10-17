@@ -128,17 +128,23 @@ function bindSettingsEvents(c) {
     const hint = $('#search-provider-action-hint');
     const sel = $('#cfg-searchprovider');
     const v = sel?.value || '';
-    if (!v.startsWith('custom:')) { if (hint) hint.textContent = '请先选择一个自定义搜索服务'; return; }
+    if (!v) { if (hint) hint.textContent = '请先选择一个搜索提供方'; return; }
+    // 🆕 2026-10-17（第四十九对话）：这个按钮改成**常显**了（原来只在选中自定义服务时
+    //   才出现在 #custom-provider-manage 里）。所以这里不能再要求必须是自定义服务：
+    //     · 自定义 ⇒ 传 custom:<id>，测的就是那一条；
+    //     · 内置（bing/deepseek/…）⇒ 传 'current'，后端按**当前配置**真发一次搜索。
+    const isCustom = v.startsWith('custom:');
     if (hint) hint.textContent = '测试中…';
     try {
       const r = await api('/api/search-providers/test', {
         method: 'POST',
-        body: JSON.stringify({ providerId: v })
+        body: JSON.stringify({ providerId: isCustom ? v : 'current' })
       });
       const res = r.result || {};
       if (hint) {
+        const tail = res.fallbackFrom ? '（DeepSeek 没成功，已自动兜底到 Bing）' : '';
         hint.textContent = res.ok
-          ? `✓ 可用（${res.count} 条结果，${res.latencyMs}ms）${res.sample ? `：${res.sample.slice(0, 30)}` : ''}`
+          ? `✓ 可用（${res.count} 条结果，${res.latencyMs}ms）${res.sample ? `：${res.sample.slice(0, 30)}` : ''}${tail}`
           : `✗ ${res.note || '不可用'}`;
       }
     } catch (e) {

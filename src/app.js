@@ -11,7 +11,7 @@ import { getConfig, updateConfig, setRuntimeConfig, loadConfig, ROOT, DATA_DIR }
 // 「新加进白名单的会话默认档位」（2026-10-03 第三十五对话，用户拍板）：
 // 私聊全响应 / 群聊仅艾特。⛔ 两个入口必须共用这一份（见该文件顶部）。
 import { applyNewChatDefaults } from './tier-defaults.js';
-import { customSearch } from './web-search.js';
+import { customSearch, webSearch } from './web-search.js';
 import { safeFetch, isPrivateIp } from './safe-fetch.js';
 import { describeProxy, hostMatchesRules, initProxyConfig } from './proxy.js';
 // 🔴 注入（与 safe-fetch/web-search/cf-fetch 同一个理由）：不注入 ⇒ proxyEnabled() 恒 false。
@@ -3209,9 +3209,12 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         const explicit = Boolean(provId) && provId !== 'current';
         const used = explicit ? provId : configured;
         try {
-          // 不传 providerId 时 customSearch 会回落到**当前配置的**提供方
-          // （见 web-search.js 里那处 fallback）
-          const r = await customSearch('qq agent 测试', explicit ? provId : null);
+          // 🆕 2026-10-17（第四十九对话）：显式测自定义服务时照旧走 customSearch；
+          //   否则**按配置直接走 webSearch()**，这样 provider='deepseek' 测的就是
+          //   新原生搜索接口（原来会绕道 customSearch，测的根本不是配置里那一条）。
+          const r = explicit
+            ? await customSearch('qq agent 测试', provId)
+            : await webSearch('qq agent 测试', { count: 3 });
           return json(res, 200, {
             ok: true,
             result: {
@@ -3220,6 +3223,8 @@ export function createApp({ log = console.log, resume = [] } = {}) {
               scope: explicit ? 'custom' : 'configured',
               count: r.results.length,
               sample: r.results[0]?.title || '',
+              firstUrl: r.results[0]?.url || '',
+              ...(r.fallbackFrom ? { fallbackFrom: r.fallbackFrom } : {}),
               latencyMs: Date.now() - startedAt
             }
           });

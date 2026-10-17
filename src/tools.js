@@ -2529,28 +2529,66 @@ export function buildToolDefs() {
     },
     {
       name: 'web_search',
-      description: '联网搜索（Bing），返回标题/URL/摘要列表。适用：实时信息、新闻热点、网络用语/梗的含义、自己不确定的事实。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
+      description: '联网搜索，返回标题/URL/摘要（read>0 时顺带把前几条正文取回来）。适用：实时信息、新闻热点、网络用语/梗的含义、自己不确定的事实。支持搜索语法：site:域名 限定站内、-词 排除、"短语" 精确匹配、after:2025 限定时间。结果里带 URL，引用来源就用它。可以换关键词连续搜 2~3 次；需要细节时用 read 或对具体 URL 用 web_fetch，不要只看摘要就下结论。',
       parameters: {
         type: 'object',
-        properties: { query: { type: 'string', description: '搜索词' } },
+        properties: {
+          query: { type: 'string', description: '搜索词' },
+          count: { type: 'integer', minimum: 1, maximum: 10, description: '要几条结果（默认 6，最多 10）' },
+          read: { type: 'integer', minimum: 0, maximum: 3, description: '顺带取前 N 条的正文（默认 0 = 只拿摘要）' },
+          site: { type: 'string', description: '只在这个域名里搜，如 pixiv.net（可省略）' },
+          fresh: { type: 'string', enum: ['day', 'week', 'month', 'year'], description: '只要这个时间之后的内容（可省略）' }
+        },
         required: ['query']
       },
       async execute(ctx, args) {
         try {
-          const result = await webSearch(String(args.query ?? ''));
-          // 🔴 搜索摘要也是**网页作者写的字**（S6）：裹起来，与 web_fetch 同一套边界。
+          // 🆕 2026-10-17（第四十九对话）：参数从 1 个扩到 5 个。
+          //   为什么加 read：审计发现她自己搜完之后**常常只读摘要就回答**（甚至拿摘要当正文引用）。
+          //   默认给 0 是拍板结果（Q2=A）—— 不替她决定"这次要不要正文"，但能力和代价都写在描述里。
+          const cfg = getConfig().webSearch || {};
+          const toInt = (value, lo, hi) => {
+            const n = Number(value);
+            return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.trunc(n))) : null;
+          };
+          const count = toInt(args.count, 1, 10) ?? Math.min(10, Math.max(1, Number(cfg.maxResults) || 6));
+          const read = toInt(args.read, 0, 3) ?? 0;
+          const site = String(args.site ?? '').trim().slice(0, 64);
+          const freshRaw = String(args.fresh ?? '').trim().toLowerCase();
+          const fresh = ['day', 'week', 'month', 'year'].includes(freshRaw) ? freshRaw : '';
+          const result = await webSearch(String(args.query ?? ''), { count, read, site, fresh });
+          // 🔴 搜索摘要/正文都是**网页作者写的字**（S6）：逐个字段裹起来，与 web_fetch 同一套边界。
           const nonce = untrustedNonce();
-          if (!result.results.length) {
+          const results = Array.isArray(result.results) ? result.results : [];
+          if (!results.length) {
             return ok({ query: result.query, results: [], note: '没有搜到结果，试试换关键词或更具体的说法。' });
           }
-          return ok({
-            ...result,
-            results: result.results.map((r) => ({
-              ...r,
-              ...(r.snippet ? { snippet: wrapUntrusted(r.snippet, nonce, '搜索摘要') } : {})
-            })),
-            note: UNTRUSTED_NOTE
-          });
+          // 逐条裁剪 + 整次上限 6000 字：超了就**少给几条**，而不是把每条都砍碎
+          // （砍碎之后每条都不完整，反而更容易误读）。
+          const trimmed = [];
+          for (const r of results) {
+            trimmed.push({
+              title: String(r.title ?? '').slice(0, 160),
+              url: String(r.url ?? ''),
+              ...(r.site ? { site: String(r.site).slice(0, 40) } : {}),
+              ...(r.date ? { date: String(r.date).slice(0, 24) } : {}),
+              ...(Number.isFinite(r.score) ? { score: r.score } : {}),
+              ...(r.snippet ? { snippet: wrapUntrusted(String(r.snippet).slice(0, 300), nonce, '搜索摘要') } : {}),
+              ...(r.summary ? { summary: wrapUntrusted(String(r.summary).slice(0, 900), nonce, '搜索摘要') } : {}),
+              ...(r.content ? { content: wrapUntrusted(String(r.content).slice(0, 2500), nonce, '网页正文') } : {})
+            });
+            if (JSON.stringify(trimmed).length > 6000) {
+              trimmed.pop();
+              break;
+            }
+          }
+          const extra = {};
+          if (result.fallbackFrom) {
+            extra.fallbackFrom = result.fallbackFrom;
+            extra.fallbackNote = 'DeepSeek 搜索这次没成功，已自动改用 Bing 兜底（结果可能比平时少）。';
+          }
+          if (result.lowRelevance) extra.relevanceNote = '这几条相关度都不高，只能当线索参考，别当成结论。';
+          return ok({ query: result.query, results: trimmed, ...extra, note: UNTRUSTED_NOTE });
         } catch (error) {
           return err(`搜索失败：${error?.message ?? error}`);
         }
@@ -2576,7 +2614,12 @@ export function buildToolDefs() {
           //    在 enabled!==true 时也放行 ⇒ 只有管理员显式打开锁定才生效。
           //    打开时的语义（config.js:170-181 写明的）：**空名单 = 全部拒绝**，
           //    比"全部放行"安全，所以这里不额外兜底、以免把那条语义改掉。
-          const result = await webFetch(String(args.url ?? ''), { browseLocked: true });
+          // 🆕 2026-10-17（第四十九对话）：抓回来是 HTML 就**先净化成 Markdown**。
+          //   审计数据：57 次 web_fetch 里 **28 次（49%）** 把原始 HTML 直接喂给了模型
+          //   —— 导航、脚本、样式、cookie 提示全在里面，又贵又容易抓错。
+          //   webFetch.cleanHtml 默认 true；关掉就回到"原样回喂"（留一个能退回去的开关）。
+          const cleanHtml = getConfig().webFetch?.cleanHtml !== false;
+          const result = await webFetch(String(args.url ?? ''), { browseLocked: true, clean: cleanHtml });
           const body = String(result.body || '');
           // 🔴 裹起来（S6）：这是**网页作者写的全文**，而模型手里有 send_message。
           //    改前这里是 `content: body.slice(0, 20000)` —— 原样回喂，等于把注入面直接递过去。
@@ -2584,6 +2627,7 @@ export function buildToolDefs() {
             url: result.url,
             statusCode: result.statusCode,
             truncated: result.truncated || body.length > 20000,
+            ...(result.cleaned === true ? { format: 'markdown' } : {}),
             content: wrapUntrusted(body.slice(0, 20000), untrustedNonce(), '外部网页内容'),
             note: UNTRUSTED_NOTE
           });

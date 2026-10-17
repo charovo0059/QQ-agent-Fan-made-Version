@@ -706,11 +706,15 @@ function renderSearchSection(c) {
         <option value="metaso" ${prov === 'metaso' ? 'selected' : ''}>秘塔 AI 搜索</option>
         ${customProvs.map((p) => `<option value="custom:${esc(p.id)}" ${prov === `custom:${p.id}` ? 'selected' : ''}>${esc(p.name || p.baseUrl)}（自定义 · ${p.type === 'bing' ? '网页解析' : 'JSON 接口'}）</option>`).join('')}
       </select></div>
+    <div class="field">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-small" id="test-search-provider-btn">测试当前搜索服务</button>
+        <span id="search-provider-action-hint" class="muted" style="font-size:12px">按上面选中的提供方真发一次搜索</span>
+      </div>
+    </div>
     <div class="field" id="custom-provider-manage" style="${prov.startsWith('custom:') ? '' : 'display:none'}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button class="btn btn-small" id="test-search-provider-btn">测试这个搜索服务</button>
         <button class="btn btn-small btn-danger" id="del-search-provider-btn">删除这个搜索服务</button>
-        <span id="search-provider-action-hint" class="muted" style="font-size:12px"></span>
       </div>
     </div>
     <div class="field" id="bing-search-fields" style="${prov === 'bing' ? '' : 'display:none'}"><label>搜索地址（高级：可替换为兼容 Bing 结果格式的引擎）</label><input type="text" id="cfg-searchurl" value="${esc(c.webSearch?.searchUrl || 'https://cn.bing.com/search')}" /></div>
@@ -720,15 +724,19 @@ function renderSearchSection(c) {
           <input type="password" id="cfg-ds-searchkey" value="${esc(c.webSearch?.deepseek?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-ds-searchkey-toggle" type="button">显示</button>
         </div></div>
-      <div class="field"><label>模型</label><input type="text" id="cfg-ds-searchmodel" value="${esc(c.webSearch?.deepseek?.model || 'deepseek-v4-pro')}" />
-        <div class="hint">必须是账号里真实存在、<b>且支持 web_search 工具</b>的模型。
-          ⚠️ <b>写错模型不会报错，只会让搜索悄悄失效</b>。</div>
+      <div class="field"><label>每次返回几条 / 最低相关度</label>
+        <div style="display:flex;gap:8px">
+          <input type="number" id="cfg-ds-searchcount" min="1" max="50" step="1" title="每次返回几条（1~50，默认 6）" value="${esc(String(c.webSearch?.deepseek?.count ?? 6))}" style="flex:1" />
+          <input type="number" id="cfg-ds-searchminscore" min="0" max="3" step="0.1" title="最低相关度（0~3，默认 1.5）" value="${esc(String(c.webSearch?.deepseek?.minScore ?? 1.5))}" style="flex:1" />
+        </div>
+        <div class="hint">左：<b>每次返回几条</b>（1~50，默认 6）。右：<b>最低相关度</b>（0~3，默认 1.5）——
+          分数低于它的结果会被丢掉。两处都<b>即时生效</b>，不用重启。</div>
         <details class="hint-more">
-          <summary>说明：哪些模型名可用、写错会怎样</summary>
+          <summary>说明：结果怎么筛、为什么有时不足设定条数</summary>
           <div class="hint-more-body">
-            实测 <code>deepseek-v4-pro</code> 会真的联网；<code>deepseek-flash</code> 会忽略联网工具、
-            直接回答"我无法联网搜索"；<code>deepseek-v4-flash</code> 这个模型名不存在，
-            API 会静默回退到 flash。
+            原生搜索给每条结果打一个相关度分（0~3）和一个权威度分。只有<b>相关度和权威度都低</b>才丢弃
+            —— 只看相关度会误杀权威站点的短摘要。全被丢掉时不会回「没搜到」，而是保留前 3 条并标注「相关度不高」；
+            同一网址只留一条。所以条数少于设定值，通常是<b>去重和过滤</b>做的，不是接口坏了。
           </div>
         </details></div>
     </div>

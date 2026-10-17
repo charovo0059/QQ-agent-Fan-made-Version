@@ -304,6 +304,17 @@ export const DEFAULT_CONFIG = {
     provider: 'bing',
     deepseek: {
       apiKey: '',                     // 留空时回退环境变量 DEEPSEEK_API_KEY
+      // 🆕 2026-10-17（第四十九对话）DeepSeek **原生搜索接口**。provider='deepseek' 时走它。
+      // ⛔ 与下面的 baseUrl 不是一回事：baseUrl 是 Responses API **带路径**的地址，
+      //    拿它拼 /v1/tools/search 会拼成 .../responses/v1/tools/search ⇒ 必须分开两个键。
+      searchUrl: 'https://api.deepseek.com/v1/tools/search',
+      count: 6,                       // 每次要几条（1~50）
+      minScore: 1.5,                  // rerank_score 低于它、且 authority 也低于下面那个 ⇒ 丢掉
+      minAuthority: 2,                // 权威度：只看分数的过滤会误杀权威站点的短摘要
+      needContent: false,             // 默认不要正文（正文很占 token；工具 read>0 时才要）
+      searchTimeoutMs: 20000,         // 原生搜索超时（实测 241~489ms，20s 是给网络抖动留的余量）
+      // ⚠️ 不复用下面的 timeoutMs：那个 60000 是旧 Responses 路的（它真的会跑几十秒）
+      // ↓ 旧路（provider='deepseek-responses'）才用这两个，逻辑未改
       baseUrl: 'https://api.deepseek.com/responses',
       // ⚠️ 模型名必须是**账号里真实存在、且支持 web_search 工具**的那个。
       // 实测（2026-09-12）api.deepseek.com 上：
@@ -355,6 +366,13 @@ export const DEFAULT_CONFIG = {
       count: 6,
       timeoutMs: 20000
     }
+  },
+  // 抓网页正文（web_fetch 工具）时的净化开关。
+  // 🆕 2026-10-17（第四十九对话）新增：审计发现 57 次 web_fetch 里 **28 次（49%）**
+  // 把原始 HTML 直接喂给了模型 —— 拿回来的不是正文，是标签汤（导航/脚本/样式/cookie 提示）。
+  // cleanHtml=true ⇒ HTML 先转成轻量 Markdown 再给模型；不是 HTML（JSON/纯文本）则一个字不动。
+  webFetch: {
+    cleanHtml: true
   },
   // ── 代理（2026-10-04 第四十一对话 · 内置代理批 A/批 B）────────────────────
   // 拍板依据：`回执-内置代理拍板结果与执行须知-20261004.md`（V1 只做 (A)：

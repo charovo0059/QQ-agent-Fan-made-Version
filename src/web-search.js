@@ -127,12 +127,15 @@ export async function bingSearch(query) {
 }
 
 /** 给工具用的统一入口：搜索 + 紧凑序列化。 */
-export async function webSearch(query) {
+export async function webSearch(query, opts = {}) {
   const clean = sanitizeQuery(query);
   if (!clean) throw new Error('查询词为空');
   const cfg = getConfig().webSearch ?? {};
   const provider = String(cfg.provider || 'bing').toLowerCase();
-  if (provider === 'deepseek') return deepSeekSearch(clean);
+  // ⚠️ 2026-10-17（第四十九对话）起 'deepseek' 走**原生搜索接口**：结构化结果、带 URL、
+  //    实测 0.3~0.5s；旧路（Responses API + web_search 工具）改名为 'deepseek-responses' 保留。
+  if (provider === 'deepseek') return deepSeekNativeSearchWithFallback(clean, opts);
+  if (provider === 'deepseek-responses') return deepSeekResponsesSearch(clean);
   if (provider === 'zhipu') return zhipuSearch(clean);
   if (provider === 'bocha') return bochaSearch(clean);
   if (provider === 'baidu') return baiduSearch(clean);
@@ -150,8 +153,13 @@ export async function webSearch(query) {
  * 说明：搜索在 DeepSeek 服务端完成并注入上下文，客户端能拿到的是模型基于
  * 搜索结果生成的最终回答；URL/标题/摘要为黑盒，拿不到结构化来源。适合
  * “只要能搜到并总结”的场景；需要引用列表时请用 Bing / 其他搜索 API。
+ *
+ * ⚠️ 2026-10-17（第四十九对话）**改名**：原 `deepSeekSearch` → `deepSeekResponsesSearch`，
+ *    函数体**一字未改**。原因是 DeepSeek 当天上线的原生搜索接口（下面的
+ *    `deepSeekNativeSearch`）才是 `provider === 'deepseek'` 该走的路；这条旧路留给
+ *    `webSearch.provider === 'deepseek-responses'`（谁配了就照旧生效，不会被悄悄换掉）。
  */
-export async function deepSeekSearch(query) {
+export async function deepSeekResponsesSearch(query) {
   const cfg = getConfig().webSearch?.deepseek ?? {};
   const apiKey = String(cfg.apiKey || process.env.DEEPSEEK_API_KEY || '').trim();
   if (!apiKey) throw new Error('DeepSeek 搜索需要 API Key（设置里填，或环境变量 DEEPSEEK_API_KEY）');
@@ -188,6 +196,329 @@ export async function deepSeekSearch(query) {
   return { query, results: [{ title: 'DeepSeek 搜索', url: '', snippet: outputText }] };
 }
 
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * DeepSeek 原生搜索接口（2026-10-17 第四十九对话）
+ *
+ * **为什么换掉旧路**：旧路是 Responses API「模型 + web_search 工具」，客户端拿到的是
+ *   模型**基于搜索结果写的一段话** —— 没有 URL、没有标题、没法引用来源。而且实测
+ *   25 天 229 次调用里 **58 次失败（25.3%）**：「没有返回文本」28 次、「无法解析 JSON」
+ *   28 次、402 余额不足 2 次。新接口 POST /v1/tools/search 是**独立的搜索服务**，返回
+ *   结构化结果（title/url/snippet/summary/content/rerank_score/authority/date/site_name），
+ *   实测 241~489ms。
+ *
+ * ⛔ **不要复用 webSearch.deepseek.baseUrl**：它的默认值
+ *    'https://api.deepseek.com/responses' **带路径**，拿它拼 /v1/tools/search 必拼错。
+ *    新地址走独立键 webSearch.deepseek.searchUrl。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const DEEPSEEK_SEARCH_DEFAULT_URL = 'https://api.deepseek.com/v1/tools/search';
+
+/**
+ * 搜索语法拼接（纯函数，可离线测）。
+ *  site: / after: 都是 DeepSeek 搜索**原生支持**的语法，不是我们自己过滤。
+ *  ⚠️ 语法段放在末尾：查询词超 128 字上限时先砍正文、**保住语法**（见函数尾部）。
+ */
+export function buildSearchQuery(query, { site = '', fresh = '' } = {}) {
+  const base = String(query ?? '').trim();
+  if (!base) return '';
+  let q = base;
+  const domain = String(site ?? '').trim().toLowerCase();
+  // 只认纯域名：带空格、引号、冒号的一律丢弃（否则等于让调用方往查询里注入任意语法）
+  if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)*\.[a-z]{2,}$/.test(domain)) q += ' site:' + domain;
+  const days = { day: 1, week: 7, month: 30, year: 365 }[String(fresh ?? '').trim().toLowerCase()];
+  if (days) {
+    const d = new Date(Date.now() - days * 86400000);
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    q += ' after:' + d.getFullYear() + '-' + mm + '-' + dd;
+  }
+  // 接口硬限 128 字
+  if (q.length > 128) {
+    const syntax = q.slice(base.length);
+    q = q.slice(0, Math.max(0, 128 - syntax.length)).trim() + syntax;
+    if (q.length > 128) q = q.slice(0, 128);
+  }
+  return q;
+}
+
+/** 结果 URL 规范化（去重口径）：小写域名、去 #片段、去 utm_ 前缀与 share_ / spm / ref / from / src 等跟踪参数。 */
+export function canonicalizeResultUrl(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+  try {
+    const u = new URL(text);
+    u.hash = '';
+    for (const key of [...u.searchParams.keys()]) {
+      if (/^(utm_|share_|spm$|ref$|from$|src$)/i.test(key)) u.searchParams.delete(key);
+    }
+    u.hostname = u.hostname.toLowerCase();
+    return u.toString();
+  } catch {
+    return text;            // 相对地址等异常情况：原样当 key
+  }
+}
+
+/**
+ * DeepSeek 搜索返回 → 我们的 results（纯函数，可离线测）。
+ *
+ * 三个决断，都写在这里而不是散在调用方：
+ * ① **字段映射**：只保留我们真的会给模型看的字段，其余（logo/favicon 之类）丢掉；
+ * ② **去重**：同一 URL 只留第一条（搜索服务偶尔会返回同一页的不同片段）；
+ * ③ **相关度过滤**：rerank_score 低 **且** authority 也低才丢 —— 只看分数会
+ *    误杀权威站点的短摘要（实测有些政府站摘要就一句、分数 1.2 但权威度 4）。
+ *    全被丢掉时**回落前 3 条并置 lowRelevance:true**（宁可给模型低分结果 + 明说，
+ *    也不要回一句「没搜到」把它骗过去）。
+ */
+export function parseDeepSeekSearchResponse(data, { count = 6, minScore = 1.5, minAuthority = 2 } = {}) {
+  const raw = data?.results ?? data?.data?.results ?? data?.search_result ?? data?.data?.search_result;
+  const list = Array.isArray(raw) ? raw : [];
+  const mapped = [];
+  for (const r of list) {
+    const url = String(r?.url ?? '').trim();
+    const title = String(r?.title ?? '').trim();
+    if (!url || !title) continue;                       // 没 URL 的结果没法引用，直接丢
+    const item = { title, url };
+    const snippet = String(r?.snippet ?? '').trim();
+    if (snippet) item.snippet = snippet;
+    const summary = String(r?.summary ?? '').trim();
+    if (summary) item.summary = summary;
+    const site = String(r?.site_name ?? r?.site ?? '').trim();
+    if (site) item.site = site;
+    const date = String(r?.date ?? '').trim();
+    if (date) item.date = date;
+    if (Number.isFinite(Number(r?.rerank_score))) item.score = Number(r.rerank_score);
+    if (Number.isFinite(Number(r?.authority))) item.authority = Number(r.authority);
+    if (typeof r?.content === 'string' && r.content.trim()) item.content = r.content.trim();
+    mapped.push(item);
+  }
+  const seen = new Set();
+  const deduped = [];
+  for (const r of mapped) {
+    const key = canonicalizeResultUrl(r.url) || r.url;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(r);
+  }
+  const kept = deduped.filter((r) => {
+    if (!Number.isFinite(r.score)) return true;         // 没给分数 ⇒ 不据此丢弃
+    return !(r.score < minScore && Number(r.authority ?? -1) < minAuthority);
+  });
+  const lowRelevance = deduped.length > 0 && kept.length === 0;
+  const results = (lowRelevance ? deduped.slice(0, 3) : kept).slice(0, Math.max(1, Number(count) || 6));
+  return { results, lowRelevance, dropped: deduped.length - kept.length };
+}
+
+/** HTML 嗅探：**不靠 content-type**（safeFetch 不返回它），只看正文前缀。 */
+export function looksLikeHtml(body) {
+  const head = String(body ?? '').replace(/^\uFEFF/, '').slice(0, 2048).toLowerCase();
+  if (!head.trim()) return false;
+  if (head.includes('<!doctype html')) return true;
+  return /<html[\s>]|<head[\s>]|<body[\s>]|<meta\s/.test(head);
+}
+
+function stripTags(s) {
+  return String(s ?? '').replace(/<[^>]*>/g, ' ');
+}
+
+function codePointText(n) {
+  const code = Number(n);
+  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return '';
+  try { return String.fromCodePoint(code); } catch { return ''; }
+}
+
+function decodeEntities(s) {
+  return String(s ?? '')
+    .replace(/&#x([0-9a-f]{1,6});/gi, (m, h) => codePointText(parseInt(h, 16)))
+    .replace(/&#(\d{1,7});/g, (m, d) => codePointText(parseInt(d, 10)))
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&middot;/gi, '·')
+    .replace(/&mdash;/gi, '—')
+    .replace(/&ndash;/gi, '–')
+    .replace(/&hellip;/gi, '…')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&');
+}
+
+/**
+ * 原始 HTML → 轻量 Markdown（纯函数，可离线测）。
+ *
+ * **为什么要有它**：web_fetch 57 次调用里 **28 次（49%）**把原始 HTML 直接喂给了模型
+ * —— 那不是「正文」，是标签汤：导航、脚本、样式、cookie 提示全在里面，模型读它又贵
+ * 又容易抓错。净化成 Markdown 后同一页面的有效信息密度高一个数量级。
+ *
+ * **不做的**：不追求 Markdown 规范（不处理嵌套列表缩进、不转义符号）——目标是给模型
+ * 读，不是给人渲染。也**不做**正文抽取算法（Readability 那套）：那需要整棵 DOM，而这里
+ * 只有字符串，收益/风险不划算。
+ *
+ * **性能护栏**（实测踩出来的，不是防御性编程）：
+ *  · 输入先截到 maxInput（默认 40 万字符）—— safe-fetch 单页上限才 5 万，留足余量；
+ *  · <a> / <hN> 的**惰性匹配在「只有开标签没有闭标签」时是 O(n²)**：1MB 全是
+ *    <a href="x"> 的病态输入能占住 CPU 好几秒 ⇒ 超 15 万字符的输入跳过这两步
+ *    （真实正文页净化后本来也用不到那么多结构化转换）。
+ */
+export function htmlToMarkdownLite(html, { maxChars = 12000, maxInput = 400000 } = {}) {
+  let s = String(html ?? '');
+  if (!s) return '';
+  if (s.length > maxInput) s = s.slice(0, maxInput);
+  // 0) 注释整块删
+  s = s.replace(/<!--[\s\S]*?-->/g, ' ');
+  // 1) 内容本身不是正文的元素：整块丢弃（含内部文本）
+  s = s.replace(/<(script|style|noscript|svg|iframe|template|canvas|object|embed|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
+  // 页面被截断时这些块可能**没有闭标签** ⇒ 直接砍到结尾（否则脚本会混进正文）
+  s = s.replace(/<(script|style|noscript|svg|iframe|template|head)\b[^>]*>[\s\S]*$/i, ' ');
+
+  const fancy = s.length <= 150000;
+  if (fancy) {
+    // 2) 标题保留层级（# ~ ######）
+    s = s.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi, (m, lv, inner) => {
+      const text = stripTags(inner).replace(/\s+/g, ' ').trim();
+      return text ? '\n\n' + '#'.repeat(Number(lv)) + ' ' + text + '\n\n' : '\n\n';
+    });
+    // 3) 链接：保住 URL（模型才能引用来源）——只保留「文字 + 地址」这种最省 token 的写法
+    const anchors = (s.match(/<a\b/gi) || []).length;
+    if (anchors > 0 && anchors <= 2000) {
+      s = s.replace(/<a\b[^>]*?href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a\s*>/gi, (m, href, inner) => {
+        const text = stripTags(inner).replace(/\s+/g, ' ').trim();
+        const url = decodeEntities(href).trim();
+        if (!url || /^(javascript|data|mailto):/i.test(url) || url.startsWith('#')) return text;
+        if (!text || text === url) return url;
+        return text + ' (' + url + ')';
+      });
+    }
+  }
+  // 4) 图片：alt 有内容就留着（图注常是正文的一部分）
+  s = s.replace(/<img\b[^>]*alt=["']([^"']*)["'][^>]*>/gi, (m, alt) => {
+    const text = String(alt).trim();
+    return text ? '[图:' + text + ']' : '[图]';
+  });
+  s = s.replace(/<img\b[^>]*>/gi, '[图]');
+  // 5) 列表 / 表格
+  s = s.replace(/<li\b[^>]*>/gi, '\n- ');
+  s = s.replace(/<\/t[dh]\s*>/gi, ' | ');
+  // 6) 块级换行
+  s = s.replace(/<br\s*\/?>/gi, '\n');
+  s = s.replace(/<hr\b[^>]*>/gi, '\n---\n');
+  s = s.replace(/<\/(?:p|div|section|article|header|footer|main|aside|nav|blockquote|pre|figure|figcaption|table|thead|tbody|tr|ul|ol|dl|dd|dt|h[1-6])\s*>/gi, '\n');
+  // 7) 剩下的标签一律去掉，再解实体
+  s = stripTags(s);
+  s = decodeEntities(s);
+  // 8) 空白规整：HTML 源码里的换行**只代表空格**，别当成段落
+  s = s.replace(/\r\n?/g, '\n')
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (maxChars > 0 && s.length > maxChars) return s.slice(0, maxChars);
+  return s;
+}
+
+/** 这个错误值不值得重试一次（Q4=B：只重试「可能自己好」的那几类）。 */
+function isRetryableSearchError(error) {
+  const status = Number(error?.status);
+  if (Number.isFinite(status)) return status === 408 || status === 429 || status >= 500;
+  return /fetch failed|timeout|timed out|aborted|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i
+    .test(String(error?.message ?? error));
+}
+
+/**
+ * DeepSeek 原生搜索（结构化结果）。
+ * @param {object} [opts]
+ * @param {number} [opts.count] 要几条（1~50，缺省取配置 count）
+ * @param {number} [opts.read]  给前几条保留正文（0 = 不取正文）
+ * @param {string} [opts.site]  限定域名
+ * @param {string} [opts.fresh] day|week|month|year
+ */
+export async function deepSeekNativeSearch(query, { count = 0, read = 0, site = '', fresh = '' } = {}) {
+  const cfg = getConfig().webSearch?.deepseek ?? {};
+  const apiKey = String(cfg.apiKey || process.env.DEEPSEEK_API_KEY || '').trim();
+  if (!apiKey) throw new Error('DeepSeek 搜索需要 API Key（设置里填，或环境变量 DEEPSEEK_API_KEY）');
+  const endpoint = String(cfg.searchUrl || DEEPSEEK_SEARCH_DEFAULT_URL).trim();
+  const want = Math.min(50, Math.max(1, Number(count) || Number(cfg.count) || 6));
+  const minScore = Number.isFinite(Number(cfg.minScore)) ? Number(cfg.minScore) : 1.5;
+  const minAuthority = Number.isFinite(Number(cfg.minAuthority)) ? Number(cfg.minAuthority) : 2;
+  const searched = buildSearchQuery(String(query ?? '').trim(), { site, fresh });
+  // 需要正文时让服务端一起给（一次请求，省一次抓取）；不读正文就不要 —— 正文很占 token
+  const wantContent = Number(read) > 0 ? true : cfg.needContent === true;
+
+  const res = await proxiedFetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + apiKey },
+    body: JSON.stringify({
+      query: searched,
+      count: want,
+      ori_question: sanitizeQuery(query),
+      need_content: wantContent
+    }),
+    signal: AbortSignal.timeout(Math.max(5000, Number(cfg.searchTimeoutMs) || 20000))
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const error = new Error('DeepSeek 搜索 HTTP ' + res.status + '：' + String(text).slice(0, 300));
+    error.status = res.status;
+    throw error;
+  }
+  const data = await res.json().catch(() => { throw new Error('DeepSeek 搜索返回了无法解析的 JSON'); });
+  const parsed = parseDeepSeekSearchResponse(data, { count: want, minScore, minAuthority });
+  if (!parsed.results.length) throw new Error('DeepSeek 搜索没有返回可用结果（换个关键词或更具体的说法再试）');
+  const readN = Math.max(0, Number(read) || 0);
+  const results = parsed.results.map((r, index) => {
+    if (index < readN && typeof r.content === 'string') return r;
+    const rest = { ...r };
+    delete rest.content;
+    return rest;
+  });
+  return {
+    query,
+    searchedQuery: searched,
+    results,
+    lowRelevance: parsed.lowRelevance,
+    droppedLowScore: parsed.dropped
+  };
+}
+
+/**
+ * 原生搜索 + 「重试一次 + 失败落 Bing」（Q4=B，2026-10-17 拍板）。
+ *
+ * 顺序：搜 → 可重试错误就退避 600ms 再搜一次 → 还不行换 Bing（无需 key）→ 仍不行报原始错误。
+ * **唯一的例外**：缺 Key 不兜底。那是**配置问题**，兜底会把「Key 没填」藏起来，
+ * 用户永远发现不了自己其实一直在用 Bing。
+ */
+export async function deepSeekNativeSearchWithFallback(query, opts = {}) {
+  let error = null;
+  try {
+    return await deepSeekNativeSearch(query, opts);
+  } catch (e) {
+    error = e;
+  }
+  if (isRetryableSearchError(error)) {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    try {
+      return await deepSeekNativeSearch(query, opts);
+    } catch (e) {
+      error = e;
+    }
+  }
+  if (/需要\s*API\s*Key/.test(String(error?.message ?? ''))) throw error;
+  try {
+    const bing = await bingSearch(buildSearchQuery(sanitizeQuery(query), opts));
+    if (bing?.results?.length) {
+      return {
+        ...bing,
+        fallbackFrom: 'deepseek',
+        fallbackReason: String(error?.message ?? error).slice(0, 200)
+      };
+    }
+  } catch {
+    // 兜底也失败 ⇒ 报**原始**错误（不要用兜底的错误盖住真相）
+  }
+  throw error;
+}
+
 /** 抓取网页正文（走 safe-fetch 的 SSRF 全防护）。 */
 /**
  * 抓取网页。
@@ -200,9 +531,16 @@ export async function deepSeekSearch(query) {
  *      要让工具真正受锁定约束，得在调用处显式传 —— 那是**策略决定**，
  *      留给"要不要给浏览加闸门"这件事单独拍板（见 config.security.browseLock 注释）。
  */
-export async function webFetch(url, { browseLocked = false } = {}) {
+export async function webFetch(url, { browseLocked = false, clean = false } = {}) {
   const result = await safeFetch(url, { browseLocked });
-  return result;
+  if (!clean) return result;
+  const body = String(result?.body ?? '');
+  if (!looksLikeHtml(body)) return result;        // 不是网页（JSON/纯文本）⇒ 一个字都不动
+  const text = htmlToMarkdownLite(body);
+  // 净化后几乎什么都不剩 ⇒ 大概率是纯 JS 壳页面：这时**退回原文**更诚实
+  // （模型至少还能看到 <title>/<meta>/内嵌 JSON），而不是给它一段空白。
+  if (!text || text.length < 32) return { ...result, cleaned: false };
+  return { ...result, body: text, cleaned: true, rawLength: body.length };
 }
 
 /** 智谱 Web Search API（结构化结果：标题/链接/摘要/网站名/日期）。 */
