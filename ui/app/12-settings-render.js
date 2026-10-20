@@ -85,7 +85,7 @@ function parseFallbackModels(text) {
 }
 
 /**
- * 降级链的**结构化**列表渲染（2026-10-16 第五十一对话 · 用户拍板"一个一个手填太麻烦"）。
+ * 降级链的**结构化**列表渲染（2026-10-16 第四十九对话 · 用户拍板"一个一个手填太麻烦"）。
  *
  * 背景：原来这里是一个 textarea，要人手打「模型id @ 提供商id」。用户的供应商里有
  * 200+ 个模型 ⇒ 手填既慢又容易打错。改成"从已有模型里挑 + 上下移动排序"。
@@ -101,7 +101,7 @@ function parseFallbackModels(text) {
 function renderFallbackRows(list) {
   const arr = Array.isArray(list) ? list.filter((f) => f && f.model) : [];
   if (!arr.length) {
-    // ⚠️ 样式走 .fb-empty 类（2026-10-16 第五十二对话）：以前是 inline style，
+    // ⚠️ 样式走 .fb-empty 类（2026-10-16 第四十九对话）：以前是 inline style，
     //    与下面 #speed-list 的空态各写一份，两处永远对不齐。
     return '<div class="muted fb-empty" id="fb-empty">还没有备选模型 —— 主模型失败时这一轮就到此为止。</div>';
   }
@@ -218,7 +218,7 @@ function renderApiSection(c) {
     <details class="hint-more"><summary>这几种方式有什么区别？</summary>
       <div class="hint-more-body">只在<b>消息里真的出现了</b>图片 / 视频部件时才切过去，纯文本对话一律用主模型（不会白花贵模型的额度）。视频优先于图片。视频那一路还要 <code>api.videoMode</code> 决定"原生发送 / 抽帧 / 只看元信息"：<code>auto</code> 看上面「视频输入专用模型」填没填，<code>native</code> / <code>frames</code> 强行指定，<code>off</code> 完全不喂画面。</div>
     </details>
-    <!-- 备选模型降级链 —— 2026-10-16（第五十一对话）从 textarea 改成结构化编辑器。
+    <!-- 备选模型降级链 —— 2026-10-16（第四十九对话）从 textarea 改成结构化编辑器。
          起因（用户原话）：某个供应商"有200多个模型可选"，"一个一个手填还是太麻烦了"。
          🔴 隐藏框 cfg-fallback-models 仍是**唯一**的真值载体，保存侧一行未改；
             本块只是给它加了一层"挑 + 排"的界面。
@@ -236,14 +236,14 @@ function renderApiSection(c) {
       </details>
     </div>
 
-    <!-- 一键统一响应测试（2026-10-16 第五十一对话）。为什么要有它：降级链里混着好几家
+    <!-- 一键统一响应测试（2026-10-16 第四十九对话）。为什么要有它：降级链里混着好几家
          供应商，「哪个模型还能用、哪个快」以前只能靠一次次真实失败才撞见。
          🔴 它**只给建议**，绝不自动改用户的降级链 —— 用户拍板"先给建议顺序，我看了再点应用"。
-         2026-10-16 第五十二对话：这一块与降级链编辑器一起按应用既有风格重排（范围按钮靠左、
+         2026-10-16 第四十九对话：这一块与降级链编辑器一起按应用既有风格重排（范围按钮靠左、
          动作按钮靠右、行样式与降级链同构、状态行补"上次测速时间"）。 -->
     <div class="field"><label>一键统一响应测试</label>
       <div class="hint status" id="speed-test-status">正在读取…</div>
-      <!-- 2026-10-16 第五十二对话重排：左边是"测哪些"（范围），右边是"去测 / 用建议"（动作）——
+      <!-- 2026-10-16 第四十九对话重排：左边是"测哪些"（范围），右边是"去测 / 用建议"（动作）——
            原来五个按钮等宽排一排，"开始测速"和"全不选"看起来一样重。 -->
       <div class="fb-toolbar">
         <button class="btn btn-small" id="speed-select-default-btn" type="button">只选主模型与降级链</button>
@@ -274,7 +274,7 @@ function renderApiSection(c) {
       <div class="hint" id="price-feed-status" style="margin-top:4px"></div>
     </div>
 
-    <!-- ── 余额/额度耗尽（HTTP 402）时给她看的那句话（2026-10-16 第五十一对话 · 用户拍板"甲"）──
+    <!-- ── 余额/额度耗尽（HTTP 402）时给她看的那句话（2026-10-16 第四十九对话 · 用户拍板"甲"）──
          起因：402 的报错原文是「模型 API HTTP 402：{…500 字的原始 JSON…}」，她看到的是一坨 JSON。
          这里把它做成**她能自己改**的文案（配置键 api.balanceHint，留空 = 内置默认）。
          ⚠️ 说明走既有的两级载体（折叠 hint-more）—— 本页的棘轮判据钉着"常显 .hint 只减不增"，

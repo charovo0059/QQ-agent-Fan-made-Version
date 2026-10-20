@@ -219,7 +219,7 @@ function connectSSE() {
       refreshSnowlumaLogs();
     }
   });
-  // 一键统一响应测试的进度（2026-10-16 第五十一对话）。
+  // 一键统一响应测试的进度（2026-10-16 第四十九对话）。
   // 后端在 /api/speeds/scan 里逐条 emit('speed-scan', { key, providerId, model, ok, latencyMs, done, total })，
   // 开头/结尾另有 { phase: 'start' | 'done' | 'error' }。
   // ⚠️ 与其它监听器同一纪律：JSON.parse 必须包 try（半截帧会让整段回调抛错）。

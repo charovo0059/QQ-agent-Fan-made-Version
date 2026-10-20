@@ -3051,7 +3051,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         return json(res, 202, { ok: true, started: true });
       }
 
-      // ── 一键统一响应测试（测速，2026-10-16 第五十一对话）────────────────────
+      // ── 一键统一响应测试（测速，2026-10-16 第四十九对话）────────────────────
       // 与上面 /api/vision/scan 同一套形状（running 守卫 + 409 + 后台跑 + emit 进度 + 202），
       // 差别只在"测什么"：vision 探测能不能看图，这里测**响应延迟**（底座 providers.testModelChat）。
       // 🔴 它**只写 config.modelSpeeds**（实测结果），绝不碰 api.fallbackModels ——
@@ -3085,7 +3085,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         return json(res, 202, { ok: true, started: true });
       }
 
-      // ── 「应用建议顺序」（2026-10-16 第五十一对话）──────────────────────────────
+      // ── 「应用建议顺序」（2026-10-16 第四十九对话）──────────────────────────────
       // 🔴 这是本功能里**唯一**会改 api.fallbackModels 的地方，而且：
       //    ① 它**不采信客户端传上来的 order** —— 服务端现算一遍建议，这既是"所见即所改"，
       //       也堵死了"拿这个接口当随便改降级链的后门"（界面/脚本都不能凭空塞顺序）。

@@ -54,7 +54,7 @@ export const DEFAULT_CONFIG = {
     temperature: 0.8,
     maxRounds: 12,                          // 单次运行的最多工具轮数
     timeoutMs: 180000,
-    // ── 余额/额度耗尽（HTTP 402）时给她看的那句话（2026-10-16 第五十一对话 · 用户拍板"甲"）──
+    // ── 余额/额度耗尽（HTTP 402）时给她看的那句话（2026-10-16 第四十九对话 · 用户拍板"甲"）──
     // 起因：402 的报错原文是 `模型 API HTTP 402：{…500 字的原始 JSON…}`（llm.js 里一行拼出来的），
     // 她看到的是一坨 JSON。这里放**可读、且她能自己在设置页改**的文案。
     // 语义：留空 = 回落到这句内置默认（也等于"恢复默认"）；非空 = 原样用她填的。
@@ -83,7 +83,7 @@ export const DEFAULT_CONFIG = {
   dshProviderKeys: {},   // providerId -> 真实 API Key（providers[] 里不再存明文 Key）
   providersSourceYaml: '',
   providersImported: true,
-  // ── 一键统一响应测试的结果（2026-10-16 第五十一对话）────────────────────
+  // ── 一键统一响应测试的结果（2026-10-16 第四十九对话）────────────────────
   // 键 = `providerId|||modelId`（与 modelVision 同一套键约定），值形如
   // `{ providerId, model, ok, latencyMs, note, checkedAt }`。
   // 只存“实测过什么、快不快”，**不改用户的降级链** —— 建议顺序由界面按钮显式应用。

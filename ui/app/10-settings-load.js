@@ -6,7 +6,7 @@ async function loadSettings() {
     api('/api/persona-templates').catch(() => ({ templates: [] })),
     api('/api/providers').catch(() => ({ providers: [] })),
     api('/api/vision/results').catch(() => ({ results: {}, scanning: false })),
-    // 一键统一响应测试的现场（2026-10-16 第五十一对话）：上次测速结果 + 默认要测的目标 + 建议顺序。
+    // 一键统一响应测试的现场（2026-10-16 第四十九对话）：上次测速结果 + 默认要测的目标 + 建议顺序。
     // ⚠️ `.catch` 必须有：老后端（或接口挂了）时这一路失败会把整个 Promise.all 拖垮，
     //    设置页就整页白屏 —— 这一页其余六路都带 catch，照抄它的口径。
     api('/api/speeds/results').catch(() => ({ results: {}, scanning: false, targets: [], suggestion: null })),
@@ -764,7 +764,7 @@ function renderSettingsSidebar() {
 }
 
 /**
- * 「一键统一响应测试」面板（2026-10-16 第五十一对话）。
+ * 「一键统一响应测试」面板（2026-10-16 第四十九对话）。
  *
  * 数据全部来自后端，界面**不自己算**默认范围与建议顺序（避免两套真相源）：
  *   · `state.speedTargets`    —— 后端给的"默认勾选范围"（主模型 + 现有降级链）
@@ -803,7 +803,7 @@ function renderSpeedPanel() {
       const isMain = t.fallbackIndex < 0;
       // 行结构与降级链同构：显示名（本地模型目录里那个）/ 来自哪个端点 / 真值 model。
       // ⚠️ 以前第一列直接用后端给的 t.label（"model @ pid（主模型）"），和后面两列 + 「主模型」
-      //    徽标把同一件事说了三遍。2026-10-16 第五十二对话改成与 renderFallbackRows 完全一致的取法。
+      //    徽标把同一件事说了三遍。2026-10-16 第四十九对话改成与 renderFallbackRows 完全一致的取法。
       const p = (state.providers || []).find((x) => x.id === t.providerId);
       const show = (p && (p.modelNames || {})[t.model]) || t.model;
       let badge = '<span class="speed-badge">未测</span>';

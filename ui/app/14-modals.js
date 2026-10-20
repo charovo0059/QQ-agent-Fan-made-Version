@@ -375,7 +375,7 @@ function openModelPicker({ onPick = null } = {}) {
   });
   const left = overlay.querySelector('#mm-left');
   const right = overlay.querySelector('#mm-right');
-  // 右列搜索框（2026-10-16 第五十一对话）。为什么现在才加：某个供应商一次能拉回
+  // 右列搜索框（2026-10-16 第四十九对话）。为什么现在才加：某个供应商一次能拉回
   // 200+ 个模型（用户原话："有200多个模型可选"），右列就是一长条没法看 —— 之前只能滚。
   // ⚠️ 只过滤**右列**（模型），不动左列（提供商）的既有结构：
   //    左列那个 .mm-prov / .mm-prov-del 形态被 测试-现行\\test-删供应商与两处界面小修.mjs 钉着。
@@ -385,10 +385,10 @@ function openModelPicker({ onPick = null } = {}) {
   //    顺手让下面那句过滤条件读起来短一点；行为与原来逐字相同（provider 都是同一处来源）。
   const curApi = state.config && state.config.api ? state.config.api : {};
   // 当前配置里的提供商（决定左列谁高亮）——
-  // ⚠️ 下面 activePid / renderLeft / current 这三段是 2026-10-16 第五十一对话加右列搜索框时**被误删**的
+  // ⚠️ 下面 activePid / renderLeft / current 这三段是 2026-10-16 第四十九对话加右列搜索框时**被误删**的
   //    （tools.edit 的区间把 378-386 整段吃掉了），而 443 行仍写着 renderLeft();
   //    ⇒ 外壳已 append 进 DOM 之后才抛 ReferenceError: renderLeft is not defined，
-  //    结果弹窗只剩标题 + 取消、左右两栏全空（第五十二对话用户报的就是这个）。
+  //    结果弹窗只剩标题 + 取消、左右两栏全空（第四十九对话用户报的就是这个）。
   //    ⛔ 以后改这个函数：renderLeft / activePid / current 三个名字一个都不能少 ——
   //    判据见 测试-现行\test-模型选择弹窗可渲染.mjs（它真的调一次 openModelPicker，看两栏有没有内容）。
   const current = curApi.provider;

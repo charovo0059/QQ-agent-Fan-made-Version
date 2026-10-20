@@ -245,7 +245,7 @@ async function saveConfig({ quiet = false } = {}) {
       priceInputPerM: Number(val('#cfg-price-in', c.api.priceInputPerM ?? 0)) || 0,
       priceOutputPerM: Number(val('#cfg-price-out', c.api.priceOutputPerM ?? 0)) || 0,
       priceCachedPerM: Number(val('#cfg-price-cached', c.api.priceCachedPerM ?? 0)) || 0,
-      // 余额耗尽（HTTP 402）时给她看的那句话（2026-10-16 第五十一对话 · 用户拍板"甲"）。
+      // 余额耗尽（HTTP 402）时给她看的那句话（2026-10-16 第四十九对话 · 用户拍板"甲"）。
       // 🔴 这里**不用** `|| 默认值` 兜底：留空 = 那正是"回到内置默认"的表达方式（渲染侧预填内置文案）。
       balanceHint: val('#cfg-balance-hint', c.api.balanceHint || '').trim()
     };
