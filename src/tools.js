@@ -387,6 +387,40 @@ function imageBudgetLeft(ctx) {
 // ⚠️ `detectMime` 原来在这里内联实现（魔数嗅探），已改为从 `./image-type.js` 引入 ——
 //    那份实现与本处**逐字等价**（连 `buf.length < 12` 的守卫都一样），所以行为不变。
 //    别再把它抄回来：抄回来就又变成"三份实现各自演化"。
+/**
+ * 插画路返回值里那组「分级读数」字段（`levelDropped` / `levelGate` / `levelNote` / `levelFallback`）。
+ *
+ * 🔴 2026-10-20（第五十对话 · 用户拍板 B3）· 为什么要抽成函数：
+ *   ① 以前这里是 `...(refined.dropped ? { levelDropped: refined.dropped, levelNote: refined.reason } : {})`，
+ *      **dropped=0 时整个字段消失** ⇒ 事后的会话库里分不清"没剔"和"没记录"，
+ *      于是"分级过滤到底拦了多少"永远算不出分母（§3-130 挂了很久就是这个）。
+ *      现在**恒写** `levelDropped`（0 也落盘）。
+ *   ② 抽成纯函数是为了能**单测**（同 `pruneSeenImageUrls` 那一族的理由）：
+ *      写成内联对象字面量时，"0 到底有没有写进去"只能靠读源码相信 —— 而这正是它藏了两周的原因。
+ *
+ * @param {string} rating  她这次要的档（`'safe'` / `'questionable'` / 其他=any）
+ * @param {{dropped?:number, reason?:string, fallback?:boolean}} refined  `refineIllustrationList()` 的结果
+ * @returns {object} 直接展开进 `ok({...})` 的 payload 片段
+ */
+export function illustrationLevelFields(rating, refined = {}) {
+  const dropped = Number(refined?.dropped) || 0;
+  // ⚠️ 真实调用点（`const rating = ['safe','questionable','any'].includes(...toLowerCase())`）
+  //   已经把档位归一化过一次了；这里再兜一次是因为本函数是**导出**的 ——
+  //   别处（复盘脚本、未来的调用方）传 `'SAFE'` 进来时，⛔ 不许静默归到 `any`
+  //   （那会让"按开关分组算拦截率"多出一个假分组，而且看起来完全正常）。
+  const r = String(rating ?? '').trim().toLowerCase();
+  return {
+    // 恒写：0 也要有（0 是"这一轮一张都没剔"，是一条有效读数，不是"没记录"）
+    levelDropped: dropped,
+    // 记**这一轮生效的分级开关**：事后复盘要按 safe / any 分组算拦截率，
+    // 而没有这个字段时只能猜（同一条 query 换个开关结果完全不同）。
+    levelGate: r === 'questionable' ? 'r18' : (r === 'safe' ? 'safe' : 'any'),
+    // ⚠️ 这两条仍然**只在真发生时**才带：没剔时 reason 是空串，写进去是噪声。
+    ...(dropped ? { levelNote: refined.reason } : {}),
+    ...(refined?.fallback ? { levelFallback: true } : {})
+  };
+}
+
 function ok(payload) {
   return { content: typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1) };
 }
@@ -1691,8 +1725,10 @@ export function buildToolDefs() {
               source: r.source,
               tag: r.tag,
               // 🆕 分级过滤的如实读数（她提案要的"别让我自己核对"就落在这里）
-              ...(refined.dropped ? { levelDropped: refined.dropped, levelNote: refined.reason } : {}),
-              ...(refined.fallback ? { levelFallback: true } : {}),
+              // 🔴 2026-10-20（第五十对话 · 用户拍板 B3）：抽成 `illustrationLevelFields()`，
+              //    **恒写 levelDropped**（0 也落盘）、并记下这一轮生效的分级开关。
+              //    ⛔ 别把那段内联回对象字面量：那样"0 有没有写进去"就只剩读源码能验（见函数注释）。
+              ...illustrationLevelFields(rating, refined),
               ...(r.source === 'pixiv'
                 ? {
                   heat: r.heat,

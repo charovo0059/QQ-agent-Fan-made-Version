@@ -10,6 +10,45 @@ import { DATA_DIR, getConfig, updateConfig } from './config.js';
 
 const MEMORY_DIR = path.join(DATA_DIR, 'memory');
 
+// ── 影子日志落盘（2026-10-20 第五十对话 · 用户拍板 B4）──────────────────────────
+// 为什么需要：`importance` 影子模式从 2026-10-05 起只打一行 console.log，而线上 exe 由
+// explorer 直接启动、**没有 stdout 重定向** ⇒ 那行日志在真机上一次都没保存过
+// （实测 `%LOCALAPPDATA%\QQ Agent` 下 .log/.txt/.jsonl 一个都没有）。
+// 于是"词表判的 vs 模型报的谁更准"这件事**攒了半个月零数据**（§3-131）。
+//
+// 落 `data/logs/` 而不是 `data/` 根：根上躺的是记忆/会话存档，日志混进去容易被
+// 备份脚本当存档一起搬走。`logs/` 是明确的非存档层。
+//
+// ⚠️ 三条硬约束（都写在这里，因为这是唯一的写入点）：
+//   ① **绝不影响主路**：任何 IO 失败一律吞掉 —— 观测把写印象搞坏是本项目最忌的事；
+//   ② **不无限长**：单文件超 2 MB 就轮转成 `.1.jsonl`（只留一份旧档，不做无限代）；
+//   ③ **不写进 entry、不参与召回**：这里只落盘，一个字节都不碰 entry / scoreImpression。
+const SHADOW_LOG_DIR = path.join(DATA_DIR, 'logs');
+const SHADOW_LOG_FILE = path.join(SHADOW_LOG_DIR, 'importance-shadow.jsonl');
+const SHADOW_LOG_MAX_BYTES = 2 * 1024 * 1024;
+
+/** 追加一行结构化影子日志。**永不抛异常**（失败只 warn 一次，不刷屏）。 */
+let shadowLogWarned = false;
+function appendShadowLog(record) {
+  try {
+    fs.mkdirSync(SHADOW_LOG_DIR, { recursive: true });
+    // 轮转：超限就滚一份旧的。只留一代 —— 影子数据是"攒样本"，不是审计日志，
+    // 不需要无限历史；留一代够覆盖"上一次复盘之后"的窗口。
+    try {
+      const st = fs.statSync(SHADOW_LOG_FILE);
+      if (st.size > SHADOW_LOG_MAX_BYTES) {
+        fs.renameSync(SHADOW_LOG_FILE, SHADOW_LOG_FILE + '.1');
+      }
+    } catch { /* 文件还不存在 = 不需要轮转 */ }
+    fs.appendFileSync(SHADOW_LOG_FILE, JSON.stringify(record) + '\n', 'utf8');
+  } catch (e) {
+    if (!shadowLogWarned) {
+      shadowLogWarned = true;   // 只警告一次：磁盘满/只读时不要每写一条印象刷一行
+      console.warn('[importance-shadow] 落盘失败（不影响印象写入，后续不再提示）：' + String(e?.message ?? e));
+    }
+  }
+}
+
 function chatDirName(chatKey) {
   return String(chatKey).replace(/[^a-z0-9_]/gi, '_');
 }
@@ -705,6 +744,9 @@ export class MemoryStore {
     //   ⛔ **绝不写进 `entry`**（那会让影子变生效、还改数据形状）；
     //   ⛔ **绝不参与召回**（`scoreImpression` 一个字节都没动）。
     //   ⇒ 复盘时比"词表判的"与"模型报的"谁更准，再决定要不要让它进排序。
+    //   🆕 2026-10-20（第五十对话 · 用户拍板 B4）：同一份数据**另落一行 jsonl 到
+    //      `data/logs/importance-shadow.jsonl`**（console.log 保留，开发时看得到）。
+    //      ⛔ 落盘内容与 entry **无关**：只是把这一行日志结构化，entry 一个字节不改。
     try {
       const byWords = impressionImportance(entry.content);
       const byModel = normalizeImportance(modelImportance);
@@ -714,6 +756,20 @@ export class MemoryStore {
         + ` words=${byWords.level}(${byWords.by}${byWords.hits.length ? ':' + byWords.hits.slice(0, 3).join('/') : ''})`
         + ` model=${byModel === null ? 'na' : byModel} agree=${agree}`
         + ` content=${JSON.stringify(entry.content.slice(0, 60))}`);
+      // 🆕 B4：结构化落盘（复盘直接按行 JSON.parse，不用再正则拆上面那行文本）
+      appendShadowLog({
+        at: Date.now(),
+        chat: String(chatKey ?? ''),
+        uid: String(userId ?? ''),
+        name: String(name ?? '').slice(0, 24),
+        words: byWords.level,
+        by: byWords.by,                                  // 判档依据：'words'（命中词表）/ 'default'（没命中，按默认 4 档）
+        hits: byWords.hits.slice(0, 3),                  // 命中的词（同上，最多 3 个）
+        model: byModel === null ? null : byModel,        // null = 模型这次没自报
+        agree,
+        content: entry.content.slice(0, 60),             // 与 console.log 同长度，便于两边对账
+        source: entry.source                             // model / consolidation / manual
+      });
     } catch (e) {
       // 影子观测**绝不许影响写印象本身**（本项目最忌"观测把主路搞坏"）
       console.warn('[importance-shadow] 判档失败（不影响这条印象）：' + String(e?.message ?? e));

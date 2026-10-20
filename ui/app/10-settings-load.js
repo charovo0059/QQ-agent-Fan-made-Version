@@ -17,9 +17,12 @@ async function loadSettings() {
   state.providers = provData.providers || [];
   state.visionResults = visionData.results || {};
   state.visionScanning = !!visionData.scanning;
-  // 测速：results 是 { 提供商id|||模型id: { ok, latencyMs, note, checkedAt } }；
+  // 测速：results 是 { 提供商id|||模型id: { ok, latencyMs, note, checkedAt, stale } }；
+  //   ⚠️ `stale` 由后端标（TTL=24h，见 src/speed-scan.js 的 SPEED_TTL_MS）——
+  //      界面**不许自己算**这个 24 小时，否则两套真相源、改一处忘一处。
   // targets 是后端算出来的"默认勾选范围"（主模型 + 现有降级链），界面不自己算一份（避免两套真相源）。
   state.speedResults = speedData.results || {};
+  state.speedTtlMs = Number(speedData.ttlMs) || 0;
   state.speedScanning = !!speedData.scanning;
   state.speedTargets = Array.isArray(speedData.targets) ? speedData.targets : [];
   state.speedSuggestion = speedData.suggestion || null;
@@ -808,9 +811,21 @@ function renderSpeedPanel() {
       const show = (p && (p.modelNames || {})[t.model]) || t.model;
       let badge = '<span class="speed-badge">未测</span>';
       if (r) {
-        badge = r.ok
-          ? `<span class="speed-badge ok">✓ ${Number.isFinite(r.latencyMs) ? r.latencyMs + 'ms' : '通'}</span>`
-          : `<span class="speed-badge bad" title="${esc(r.note || '')}">✗ 不通</span>`;
+        // 🆕 2026-10-20 B2：过期读数**不能画成有效读数** ——
+        //   一条半个月前的 132ms 和刚测出来的 132ms 长得一模一样，用户没法分辨，
+        //   于是会照着假的最快值去调顺序。⇒ 过期就标「已过期」并把延迟放进 title。
+        //   ⚠️ 判据来自后端 r.stale（TTL=24h），界面不自己算。
+        if (r.stale) {
+          const ago = Number.isFinite(Number(r.checkedAt)) && Number(r.checkedAt) > 0
+            ? `，上次 ${new Date(Number(r.checkedAt)).toLocaleString('zh-CN', { hour12: false })}`
+            : '';
+          const val = r.ok && Number.isFinite(r.latencyMs) ? `当时 ${r.latencyMs}ms` : '当时不通';
+          badge = `<span class="speed-badge stale" title="读数已超过 24 小时，不再参与排序建议（${esc(val)}${esc(ago)}）">⏱ 已过期</span>`;
+        } else if (r.ok) {
+          badge = `<span class="speed-badge ok">✓ ${Number.isFinite(r.latencyMs) ? r.latencyMs + 'ms' : '通'}</span>`;
+        } else {
+          badge = `<span class="speed-badge bad" title="${esc(r.note || '')}">✗ 不通</span>`;
+        }
       }
       return `<label class="fb-row speed-row" data-key="${esc(t.key)}">
         <input type="checkbox" class="speed-pick" data-key="${esc(t.key)}"${picked[t.key] ? ' checked' : ''} />

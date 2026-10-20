@@ -1365,6 +1365,9 @@ tr.quote-selected td { background: rgba(var(--accent-rgb),.10); }
 .speed-badge.ok { color: var(--green); border-color: rgba(var(--green-rgb),.5); }
 .speed-badge.bad { color: var(--red); border-color: rgba(var(--red-rgb),.5); }
 .speed-badge.main { color: var(--accent-strong); border-color: rgba(var(--accent-rgb),.5); }
+/* 🆕 2026-10-20 B2：「已过期」用虚线边框 + 降饱和，与"未测"（实线灰）和"✓ 通"（绿）都能一眼分开。
+   ⚠️ 别用红色：红色在本界面已经等于"不通/出错"，过期只是"读数不可信"，两回事。 */
+.speed-badge.stale { color: var(--muted); border-style: dashed; opacity: .85; }
 /* 模型选择弹窗右列的搜索框（同一天加的：某个供应商 200+ 个模型，右列没法看） */
 .mm-search { padding: 0 4px 8px 0; }
 .mm-search input {

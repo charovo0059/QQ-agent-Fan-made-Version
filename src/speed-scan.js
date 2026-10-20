@@ -18,9 +18,48 @@
 import { getConfig, updateConfig } from './config.js';
 import { testModelChat } from './providers.js';
 
+/**
+ * 测速结果的有效期（2026-10-20 第五十对话 · 用户拍板 B2：TTL = 24 小时）。
+ *
+ * 为什么需要它：旧记录只有 `checkedAt`、没有"多久算过期"的概念 —— 一条半个月前
+ * 测出来的 132ms 会**永远**被当成"最快的"，把真正该排前面的新模型压在后面。
+ * 网络快慢会变、供应商会限流、模型会下线，过期读数比没有读数更误导人。
+ *
+ * ⇒ 超期记录在排序里**退化成"没测过"**（rank=1，保持原相对顺序），
+ *    界面如实标「已过期」，⛔ 不直接删记录（留着让用户知道"上次是什么时候测的"）。
+ */
+export const SPEED_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** 某条测速记录是否已过期（**没有 checkedAt 的老记录一律算过期**，因为无法证伪）。 */
+export function isSpeedStale(rec, now = Date.now()) {
+  if (!rec) return false;                       // 没有记录 ≠ 过期，那是"从没测过"
+  const at = Number(rec.checkedAt);
+  if (!Number.isFinite(at) || at <= 0) return true;
+  return now - at > SPEED_TTL_MS;
+}
+
 /** 读取已保存的测速结果（键 = providerId|||modelId）。 */
 export function speedResults() {
   return getConfig().modelSpeeds || {};
+}
+
+/**
+ * 给界面用的测速结果：原始记录 **加上 `stale` 布尔**（2026-10-20 B2）。
+ *
+ * 为什么由后端标：TTL 的判据只能在**一个地方**（本文件的 SPEED_TTL_MS / isSpeedStale）。
+ * 若让界面自己算，就得把 24 小时这个数抄进 ui/ —— 两套真相源，改一处忘一处，
+ * 而且界面拿的是毫秒时间戳、时区/时钟偏差各不相同。
+ * ⚠️ 只加字段、**不改也不删**原记录的任何键（`updateConfig` 那条写入口不经过这里）。
+ */
+export function speedResultsForUi(now = Date.now()) {
+  const all = speedResults();
+  const out = {};
+  for (const [key, rec] of Object.entries(all)) {
+    out[key] = (rec && typeof rec === 'object')
+      ? { ...rec, stale: isSpeedStale(rec, now) }
+      : rec;
+  }
+  return out;
 }
 
 /** 查询单个模型（providerId|||modelId）的测速记录：{ ok, latencyMs, note, checkedAt } | undefined。 */
@@ -90,34 +129,49 @@ export function speedScanTargets(cfg = getConfig()) {
  * 按实测延迟算一个**建议顺序**（只针对降级链，主模型不动）。
  *
  * 排序规则（确定性，可解释）：
- *   ① 测过且成功 → 按延迟**升序**排在最前
- *   ② 从没测过   → 保持原相对顺序，排在中间
+ *   ① 测过、**未过期**且成功 → 按延迟**升序**排在最前
+ *   ② 从没测过 / **测过但已过期** → 保持原相对顺序，排在中间
  *   ③ 测过但失败 → 排最后（无反应的端点不该排在能用的前面）
+ *   ④ 测过、成功但**已过期** → 也退化成 ②（2026-10-20 第五十对话 · 用户拍板 B2）
+ *
+ * ⚠️ 过期口径见 isSpeedStale：**没有 checkedAt 的记录一律算过期** ——
+ *    它们全是 TTL 引入之前（≤2026-10-20）测的，无法证明还准，按过期处理最保守。
+ *
  * 返回 { order, changed, rows }：
  *   order   = 建议的降级链（形如 [{ model, provider }]，与 api.fallbackModels 同形状）
  *   changed = order 与当前降级链是否**逐项相同**（相同 ⇒ 界面把"应用"按钮置灰）
- *   rows    = 逐项明细，给界面显示"实测 320ms / 未测 / 失败：连接超时"
+ *   rows    = 逐项明细，给界面显示"实测 320ms / 未测 / 已过期 / 失败：连接超时"
  */
 export function buildSpeedSuggestions(cfg = getConfig()) {
   const mainProvider = String(cfg?.api?.provider || '').trim();
   const fbs = (Array.isArray(cfg?.api?.fallbackModels) ? cfg.api.fallbackModels : [])
     .map((f) => ({ model: String(f?.model || '').trim(), provider: String(f?.provider || '').trim() }))
     .filter((f) => f.model);
-  const saved = speedResults();
+  // ⚠️ 优先用**传进来的 cfg** 里的 modelSpeeds（不是无参的 speedResults()）：
+  //    这样本函数对入参是纯函数 —— 测试能造"过期/未过期"的场景，而不必去改全局配置。
+  //    真实调用方传的都是 getConfig()，两者取到的是同一份数据。
+  const saved = (cfg && cfg.modelSpeeds) || speedResults();
+  const now = Date.now();
 
   const rows = fbs.map((f, i) => {
     const pid = f.provider || mainProvider;
     const rec = saved[speedKey(pid, f.model)];
     const tested = !!rec;
-    const ok = tested && rec.ok === true;
+    const stale = isSpeedStale(rec, now);
+    // 🔴 过期的成功记录**不再算"可用读数"**：它既不能排最前（读数不可信），
+    //    也不该排最后（那个端点其实没坏）⇒ 退化成"没测过"那一档，保持原相对顺序。
+    const ok = tested && !stale && rec.ok === true;
     const latencyMs = ok && Number.isFinite(rec.latencyMs) ? rec.latencyMs : null;
-    // 排序权重：0 = 测过且成功（按延迟升序）；1 = 从没测过（保持原序）；2 = 测过但失败。
-    const rank = ok ? 0 : (tested ? 2 : 1);
+    // 排序权重：0 = 测过、未过期且成功（按延迟升序）；1 = 从没测过 / 测过但已过期；2 = 测过但失败。
+    // ⚠️ 「失败」**不看是否过期**：一个半个月前连不上的端点，排到能用的前面仍然是错的
+    //    ⇒ 失败恒为 2（这条不能因为 stale 就退化成 1）。
+    const rank = !tested ? 1 : (rec.ok === true ? (stale ? 1 : 0) : 2);
     return {
       model: f.model,
       provider: f.provider,
       key: speedKey(pid, f.model),
       tested,
+      stale,
       ok,
       latencyMs,
       note: String(rec?.note ?? ''),

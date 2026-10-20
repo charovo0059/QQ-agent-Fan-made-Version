@@ -64,7 +64,7 @@ import { recordFailure, listFailures, getFailure, removeFailure, clearFailures }
 // 「核心记忆」（提案 c7486672）：只读 + 删。存是她自己的工具干的（tools.js）。
 import { listCoreMemories, getCoreMemory, removeCoreMemory, coreMemoryLoadError, coreMemoryFile, coreMemoryPromptBlocks, coreMemorySourceLabel } from './core-memory.js';
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
-import { scanModelSpeeds, speedResults, buildSpeedSuggestions, speedScanTargets } from './speed-scan.js';
+import { scanModelSpeeds, speedResultsForUi, SPEED_TTL_MS, buildSpeedSuggestions, speedScanTargets } from './speed-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey } from './util.js';
 // 系统提示：管理端「人设 → 系统提示自定义」用它读取内置段落与当前生效文本。
@@ -3057,9 +3057,13 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       // 🔴 它**只写 config.modelSpeeds**（实测结果），绝不碰 api.fallbackModels ——
       //    建议顺序由 GET 计算、由界面按钮显式应用（用户拍板："先给建议顺序，我看了再点应用"）。
       if (pathname === '/api/speeds/results' && method === 'GET') {
-        const all = speedResults();
+        // 🆕 2026-10-20 B2：结果的每一条都带 `stale` 布尔（TTL=24h，判据只在 speed-scan.js），
+        //    界面据此把过期的画成「已过期」而不是当成有效读数。
+        const all = speedResultsForUi();
         return json(res, 200, {
           results: all,
+          // 过期的毫秒数也回给界面：⚠️ 别让 ui/ 自己抄一份 24 小时（两套真相源）
+          ttlMs: SPEED_TTL_MS,
           scanning: speedScan.running,
           // 默认测速范围（主模型 + 现有降级链），界面用它预勾选与列表
           targets: speedScanTargets(getConfig()),
