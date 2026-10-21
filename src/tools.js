@@ -2022,14 +2022,23 @@ export function buildToolDefs() {
             name: String(args.name ?? '').trim() || path.basename(real),
             note: String(args.note ?? '').trim()
           });
-          ctx.session.sent.push({ type: 'file', text: `[文件:${r?.name ?? ''}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
+          // 🆕 2026-10-21：`flash: true` 表示群文件配额满了、已自动降级成**闪传（临时文件）**。
+          //   必须让模型知道，否则它会回一句"已经发到群文件里了"，而实际是个会过期的临时卡片 ——
+          //   用户过两天点开发现没了，而她坚持说发过。
+          const label = r?.flash ? `[临时文件:${r?.name ?? ''}]` : `[文件:${r?.name ?? ''}]`;
+          ctx.session.sent.push({ type: 'file', text: label, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
           ctx.emit?.('session-update', ctx.session.id);
+          const flashNote = r?.flash
+            ? '⚠️ 群文件配额已经满了，所以这是**闪传（临时文件）**发的 —— 不占群文件空间，但**会过期**，'
+              + '让对方尽快转存/下载。回话时要说清楚是临时文件，别说是群文件。'
+            : '';
           return ok({
             sent: true,
             messageId: r?.message_id ?? null,
             name: r?.name ?? '',
             size: fmtBytes(r?.bytes ?? st.size),
-            note: `文件发出去了（${r?.name ?? ''} ${fmtBytes(r?.bytes ?? st.size)}）。`
+            flash: r?.flash === true,
+            note: `文件发出去了（${r?.name ?? ''} ${fmtBytes(r?.bytes ?? st.size)}）。${flashNote}`
           });
         } catch (error) {
           return err(error?.message ?? error);

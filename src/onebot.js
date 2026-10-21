@@ -65,6 +65,24 @@ function isTimeoutError(error) {
   return name === 'TimeoutError' || /aborted due to timeout|operation was aborted/i.test(msg);
 }
 
+/**
+ * 判断一个错误是不是「群文件配额满」—— 满了就要降级到闪传（临时文件）。
+ *
+ * 🔴 2026-10-21（第五十一对话）**实测**：对已满的群（已用 10292/10240 MB）发 1 字节文件，
+ *   SnowLuma 回的是
+ *     `{ status: "failed", retcode: 100,
+ *        wording: "group file upload failed: code=-403 msg=永久空间不足, 请清理文件列表后重试" }`
+ *   ⇒ **外层 retcode 是 100，不是 −403**；`-403` 只藏在 wording 的文本里。
+ *
+ * ⚠️ 所以**不能只认 `-403`**：那串是协议端（SnowLuma）自己的文案，它改一个字我们就漏判，
+ *   漏判的后果是"群满了却当成网络故障"，白重试三次再报一个查不到原因的错误。
+ *   这里同时认"永久空间不足 / 空间不足"这类语义词，任一条命中就算配额问题。
+ */
+function isQuotaFullError(error) {
+  const msg = String(error?.message ?? error);
+  return /永久空间不足|空间不足|空间已满|retcode=-403|code=-403/.test(msg);
+}
+
 // ── 入站去重 + 静默判定（🆕 2026-10-06 第四十六对话 · 第三方报告 S5 复核后落地）──────────
 //
 // 报告说这两条缺了，**核实成立**：
@@ -499,14 +517,71 @@ export class OneBotClient {
           + '**这次很可能没发出去**。文件越大越慢，可以在「设置 → 发送保护 → 发文件超时」里调大这个时限。');
       }
       const msg = String(error?.message ?? error);
-      // −403 在 SnowLuma 上是"群文件配额满"，与网络故障长得完全不一样 —— 直接翻译成人话，
-      // 否则调用方只会看到一句 `retcode=-403`，然后去查网络（方向完全错）。
-      if (/-403\b|retcode=-403/.test(msg)) {
-        throw new Error(`发文件被拒（群文件配额可能已经满了，QQ 群文件上限 10GB）：${msg}`
-          + '　换个群/私聊发，或者先清理群文件。');
+      // 配额满：翻译成人话**并且打上标记**，让 sender.js 能认出来去走闪传兜底。
+      // ⚠️ 标记用 error.quotaFull 而不是"再正则一次 message" —— 后者一旦文案改动就断。
+      if (isQuotaFullError(error)) {
+        const e = new Error(`发文件被拒（群文件配额已经满了，QQ 群文件上限 10GB）：${msg}`);
+        e.quotaFull = true;
+        throw e;
       }
       throw error;
     }
+  }
+
+  /**
+   * 闪传（QQ 的「临时文件」）—— 🆕 2026-10-21（第五十一对话）。
+   *
+   * 🔴 为什么需要它：群文件有 **10GB 硬配额**，满了就一律发不进去（实测 `retcode:100` +
+   *   `code=-403 msg=永久空间不足`）。而 QQ 的**闪传/临时文件**走的是另一套（fileset），
+   *   **完全不占群文件配额** —— 实测：对一个已超满（free = −54 MB）的群
+   *   `create_flash_task` 依然 `retcode:0` 成功建出 fileset。用户明确要求这条路。
+   *
+   * 两步走（协议端没有"一步发闪传"的动作）：
+   *   ① `create_flash_task { files:[绝对路径], name }` ⇒ `{ fileset_id, task_id }`
+   *      （内部会真上传，切片 1 MiB；上限 4 GiB）
+   *   ② `send_flash_msg { fileset_id, group_id | user_id }` ⇒ `{ message_id: 0 }`
+   *      ⚠️ `message_id` 恒为 0 —— 闪传在 QQ 里是独立卡片、不是普通消息，
+   *         所以**拿不到真实 message_id**，调用方不要拿它去撤回去重。
+   *
+   * ⚠️ 与 `sendFile` 的差别（调用方要知道）：
+   *   · 不占群文件配额，但**有有效期**（QQ 侧按临时文件处理，会过期）；
+   *   · 收件人需要点开卡片下载，不是"文件区里永久存在"；
+   *   · 因此它是**配额满时的兜底**，不是替代品 —— 能不降级就不降级。
+   */
+  async sendFlashFile(kind, id, filePath, { name = '' } = {}) {
+    const p = String(filePath ?? '').trim();
+    if (!p) throw new Error('文件路径为空');
+    const fileName = String(name ?? '').trim() || path.basename(p);
+    const timeoutMs = fileSendTimeoutMs();
+
+    // ① 建 fileset（这一步才真传文件，最慢）
+    let created;
+    try {
+      created = await this.call('create_flash_task', { files: [p], name: fileName }, timeoutMs);
+    } catch (error) {
+      if (isTimeoutError(error)) {
+        const secs = Math.max(1, Math.round(timeoutMs / 1000));
+        throw new Error(`闪传上传超时（等了 ${secs} 秒）：文件可能太大或网络太慢，`
+          + '**这次很可能没发出去**。可以在「设置 → 发送保护 → 发文件超时」里调大这个时限。');
+      }
+      throw error;
+    }
+    const filesetId = String(created?.fileset_id || created?.task_id || '').trim();
+    if (!filesetId) throw new Error('闪传没能拿到 fileset_id（协议端返回不对）');
+
+    // ② 把 fileset 作为一条消息发给目标
+    const params = kind === 'private'
+      ? { fileset_id: filesetId, user_id: Number(id) }
+      : { fileset_id: filesetId, group_id: Number(id) };
+    const sent = await this.call('send_flash_msg', params, TEXT_TIMEOUT_MS);
+    return {
+      // ⚠️ 闪传没有真实 message_id，这里如实给 null（不是 0，0 会被误当成有效 id）
+      message_id: null,
+      fileset_id: filesetId,
+      flash: true,
+      name: fileName,
+      raw: sent ?? null
+    };
   }
 
   async sendPoke(kind, id, targetUserId) {

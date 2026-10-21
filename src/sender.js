@@ -478,18 +478,56 @@ export class SendQueue {
     return chain(async () => {
       this.#checkRate(chatKey);
       await sleep(randInt(400, 1000));   // 发文件前也来一下真人式的停顿（别紧接着上一条消息蹦出来）
-      const data = await client.sendFile(kind, id, fp, { name });
+
+      // ── 群文件满了就自动降级成闪传（QQ 的「临时文件」）──────────────────
+      // 🆕 2026-10-21（第五十一对话）：用户报「群文件空间满了会让她发不出去，
+      //   但 QQ 能发临时文件、不存在群文件空间里」。实测确认成立：
+      //   群文件 10GB 配额满 ⇒ `retcode:100 / code=-403 永久空间不足` 一律发不进去；
+      //   同一个已超满的群，`create_flash_task` 照样 retcode 0 成功。
+      // 🔴 只降级**一次**，且只对群聊降级：
+      //   · 私聊的"离线文件"不吃群文件配额，没必要降级（降级反而让文件变成会过期的临时件）；
+      //   · 闪传失败就如实抛闪传的错误（带上"群文件也满了"的原始原因），不做第二轮猜。
+      let data;
+      let viaFlash = false;
+      try {
+        data = await client.sendFile(kind, id, fp, { name });
+      } catch (error) {
+        if (kind !== 'group' || error?.quotaFull !== true || typeof client.sendFlashFile !== 'function') {
+          throw error;
+        }
+        try {
+          data = await client.sendFlashFile(kind, id, fp, { name });
+          viaFlash = true;
+        } catch (flashError) {
+          // 两条路都失败 ⇒ 把**两个**原因都给人看。只说闪传失败的话，
+          // 排查的人会以为是闪传的问题，而真正卡住的是群文件满了。
+          const e = new Error(
+            `发文件失败：群文件配额已满（${String(error?.message ?? error)}），`
+            + `改用闪传（临时文件）也没成功（${String(flashError?.message ?? flashError)}）。`
+          );
+          e.quotaFull = true;
+          e.flashError = flashError;
+          throw e;
+        }
+      }
+
       const ts = Date.now();
       const note = options.note ? `:${String(options.note).slice(0, 40)}` : '';
-      const label = `[文件${note}:${name} ${fmtBytes(stat.size)}]`;
+      // 闪传留档要**写明是临时文件**：它不占群文件、但会过期。
+      // 只写 `[文件:...]` 的话，下一轮她以为文件永久在群里，用户说"那个文件过期了"她接不上。
+      const label = viaFlash
+        ? `[临时文件${note}:${name} ${fmtBytes(stat.size)}]`
+        : `[文件${note}:${name} ${fmtBytes(stat.size)}]`;
       // 留档：与图片同一条纪律 —— 不留档的话下一轮她不知道自己发过，
       // 用户说"你刚发的那个打不开"时她完全接不上。
       this.store.appendSelf(chatKey, { text: label, ts, mid: data?.message_id ?? null });
-      this.onSent?.({ chatKey, text: label, messageId: data?.message_id ?? null, file: fp });
+      this.onSent?.({ chatKey, text: label, messageId: data?.message_id ?? null, file: fp, flash: viaFlash });
       return {
         message_id: data?.message_id ?? null,
         name,
-        bytes: stat.size
+        bytes: stat.size,
+        flash: viaFlash,
+        fileset_id: data?.fileset_id ?? null
       };
     });
   }

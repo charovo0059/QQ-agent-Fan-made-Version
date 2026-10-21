@@ -42,6 +42,19 @@ function truncNote(snap, zip) {
     + '要全本就在设置里把这个上限调大，然后重新下一次。'
 }
 
+/**
+ * 「这是临时文件」的补充说明。
+ *
+ * 🆕 2026-10-21（第五十一对话）：群文件配额满时 `sender.sendFile` 会自动降级成闪传，
+ * 返回 `{ flash: true }`。闪传**不占群文件空间、但会过期**，所以必须说出来 ——
+ * 否则模型会当"已经放进群文件里了"，用户过两天点开发现没了，她还坚持说发过。
+ */
+function flashNote(sent) {
+  if (sent?.flash !== true) return ''
+  return '\n⚠️ 这个群的**群文件配额已经满了**，所以是用**闪传（临时文件）**发的 —— '
+    + '不占群文件空间，但**会过期**，让对方尽快转存或下载。回话里要说清楚是临时文件，别说是群文件。'
+}
+
 /** 真正的开关：`config.jmDownload.enabled`（默认关）。 */
 export function available(context = {}) {
   let cfg
@@ -156,7 +169,7 @@ export function register(api) {
       let sent
       try {
         sent = await ctx.sender.sendFile(ctx.chatKey, zip.zipPath, { name: zip.name, note: '本子' })
-        ctx.session.sent.push({ type: 'file', text: `[文件:${zip.name}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) })
+        ctx.session.sent.push({ type: 'file', text: sent?.flash ? `[临时文件:${zip.name}]` : `[文件:${zip.name}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) })
         ctx.emit?.('session-update', ctx.session.id)
       } catch (error) {
         // 发失败**不能**把已经下好的东西删掉 —— 让用户/模型能重试发送。
@@ -175,10 +188,12 @@ export function register(api) {
         sizeMb: Math.round(zip.bytes / 1024 / 1024 * 10) / 10,
         sent: true,
         messageId: sent?.message_id ?? null,
+        flash: sent?.flash === true,
         kept: cl.kept === true,
         truncated: snap.truncated === true,
         note: `下好了，共 ${zip.entries} 页，已打包成 ${zip.name} 发出去了。`
           + truncNote(snap, zip)
+          + flashNote(sent)
           + (cl.kept ? '（图片按设置留着，6 小时后自动清理）' : '')
       })
     }
@@ -252,7 +267,7 @@ export function register(api) {
       let sent
       try {
         sent = await ctx.sender.sendFile(ctx.chatKey, zip.zipPath, { name: zip.name, note: '本子' })
-        ctx.session.sent.push({ type: 'file', text: `[文件:${zip.name}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) })
+        ctx.session.sent.push({ type: 'file', text: sent?.flash ? `[临时文件:${zip.name}]` : `[文件:${zip.name}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) })
         ctx.emit?.('session-update', ctx.session.id)
       } catch (error) {
         return err(`下好了但发送失败：${error?.message ?? error}\nzip 还在：${zip.zipPath}`)
@@ -261,9 +276,9 @@ export function register(api) {
       return ok({
         state: 'done', jobId, title: snap.title || '', pages: zip.entries,
         sizeMb: Math.round(zip.bytes / 1024 / 1024 * 10) / 10,
-        sent: true, messageId: sent?.message_id ?? null, kept: cl.kept === true,
+        sent: true, messageId: sent?.message_id ?? null, flash: sent?.flash === true, kept: cl.kept === true,
         truncated: snap.truncated === true,
-        note: `下好了，共 ${zip.entries} 页，已打包成 ${zip.name} 发出去了。` + truncNote(snap, zip)
+        note: `下好了，共 ${zip.entries} 页，已打包成 ${zip.name} 发出去了。` + truncNote(snap, zip) + flashNote(sent)
       })
     }
   })
@@ -286,5 +301,8 @@ export function promptSections() {
     `落盘位置：${jmDownloadRoot()}（打包好的在 ${jmZipRoot()}）。`
   ]
   if (cfg.allowInGroup !== true) lines.push('这个功能只在私聊里可用，群里别试。')
+  // 🆕 2026-10-21：群文件满了会自动降级成闪传 —— 她得知道"临时文件"这个词，
+  // 否则会把它当群文件去承诺"永久存在"。
+  lines.push('群文件配额满了的话，文件会自动改走闪传（临时文件）—— 那种会过期，回话时要说明是临时文件。')
   return [{ id: 'jm-download-hint', title: '本子下载', priority: 42, content: lines.join('\n') }]
 }

@@ -155,7 +155,13 @@ export const DEFAULT_CONFIG = {
     maxWaitSeconds: 90,
     // 单次运行最多发几个文件（0 = 不限）。与发图的 `imageSearch.sendMaxPerRun` 同一思路，
     // 但**各算各的**：一次运行里"发几张图"和"发几个本子包"是两件事。
-    sendMaxPerRun: 0
+    sendMaxPerRun: 0,
+    // 图片质量。默认被 Pillow 二次压成 q80（见 jm_server.py 顶部那段长注释的实测数据）：
+    //   normal   = q80，Pillow 默认，也是改造前的行为（PSNR 约 38~46 dB，体积几乎不降）
+    //   high     = q95（PSNR +3.3 dB，体积约 2 倍）—— 推荐
+    //   lossless = 无损 WebP（PSNR 无穷，体积约 8 倍；300 页的本子会到几百 MB，
+    //              会撞 maxZipMb 与 QQ 单文件上限，所以要开它就得同时把 maxZipMb 调大）
+    imageQuality: 'normal'
   },
   // 以图搜图（免 API Key，直抓 trace.moe / SauceNAO / iqdb / soutubot.moe；
   // ascii2d 只在 auto 的降级链里用、不给模型选；Yandex 与 3d.iqdb 已于 2026-09-17 移除，

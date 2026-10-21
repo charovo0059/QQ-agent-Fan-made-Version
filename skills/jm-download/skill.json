@@ -61,6 +61,13 @@
       "label": "单次运行最多发几个文件（0 = 不限）",
       "default": 0,
       "description": "与「单次运行最多发几张图」各算各的。0 = 不限。"
+    },
+    "imageQuality": {
+      "type": "enum",
+      "label": "图片质量",
+      "values": ["normal", "high", "lossless"],
+      "default": "normal",
+      "description": "normal = 原始行为（Pillow 默认 q80，实测 PSNR 38~46 dB，体积几乎不降）；high = q95（PSNR +3.3 dB，体积约 2 倍）；lossless = 无损 WebP（体积约 8 倍，300 页的本子会到几百 MB，要同时调大「单个压缩包上限」）。"
     }
   },
   "tools": [

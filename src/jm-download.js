@@ -49,7 +49,13 @@ export function jmDownloadConf() {
     // 单次工具调用最多等多久（秒）。工具层硬上限是 120 秒，这里留 10 秒余量。
     maxWaitSeconds: n(c.maxWaitSeconds, 90, 5, 110),
     // 单次运行最多发几个文件（0 = 不限）
-    sendMaxPerRun: n(c.sendMaxPerRun, 0, 0, 100)
+    sendMaxPerRun: n(c.sendMaxPerRun, 0, 0, 100),
+    // 图片质量：normal(q80) / high(q95) / lossless(无损 WebP)。
+    // ⚠️ 非法值收敛成 normal 而不是报错 —— 这个值来自前端下拉框，
+    //    但它也会被手改 config.json 的人写坏，写坏了不该让整个下载功能罢工。
+    imageQuality: ['normal', 'high', 'lossless'].includes(String(c.imageQuality || '').trim().toLowerCase())
+      ? String(c.imageQuality).trim().toLowerCase()
+      : 'normal'
   }
 }
 
@@ -130,7 +136,11 @@ export async function startDownload({ albumId, maxImages = null, imageThreads = 
     albumId: code,
     baseDir,
     maxImages: Number(maxImages) || c.maxImages,
-    imageThreads: Number(imageThreads) || c.imageThreads
+    imageThreads: Number(imageThreads) || c.imageThreads,
+    // 图片质量（normal/high/lossless）。⚠️ 这是**进程级全局**设置 ——
+    // Python 侧是给 Pillow 的 save_image 打补丁，改一次影响之后所有存图。
+    // 下载是串行的（jm-bridge 的 queue），所以不会出现两本用不同质量互相踩。
+    imageQuality: c.imageQuality
   })
   if (!res || res.ok !== true) {
     throw new Error(`JM 下载没能启动：${res?.error || '未知原因'}`)
