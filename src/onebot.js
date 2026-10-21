@@ -509,6 +509,12 @@ export class OneBotClient {
       : { group_id: Number(id), file: p, name: fileName };
     const timeoutMs = fileSendTimeoutMs();
     try {
+      // 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）：协议端这个动作**回传 `{file_id}`**
+      //   （实测 SnowLuma `config-DwoxthVc.js` 的 `upload_private_file`/`upload_group_file`
+      //   都是 `returns:'{ file_id: string }'`）——它和之后那条「回显 file 消息」里的 file_id
+      //   **同源**，所以它是"这条回显是我自己发的"唯一可靠抓手（见 sender.js / app.js 的回执识别）。
+      //   ⚠️ 返回里**没有 message_id**：协议端发文件时不走普通消息通道，
+      //   所以留档的 mid 只能由上层给（sender.js 那边现在拿到的是 null）。
       return await this.call(action, params, timeoutMs);
     } catch (error) {
       if (isTimeoutError(error)) {
@@ -595,6 +601,28 @@ export class OneBotClient {
 
   async getMsg(messageId) {
     return this.call('get_msg', { message_id: Number(messageId) });
+  }
+
+  /**
+   * 群文件区里的文件直链（2026-10-22 第五十二对话 · 提案 0f6288a1 落地需要）。
+   *
+   * 为什么必须走这个动作：群文件**不在消息里**，get_msg 拿不到；协议端要单独问。
+   * ⚠️ 实测两类返回：多数群 ok + data.url（gzc-download.ftn.qq.com 直链）；
+   *    **敏感/被和谐文件**返回 {status:'failed', retcode:100, wording:'... msg=文件下载失败（-134）'}
+   *    ⇒ 调用方必须**如实报「这个文件拿不到直链」**，⛔ 不许重试到死（重试也不会变）。
+   * @param {number} [busid=102] 实测群文件是 102；不传就用默认。
+   */
+  async getGroupFileUrl(groupId, fileId, busid = 102) {
+    return this.call('get_group_file_url', {
+      group_id: Number(groupId),
+      file_id: String(fileId),
+      busid: Number(busid) || 102
+    });
+  }
+
+  /** 群文件根目录列表（一页）。用于找群文件区里的 .torrent —— 本机实测它是**主路径**。 */
+  async getGroupRootFiles(groupId) {
+    return this.call('get_group_root_files', { group_id: Number(groupId) });
   }
 
   async getGroupInfo(groupId) {
@@ -964,6 +992,8 @@ export async function segmentsToText(segments, { resolveReply = null, resolveAtN
       case 'image': out.push('[图片]'); break;
       case 'record': out.push('[语音]'); break;
       case 'video': out.push('[视频]'); break;
+      // ⚠️ file_id 在这里**有意不进正文**（正文是给模型看的，一串 32 位 hex 只是噪音）。
+      //    需要它的地方（回执识别）走 extractFileSegments() 单独取 —— 见下面那个函数。
       case 'file': out.push(`[文件${d.name ?? ''}]`); break;
       case 'reply': {
         if (!includeReply) break;
@@ -1026,6 +1056,31 @@ export function extractMediaFromSegments(segments) {
     }
   }
   return media;
+}
+
+/**
+ * 从消息段提取**文件**段的定位信息（不下载）。
+ *
+ * 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）。为什么单独再来一个而不是塞进
+ * `extractMediaFromSegments`：那个函数的产物会**进存档的 media 字段、参与图片工具**
+ * （`entry.media.filter(m => m.kind === 'image')`），而文件段不该混进那条链路
+ * （模型会以为"这里有张图可以搜"）。文件段只服务一件事：**回执识别**比 file_id。
+ */
+export function extractFileSegments(segments) {
+  const out = [];
+  for (const seg of segments ?? []) {
+    if (!seg || typeof seg !== 'object' || seg.type !== 'file') continue;
+    const d = seg.data ?? {};
+    const fileId = String(d.file_id ?? d.fileId ?? '').trim();
+    if (!fileId) continue;
+    out.push({
+      fileId,
+      name: String(d.name ?? ''),
+      size: Number(d.file_size ?? d.size ?? 0) || 0,
+      url: String(d.url ?? '')
+    });
+  }
+  return out;
 }
 
 /**

@@ -18,7 +18,7 @@ import { describeProxy, hostMatchesRules, initProxyConfig } from './proxy.js';
 // ⚠️ 用的是**上面第 10 行已经 import 进来的那个 `getConfig`** —— 别在这里再 import 一次
 //    （同一个模块 import 两遍会得到两个绑定，日后有人只改一处会很难发现）。
 initProxyConfig(getConfig);
-import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes, fetchForward, forwardIdFromData } from './onebot.js';
+import { OneBotClient, segmentsToText, extractMediaFromSegments, extractFileSegments, expandForwardNodes, fetchForward, forwardIdFromData } from './onebot.js';
 import { ensureStickerImage, buildToolDefs } from './tools.js';
 import { ChatStore } from './store.js';
 import { MemoryStore, buildIdentityCandidates } from './memory.js';
@@ -66,7 +66,7 @@ import { listCoreMemories, getCoreMemory, removeCoreMemory, coreMemoryLoadError,
 import { scanModelsVision, visionResults, modelImageVerdict } from './vision-scan.js';
 import { scanModelSpeeds, speedResultsForUi, SPEED_TTL_MS, buildSpeedSuggestions, speedScanTargets } from './speed-scan.js';
 import { builtinVisionResults } from './model-vision-docs.js';
-import { createEventBus, todayKey } from './util.js';
+import { createEventBus, todayKey, fmtBytes } from './util.js';
 // 系统提示：管理端「人设 → 系统提示自定义」用它读取内置段落与当前生效文本。
 import { buildSystemPrompt, buildDefaultSegments, SYSTEM_SEGMENT_LABELS } from './prompt.js';
 
@@ -934,12 +934,43 @@ export function createApp({ log = console.log, resume = [] } = {}) {
   // 用途：回答"某种事件到底有没有转发给我们"—— 这次踩的坑正是"禁言事件有没有转发，事前不知道"。
   // 只留计数不留正文，且只增不删，够用且不占地方。
   const noticeSeen = new Map();
+
+  // ── 文件发送回执识别（🆕 2026-10-22 第五十二对话，提案 c8a2bc35）─────────────────
+  // 现象（用户报的原文意思是）：私聊里给对方发完文件，**聊天里冒出一条"对方发来同一个文件"**，
+  //   她于是以为"对方把文件转回来了"，回话也就跟着跑偏。
+  // 根因（实测，不是猜）：协议端在上传完成后**自己**补发了一条 file 消息，
+  //   而那条消息的 `user_id` 是**收件人**（见 store.js appendReceipt 的注释）⇒
+  //   它绕过下面 handleOneBotEvent 里的 selfId 过滤，被当成"对方发来的文件"入库了。
+  // 抓手：发送时协议端回的那个 `file_id` 与回显段里的 `file_id` **同源** ⇒ 比对它就能认出来。
+  // ⚠️ 不靠"文件名 + 时间窗"：对方真发一个同名文件就会误判（方案 §3.2 乙）。
+  // 表容量：30 分钟 / 最多 50 条 —— 只为"刚发出去的那一下"服务，不做长期索引。
+  const recentSends = [];
+  const RECENT_SEND_TTL_MS = 30 * 60 * 1000;
+  const RECENT_SEND_MAX = 50;
+  function rememberRecentSend(chatKey, fileId, name) {
+    const key = String(chatKey || '');
+    const id = String(fileId || '').trim();
+    if (!key || !id) return;
+    const now = Date.now();
+    // 先按时间过一遍期，再压容量 ⇒ 长期运行的实例不会慢慢攒出一条永不释放的表。
+    for (let i = recentSends.length - 1; i >= 0; i--) {
+      if (now - recentSends[i].ts > RECENT_SEND_TTL_MS) recentSends.splice(i, 1);
+    }
+    recentSends.push({ chatKey: key, fileId: id, name: String(name || ''), ts: now });
+    while (recentSends.length > RECENT_SEND_MAX) recentSends.shift();
+  }
+
   const sender = new SendQueue({
     onebot, store,
     // 平台路由：发送时按会话来源选客户端（见 sender.clientFor）
     registry: platformClients,
     sourceOf: (chatKey) => store.chatSource(chatKey),
-    onSent: ({ chatKey, text }) => log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`),
+    onSent: ({ chatKey, text, fileId, name }) => {
+      log(`[发送 -> ${chatKey}] ${String(text).slice(0, 60)}`);
+      // 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）：发出去的**文件**记一笔，
+      //   供回执识别比对 file_id（见 recognizeFileReceipt 的长注释）。
+      if (fileId) rememberRecentSend(chatKey, fileId, name || text);
+    },
     // 发送被拒 ⇒ ① 若像是"群发言被拒"，先按禁言记下来（兜底，不依赖任何事件转发）；
     //            ② 🆕 2026-09-26（第二十四对话，提案 26bb79c2 的剩余部分）**把这条没发出去的话记下来**，
     //               让管理端看得见、能人工重发。
@@ -1434,6 +1465,67 @@ export function createApp({ log = console.log, resume = [] } = {}) {
   }
 
   /**
+   * 认一条「文件发送回执」—— 即在 recentSends 里能对上 file_id 的入站 file 事件。
+   *
+   * 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）。返回 true 表示**已按回执处理**
+   * （调用方必须直接 return，⛔ 不要再走 ingestMessage）。
+   *
+   * 🔴 为什么这不是"对方已接收"：
+   *   协议端在**上传完成的那一刻**就补发了这条 file 消息（SnowLuma：
+   *   `if (p.upload_file) ctx.sendPrivateMessage(...)`），时序实测是**上传后立刻出现**，
+   *   而"对方点下载"这件事协议端**根本不转发**（§1.3 第 6 点：grep 全 0，日志里那类
+   *   `Event0x210 subType=8` 是全天高频噪音，22 次上传里只有 3 次在 15 秒内出现，
+   *   随机基线期望 1.71 次 ⇒ 统计上分不开）。
+   *   ⇒ 我们能说的**只有**"这条是我自己发的"。所以文案固定成 `[我发送的文件]`。
+   *   ⛔ 任何时候都不许把它写成"对方已接收/已送达"。
+   *
+   * ⚠️ 只对**私聊/群聊的正常文件消息**生效；`mid < 0` 的事件**不做判定**——
+   *   负 message_id 是真实存在的（实测 2026-09-12），这里不额外加判据去猜它是什么
+   *   （判据里有反向断言盯着这一条）。
+   *
+   * @returns {boolean} 是否已按回执处理
+   */
+  function recognizeFileReceipt(event, source) {
+    if (!event || typeof event !== 'object') return false;
+    if (event.post_type !== 'message' || event.message_type == null) return false;
+    const mid = event.message_id;
+    if (mid !== null && mid !== undefined && Number(mid) < 0) return false;
+    const files = extractFileSegments(Array.isArray(event.message) ? event.message : null);
+    if (!files.length) return false;
+
+    const isGroup = event.message_type === 'group' && event.group_id != null;
+    const isPrivate = event.message_type === 'private' && event.user_id != null;
+    if (!isGroup && !isPrivate) return false;
+    const chatKey = `${isGroup ? 'group' : 'private'}:${String(isGroup ? event.group_id : event.user_id)}`;
+
+    const now = Date.now();
+    let hit = null;
+    for (let i = recentSends.length - 1; i >= 0; i--) {
+      const r = recentSends[i];
+      if (now - r.ts > RECENT_SEND_TTL_MS) continue;
+      if (r.chatKey !== chatKey) continue;
+      if (!files.some((f) => f.fileId === r.fileId)) continue;
+      hit = r;
+      break;
+    }
+    if (!hit) return false;
+
+    const f = files.find((x) => x.fileId === hit.fileId);
+    const fname = String(f?.name || hit.name || '').trim() || '未命名文件';
+    const sizeText = Number(f?.size) > 0 ? ` ${fmtBytes(f.size)}` : '';
+    const text = `[我发送的文件] ${fname}${sizeText}`;
+    store.appendReceipt(chatKey, {
+      mid,
+      ts: event.time ? Math.round(Number(event.time) * 1000) : Date.now(),
+      text,
+      fileId: hit.fileId
+    });
+    log(`[文件回执] ${chatKey} 认出这是自己刚发的文件（file_id 命中），已按「已发送」记账，不当成对方发来的文件：${fname}`);
+    emit('chat-update', chatKey);
+    return true;
+  }
+
+  /**
    * 处理一个 OneBot v11 事件。
    *
    * `source` = 这个事件来自哪个平台的客户端（'qq' / 'wechat'），2026-09-20 加。
@@ -1445,6 +1537,11 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     if (event.post_type === 'message' || event.post_type === 'message_sent') {
       // 自己发的消息（message_sent / self_id 相同）不触发处理（发送时已自行记录）
       if (String(event.user_id ?? event.sender?.user_id ?? '') === onebot.selfId) return;
+      // 🆕 文件发送回执（提案 c8a2bc35）：协议端把她自己发的文件**以对方名义**回显了一条，
+      //   这里先认一下；认出来就走 appendReceipt（见那个函数的长注释），⛔ 不再往下走 ingestMessage。
+      // ⚠️ 放在 selfId 过滤**之后**：自己发的那条本来就该被丢掉，不用再判。
+      // ⚠️ 只在 QQ 侧做：微信桥没有这套 file_id 回显行为（实测过）。
+      if (source !== 'wechat' && recognizeFileReceipt(event, source)) return;
       if (event.message_type === 'group' && event.group_id != null) return ingestMessage('group', String(event.group_id), event, source);
       if (event.message_type === 'private' && event.user_id != null) return ingestMessage('private', String(event.user_id), event, source);
       return;

@@ -1075,6 +1075,9 @@ function renderAbilitiesSection(c) {
   //    ⛔ 不许在搬家路上写成 `=== true`（那会把"默认开"静默变成"默认关"）。
   const web = c.webSearch || {};
   const img = c.imageSearch || {};
+  // 🆕 2026-10-22（第五十三对话 · 方案 §5.12）：种子/磁力只读清单的那一组开关。
+  //    ⚠️ 与上面两个一样，默认方向是「默认开」⇒ 判定一律 `!== false`（⛔ 别写成 `=== true`）。
+  const ti = c.torrentInspect || {};
   // ⚠️ 这一节**一个新 `.hint` 都不许加**：`test-设置页说明小字分层.mjs` 有一条棘轮
   //    （`class="hint"` 计数 ≤ 44，"本轮只减不增"）。所以说明一律走既有的两级载体：
   //      · 一行常显 / 一句要点 ⇒ `hintLine(…)`（= `.ihint-line` + ⓘ）
@@ -1144,6 +1147,36 @@ function renderAbilitiesSection(c) {
         ${hintLine('限制的是"发"几张（一次搜索能返回多张）；"搜"几次由上面那两个上限管。0 = 不限。')}
       </div>
 
+      <!-- 🆕 2026-10-22（第五十三对话 · 方案 §4.2③）：搜图的**超时与重试**从"写死在代码里"挪到界面。
+           ⚠️ 四个都是毫秒/次数，默认值一律现读配置 ⇒ ⛔ 别在这里写死（会造成"界面显示的 ≠ 实际生效的"）。
+           ⚠️ 钳制范围与保存侧（15-allow-saveconfig.js 的 abilities 块）**同口径**，
+              ⛔ 前端松、后端紧会让用户"填了却看不出为什么没生效"。
+           ⚠️ 说明刻意走**折叠**（<details class="hint-more">）而不是 hintLine：这一页有两条棘轮
+              （class="hint" 只减不增 / hintLine 调用数被钉死），⛔ 别为了写说明去碰它们。
+           🔴 本段在模板字符串里 ⇒ ⛔ 一个字反引号都不许有（坑 186）。 -->
+      <h4>搜图的超时与重试</h4>
+      <div class="field-row">
+        <div class="field"><label>单引擎超时（毫秒）</label>
+          <input type="number" id="cfg-img-engine-timeout" min="3000" max="60000" value="${esc(img.engineTimeoutMs ?? 15000)}" /></div>
+        <div class="field"><label>失败重试次数</label>
+          <input type="number" id="cfg-img-engine-retries" min="0" max="3" value="${esc(img.engineRetries ?? 1)}" /></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>auto 链总预算（毫秒）</label>
+          <input type="number" id="cfg-img-auto-budget" min="15000" max="115000" value="${esc(img.autoBudgetMs ?? 90000)}" /></div>
+        <div class="field"><label>谷歌搜图超时（毫秒）</label>
+          <input type="number" id="cfg-img-lens-timeout" min="5000" max="120000" value="${esc(img.lensTimeoutMs ?? 30000)}" /></div>
+      </div>
+      <details class="hint-more">
+        <summary>这四个数分别管什么、填错了会怎样</summary>
+        <div class="hint-more-body">
+          <b>单引擎超时</b>：一个引擎最多等多久，超时就换下一个（不是整个搜图的总时限）。<br>
+          <b>失败重试次数</b>：同一个引擎失败后再试几次，<b>0</b> = 不重试、直接换下一个引擎。<br>
+          <b>auto 链总预算</b>：auto 把几个引擎挨个试一遍的<b>总</b>时限 —— 到点就带着<b>已拿到的</b>结果返回，
+          不会因为后面还有引擎没试就一直挂着。<br>
+          <b>谷歌搜图超时</b>：浏览器那一路<b>单独</b>算，它比普通引擎慢得多，所以默认给得宽。
+        </div>
+      </details>
       <!-- 🆕 2026-10-05（第四十三对话 · 用户要求）：把"搜/发图片"有关的分级开关也收进这一节。
            起因：用户报"群聊似乎还是不能发色图"，而真机+存档查明**代码没拦** ——
            是提示词里两句话（"群里请用 safe"、"别把 questionable 的图发到群里"）让她自己退了，
@@ -1163,6 +1196,44 @@ function renderAbilitiesSection(c) {
         '关掉它，群里她只用全年龄档、也不会把擦边图发出去；私聊完全不受影响。'
         + '这两个开关的口径都会进她的提示词，而且被拦时她会说清是哪一个开关拦的（总开关关着时不会赖到群聊上）。')}
     </div>
+
+    <!-- 🆕 2026-10-22（第五十三对话 · 方案 §5.12）：种子/磁力**只读**清单。
+         ⚠️ 功能定位「只看里面有什么、绝不下载文件」写在 label 里常显（P7「代价不能藏」），
+            细节进折叠 —— ⛔ 不新增 class="hint"（棘轮只减不增），⛔ 也不新增 hintLine 调用
+            （test-分级总开关硬闸.mjs 把它钉死在 21 次）。
+         🔴 本段在模板字符串里 ⇒ ⛔ 一个字反引号都不许有（坑 186）。 -->
+    <div class="form-panel">
+      <h4 style="margin-top:0">种子只读清单</h4>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-torrent-enabled" ${ti.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-torrent-enabled">种子/磁力只读清单（只看里面有什么，绝不下载文件）</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-torrent-allowgroup" ${ti.allowInGroup !== false ? 'checked' : ''} />
+        <label for="cfg-torrent-allowgroup">群里也允许用（关掉 ⇒ 只在私聊里能用）</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-torrent-cache" ${ti.cacheLookup !== false ? 'checked' : ''} />
+        <label for="cfg-torrent-cache">允许查公共种子镜像站（关掉就只走 DHT）</label></div>
+      <div class="field-row">
+        <div class="field"><label>清单最多列几个文件</label>
+          <input type="number" id="cfg-torrent-maxfiles" min="1" max="500" value="${esc(ti.maxFiles ?? 30)}" /></div>
+        <div class="field"><label>抓元数据超时（毫秒）</label>
+          <input type="number" id="cfg-torrent-timeout" min="5000" max="110000" value="${esc(ti.timeoutMs ?? 25000)}" /></div>
+      </div>
+      <div class="field"><label>内容边界（写给她看的提示词，不是代码黑名单）</label>
+        <textarea id="cfg-torrent-policy" rows="6" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">${esc(c.torrentInspect?.contentPolicyText ?? '')}</textarea>
+      </div>
+      <details class="hint-more">
+        <summary>它到底会不会下载东西、这几个开关分别管什么</summary>
+        <div class="hint-more-body">
+          <b>不会下载。</b>只解析 <code>.torrent</code> / 磁力链里的文件名、体积、infohash，
+          一个字节都不落盘；不开端口做种、也不发任何 piece 请求 —— 这条边界在代码层做死，不是靠提示词求她自觉。<br>
+          <b>群里也允许用</b>：关掉 ⇒ 群里连调都调不到（与「看自己在别的会话里什么样」同一条口径）。<br>
+          <b>允许查公共种子镜像站</b>：关掉 ⇒ 只走 DHT 现场找 peer（更慢，但除 DHT 外不碰任何第三方）。<br>
+          <b>清单最多列几个文件</b>：超过就只列前这么多个，并如实说"还有 N 个没列"。<br>
+          <b>抓元数据超时</b>：DHT 找 peer 与拉元数据的总时限，到点就如实说"没抓到"，不会硬等。<br>
+          <b>内容边界</b>：这段会<b>原样进她的提示词</b> —— 想收紧或放宽就改这里的字，不用改代码。
+          刻意<b>不做</b>代码里的关键词硬拦：硬编码的名单只会挡住本该被理解的情形。
+        </div>
+      </details>
+    </div>
+
 
     <div class="form-panel">
       <h4 style="margin-top:0">改进提议</h4>

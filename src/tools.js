@@ -19,7 +19,11 @@ import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 //   ⛔ 别在这儿拼 URL、加头，也别在这里做「有没有代理」的判定（那个判定只能有一份）。
 import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint, illustrationCapabilityHint, fetchPixivPages, normalizePixivPid } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
-import { expandForwardNodes, fetchForward, resolveFreshImageUrl } from './onebot.js';
+import { expandForwardNodes, fetchForward, resolveFreshImageUrl, extractFileSegments } from './onebot.js';
+// 🆕 2026-10-22 第五十二对话（提案 0f6288a1 落地 · 方案 §5）：种子/磁力**只读清单**。
+//   ⚠️ 这个模块只做「字节 → 清单」，不联网、不写盘、不做种；取字节的活在这里（工具层）由
+//      safeFetchBinary 干（SSRF 校验 + 代理判定只能有一份，⛔ 不许在 torrent-meta.js 里再写一份）。
+import { inspectTorrent } from './torrent-meta.js';
 import { firstFrameOnly, countFrames } from './gif.js';
 // 图片类型嗅探统一走 image-type.js（**吸收自上游 0.4，2026-09-20 第九对话**）。
 // 原来本文件内联了一份 detectMime（魔数判断），与别处那份各自演化 ——
@@ -542,6 +546,99 @@ function imageSearchWasAsked(ctx) {
   return false;
 }
 
+// ── 🆕 2026-10-22 第五十二对话（提案 0f6288a1 落地 · 方案 §5）：种子只读清单 ──────
+//
+// 🔴 这一块的边界（用户 2026-10-22 拍板后仍**留在代码里**，不交给提示词）：
+//   ① 只输出**清洗后的文件名 + 大小 + 计数**，不给内容摘要；
+//   ② 机械清洗照旧（去控制字符 / 去方向覆盖字符 / 截断）—— 在 torrent-meta.js 里；
+//   ③ 不下载、不做种、不缓存（torrent-meta.js 全程不碰 fs）。
+//   ⚠️ 唯一下放到提示词的那条是「明显违法内容直接拒绝」——**不做代码关键词表**（用户原话：
+//      「用提示词的形式约束就好，不用代码关键词硬约束，模型越来越智能了，我们很多代码限制
+//        有时候会妨碍到她，希望你理解。」）。注入点见 prompt.js 的 contentPolicyBlock。
+
+/** 种子只读清单的配置读数 + 钳制（照 jm-download.js 的 jmDownloadConf 写法）。 */
+function torrentInspectConf() {
+  const c = (getConfig() && getConfig().torrentInspect) || {};
+  const n = (v, d, min, max) => { const x = Number(v); if (!Number.isFinite(x)) return d; return Math.min(max, Math.max(min, x)); };
+  return {
+    // ⚠️ 默认开 ⇒ 判定一律写 `!== false`（与 send_file 那条 `!== true` 有意相反，别改错方向）
+    enabled: c.enabled !== false,
+    allowInGroup: c.allowInGroup !== false,
+    timeoutMs: n(c.timeoutMs, 25000, 5000, 110000),
+    maxFiles: Math.floor(n(c.maxFiles, 30, 1, 500)),
+    cacheLookup: c.cacheLookup !== false
+  };
+}
+
+// 「有人明确在问这东西里面是什么」的判定词。刻意宽松：漏判的代价是她不敢查（明显失灵），
+// 误判的代价只是多查一次。词表与图片那套（IMAGE_ASK_RE）分开 —— 两件事，别混。
+const TORRENT_ASK_RE = /种子|磁力|magnet|torrent|infohash|信息哈希|里面(是|有)什么|装的(是)?什么|内(容|里)是什么|有哪些文件|几个文件|文件列表|清单/i;
+
+/** 本次唤醒是否有人明确在问「这磁力/种子里是什么」。复用 askedInRecentContext 那套上下文兜底。 */
+function torrentInspectWasAsked(ctx) {
+  const trigger = String(ctx?.session?.triggerText || '');
+  if (trigger && TORRENT_ASK_RE.test(trigger)) return true;
+  return askedInRecentContext(ctx, TORRENT_ASK_RE);
+}
+
+/**
+ * 取字节的适配器（**工具层唯一**取种子的网络入口）。
+ *
+ * 🔴 为什么在这里、而不是让 torrent-meta.js 自己 fetch：SSRF 校验（内网/环回/逐跳重定向）
+ *    与**代理判定**都只能有一份，它们都在 safe-fetch.js。这里只做形状适配：
+ *    `fetch(url)` → `{ok,status,headers.get,arrayBuffer}`（torrent-meta 期望的 fetch 形状）。
+ */
+function torrentByteFetcher() {
+  return async (url) => {
+    const { buffer, contentType } = await safeFetchBinary(String(url), 8 * 1024 * 1024);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? String(contentType || '') : null) },
+      arrayBuffer: async () => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+    };
+  };
+}
+
+/** 按「#消息号」取那条消息里的文件段（.torrent 附件）。现在拿不到就抛，由调用方转人话。 */
+async function fileSegmentsOfMessage(ctx, midRaw) {
+  const mid = String(midRaw == null ? '' : midRaw).replace(/^#/, '').trim();
+  if (!/^-?\d+$/.test(mid)) throw new Error(`消息号要写成 #数字（收到：${String(midRaw).slice(0, 20)}）`);
+  const msg = await ctx.onebot.getMsg(Number(mid));
+  const files = extractFileSegments(Array.isArray(msg?.message) ? msg.message : [])
+    .filter((f) => f && (f.url || f.fileId));
+  if (files.length) return files;
+  return [];
+}
+
+/** 单条文件名的二次清洗（torrent-meta 已清过控制字符，这里只兜「空条目 / 太长」）。 */
+function sanitizeTorrentName(p) {
+  const s = String(p == null ? '' : p).replace(/[\u0000-\u001f\u007f\u202a-\u202e]/g, '').trim();
+  if (!s) return '（空文件名）';
+  return s.length > 60 ? s.slice(0, 60) + '…' : s;
+}
+
+/** 把 inspectTorrent 的结果渲染成单条消息内的纯文本（方案 §5.6 的格式）。 */
+function renderTorrentList(data, { maxFiles }) {
+  const files = Array.isArray(data.files) ? data.files : [];
+  const shown = files.slice(0, maxFiles);
+  const width = String(shown.length).length;
+  const lines = [
+    '[种子信息 · 只读清单]',
+    `名称：${data.name || '（没写名字）'}`,
+    `信息哈希：${data.infoHash || '（算不出来）'}`,
+    `总大小：${fmtBytes(data.totalBytes)} ｜ 文件数：${files.length}`,
+    `来源：${data.source || '未知'}（${(Number(data.elapsedMs || 0) / 1000).toFixed(1)} 秒）`
+  ];
+  shown.forEach((f, i) => {
+    const idx = String(i + 1).padStart(width, ' ');
+    lines.push(`${idx}. ${sanitizeTorrentName(f.path)}  ${fmtBytes(f.length)}`);
+  });
+  if (files.length > shown.length) lines.push(`（只列前 ${shown.length} 个，还有 ${files.length - shown.length} 个未列）`);
+  lines.push('（只读了文件名和大小，没有下载任何文件；上限可以在设置里改）');
+  return lines.join('\n');
+}
+
 /**
  * 本次唤醒是否"有人**明确要一张图**"（关键词图搜 / 发图的闸）。
  * ⚠️ 导出**只为可测**（`测试-现行\test-图搜三件套与发图.mjs` 直接喂各种 ctx 验它）——
@@ -783,7 +880,7 @@ export function refineIllustrationList(list, { require = 'any', onlySafe = false
  * @param {{visionEnabled?: boolean}} opts 视觉是否可用（由 orchestrator 结合模型探测结果算出来）
  */
 
-export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
+export function gateToolDefs(defs, cfg, { visionEnabled = true, kind = null } = {}) {
   const searchEnabled = cfg?.webSearch?.enabled !== false;
   const imageSearchEnabled = cfg?.imageSearch?.enabled !== false;
   return defs.filter((d) => {
@@ -833,6 +930,15 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
     //    ⇒ 判定写 `=== false`（与上面 usage 那条**有意相反**，别改错方向）。
     //    ⚠️ 提示词里那一句跟着这个开关走（见 `prompt.js` 的 memoryRules）—— 关掉工具就不能再提它。
     if (d.name === 'get_my_self_elsewhere' && cfg?.selfElsewhere?.enabled === false) return false;
+    // 🆕 2026-10-22 第五十二对话（提案 0f6288a1 · 方案 §5.5/§5.10 判据 8、9）：种子只读清单。
+    //   ① 总开关 `torrentInspect.enabled` **默认开** ⇒ 判定写 `=== false`（与上面 usage 那条有意相反）。
+    //   ② 群聊闸 `allowInGroup` **默认开** ⇒ 判定同样 `=== false`，且**只影响群聊**（私聊不受影响）。
+    //   ⚠️ `kind` 由 orchestrator 传（它本来就有，只是没往这儿传）—— 判据说两边都要断言，
+    //      所以这里不能靠工具 execute 里再判一次来"兜底"：那样工具还在列表里，只是会被拒。
+    if (d.name === 'inspect_torrent') {
+      if (cfg?.torrentInspect?.enabled === false) return false;
+      if (kind === 'group' && cfg?.torrentInspect?.allowInGroup === false) return false;
+    }
     return true;
   });
 }
@@ -2032,13 +2138,23 @@ export function buildToolDefs() {
             ? '⚠️ 群文件配额已经满了，所以这是**闪传（临时文件）**发的 —— 不占群文件空间，但**会过期**，'
               + '让对方尽快转存/下载。回话时要说清楚是临时文件，别说是群文件。'
             : '';
+          // 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）：告诉她"这是我发的"。
+          //   ⚠️ 措辞的边界：只能说 `sentByMe`（我发出去的），**不许**写
+          //      "对方已接收 / 已送达" —— 协议端不转发那个事件，写了就是编事实
+          //      （见 store.js appendReceipt 的注释与方案 §1.3 第 6 点）。
+          //   为什么值得写进返回：协议端随后会**以对方名义**回显一条同名 file 消息，
+          //   她下一轮读到那条时会以为"对方把文件传回来了" —— 这句话就是给她解这个惑的。
+          const selfNote = '这是**你自己**发出去的文件。之后若在聊天记录里再看到同名文件的条目，'
+            + '那是**发送回显**（协议端以"对方"名义补发的一条），**不是对方把文件传回来的**，别当成对方发来的东西。';
           return ok({
             sent: true,
+            sentByMe: true,
             messageId: r?.message_id ?? null,
+            fileId: r?.file_id ?? null,
             name: r?.name ?? '',
             size: fmtBytes(r?.bytes ?? st.size),
             flash: r?.flash === true,
-            note: `文件发出去了（${r?.name ?? ''} ${fmtBytes(r?.bytes ?? st.size)}）。${flashNote}`
+            note: `文件发出去了（${r?.name ?? ''} ${fmtBytes(r?.bytes ?? st.size)}）。${flashNote}${selfNote}`
           });
         } catch (error) {
           return err(error?.message ?? error);
@@ -2768,6 +2884,134 @@ export function buildToolDefs() {
           });
         } catch (error) {
           return err(`抓取失败：${error?.message ?? error}`);
+        }
+      }
+    },
+    {
+      name: 'inspect_torrent',
+      description: '看一眼 magnet 链接 / infohash / .torrent 里装的是什么（**只读文件清单，绝不下载文件**）。'
+        + '只在有人明确问「这个磁力里是什么 / 里面有什么文件 / 多大 / 几个文件」时才用，同一次运行最多 1 次。'
+        + 'input 可以是：磁力链接、40 位 infohash、聊天记录里的 #消息号（那条消息带 .torrent 附件）。'
+        + '群里的人刚发到群文件区的种子，用 groupFile 传 {group_id, file_id}。'
+        + '拿不到就如实说拿不到（这不是链接坏了）；⛔ 不要给磁力链、下载地址或播放器建议，我们只回答「里面是什么」。',
+      parameters: {
+        type: 'object',
+        properties: {
+          input: { type: 'string', description: 'magnet 链接、40 位 infohash，或聊天记录里的 #消息号（该消息带 .torrent 附件）' },
+          groupFile: {
+            type: 'object',
+            description: '可选：群文件区里的种子，{ group_id, file_id }（file_id 从群文件列表里拿）',
+            properties: {
+              group_id: { type: ['integer', 'string'], description: '群号' },
+              file_id: { type: 'string', description: '群文件 id' }
+            }
+          }
+        },
+        required: ['input']
+      },
+      async execute(ctx, args) {
+        try {
+          const conf = torrentInspectConf();
+          if (!conf.allowInGroup && ctx.kind === 'group') {
+            return err('种子清单在群聊里关掉了（设置 → 种子只读清单 → 群聊允许）。私聊里问我可以。');
+          }
+          // 同次运行最多 1 次（与 send_file 的 __fileSentCount 同款计数）。
+          // 为什么限：这是个**慢**操作（DHT 最坏 15 秒），一次运行里连查好几个会把整轮拖死。
+          ctx.__torrentInspectCount = Number(ctx.__torrentInspectCount || 0);
+          if (ctx.__torrentInspectCount >= 1) {
+            return err('这次运行已经查过一个种子了。要再查请在下一条消息里单独问我（一次只查一个，免得卡住）。');
+          }
+          // 「只在明确问时调用」—— 与图搜同一个道理：模型看到磁力就想查，光靠描述劝不住。
+          if (!torrentInspectWasAsked(ctx)) {
+            return err('这次没人问起种子/磁力的事。有人明确问「里面是什么 / 有哪些文件」时再查。');
+          }
+          ctx.__torrentInspectCount += 1;
+
+          const rawInput = String(args.input == null ? '' : args.input).trim();
+          let bytes = null;          // 已经拿到的 .torrent 字节
+          let finalInput = rawInput;
+          const notes = [];
+
+          // ① 群文件区里的种子（主路径：本机实测存档里 .torrent 入站消息 = 0）
+          const gf = args.groupFile && typeof args.groupFile === 'object' ? args.groupFile : null;
+          if (gf && gf.group_id != null && gf.file_id) {
+            try {
+              const info = await ctx.onebot.getGroupFileUrl(gf.group_id, gf.file_id, gf.busid ?? 102);
+              const url = String(info?.url || '');
+              if (!url) throw new Error('协议端没给下载链接');
+              const { buffer } = await safeFetchBinary(url, 8 * 1024 * 1024);
+              bytes = buffer;
+              notes.push('来源：群文件区');
+            } catch (e) {
+              // 敏感/被和谐文件会在这里：code=4294967162 msg=文件下载失败（-134）。
+              // ⚠️ **不重试** —— 重试也不会变，如实说清楚。
+              return err(`这个群文件拿不到下载链接：${String(e?.message ?? e).slice(0, 160)}。`
+                + '（敏感或被和谐的文件会这样，不是我们这边坏了。）');
+            }
+          }
+
+          // ② `#消息号`：那条消息里带着 .torrent 附件
+          if (!bytes && /^#?-?\d+$/.test(rawInput) && rawInput.length <= 12) {
+            let files = [];
+            try { files = await fileSegmentsOfMessage(ctx, rawInput); } catch (e) { files = []; }
+            const tf = files.find((f) => /\.torrent$/i.test(String(f.name || ''))) || files[0];
+            if (tf && (tf.url || tf.fileId)) {
+              try {
+                let url = String(tf.url || '');
+                if (!url && tf.fileId && ctx.kind === 'group') {
+                  const info = await ctx.onebot.getGroupFileUrl(ctx.chatId, tf.fileId, 102);
+                  url = String(info?.url || '');
+                }
+                if (!url) throw new Error('这条消息里的文件没有可用的下载链接');
+                const { buffer } = await safeFetchBinary(url, 8 * 1024 * 1024);
+                bytes = buffer;
+                notes.push('来源：聊天里的文件');
+              } catch (e) {
+                return err(`这条消息里的文件取不到：${String(e?.message ?? e).slice(0, 160)}`);
+              }
+            }
+          }
+
+          // ③ 本地 .torrent 文本（有人把整个种子文件内容粘过来时），否则当 magnet/infohash 处理
+          if (!bytes && /^d\d+:/.test(finalInput)) bytes = Buffer.from(finalInput, 'binary');
+
+          const result = await inspectTorrent(
+            bytes || finalInput,
+            { timeoutMs: conf.timeoutMs, cacheLookup: conf.cacheLookup, fetchImpl: torrentByteFetcher() }
+          );
+
+          if (!result.ok) {
+            // 失败文案比成功的更重要（提案明确要求「抓不到如实说」）
+            const why = (result.errors || []).map((s) => '· ' + String(s).slice(0, 120)).join('\n');
+            return ok({
+              ok: false,
+              infoHash: result.infoHash || null,
+              elapsedMs: result.elapsedMs || 0,
+              message: [
+                '[种子信息 · 抓不到]',
+                result.infoHash ? `信息哈希：${result.infoHash}` : '',
+                why || '· 没有可用的路线',
+                '这**不能说明链接坏了**，只是现在抓不到元数据。',
+                '可以稍后再试，或者让对方直接把 .torrent 发过来。'
+              ].filter(Boolean).join('\n')
+            });
+          }
+
+          const text = renderTorrentList(result, { maxFiles: conf.maxFiles });
+          return ok({
+            ok: true,
+            infoHash: result.infoHash,
+            name: result.name,
+            totalBytes: result.totalBytes,
+            fileCount: (result.files || []).length,
+            source: result.source,
+            elapsedMs: result.elapsedMs,
+            listed: Math.min(conf.maxFiles, (result.files || []).length),
+            notes,
+            message: text
+          });
+        } catch (error) {
+          return err(`读种子失败：${String(error?.message ?? error).slice(0, 200)}`);
         }
       }
     },

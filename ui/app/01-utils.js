@@ -75,6 +75,8 @@ const TOOL_META = {
   web_search:        { name: '联网搜索',   cat: '联网',   icon: '🌐' },
   web_fetch:         { name: '抓网页',     cat: '联网',   icon: '🔗' },
   search_image_source: { name: '以图搜图', cat: '联网',   icon: '🖼️' },
+  // 🆕 2026-10-22 第五十二对话（提案 0f6288a1 落地）：种子只读清单（默认开，可在设置里关）
+  inspect_torrent:     { name: '读种子清单', cat: '联网',   icon: '🧲' },
   // 其他
   report_feedback:   { name: '汇报反馈',   cat: '其他',   icon: '📣' },
   finish:            { name: '结束本次',   cat: '其他',   icon: '🏁' }

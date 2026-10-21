@@ -458,7 +458,7 @@ export class ChatStore {
    * ⚠️ 只写**非默认值**（`self` 不落字段）：老存档与绝大多数消息一个字节都不多占。
    * ⚠️ 别把 `self: true` 改掉：`self` 还是"这条是我发的"，`origin` 只回答"谁按的发送键"。
    */
-  appendSelf(chatKey, { text, ts, mid = null, origin = 'self' }) {
+  appendSelf(chatKey, { text, ts, mid = null, origin = 'self', fileId = null }) {
     const st = this.#state(chatKey);
     const entry = {
       id: st.nextLocalId++,
@@ -473,6 +473,48 @@ export class ChatStore {
       media: []
     };
     if (String(origin) === 'admin') entry.origin = 'admin';
+    // 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）：发文件时协议端回的 file_id。
+    //   ⚠️ 同样只写**非默认值**（没有就不落字段）—— 老存档零字节变化。
+    if (fileId) entry.fileId = String(fileId);
+    st.messages.push(entry);
+    this.#trim(st);
+    saveChat(st);
+    return entry;
+  }
+
+  /**
+   * 记录一条**文件发送回执**（🆕 2026-10-22 第五十二对话，提案 c8a2bc35）。
+   *
+   * ── 为什么要有这个方法（而不是直接 appendIncoming）────────────────────────
+   * 协议端在文件上传完成之后，会**以对方的名义**补发一条 file 消息
+   * （SnowLuma `config-DwoxthVc.js` 的 `upload_private_file`：`if (p.upload_file)` 时
+   *  `ctx.sendPrivateMessage(p.user_id, [{type:'file', data:{file_id,…}}])`，而 user_id 是**收件人**）。
+   * 那条事件于是绕过 selfId 过滤，被当成"对方发来的文件"入库 ——
+   * 她看到的就是「对方把我刚发的文件又传回来了」（用户报的现象）。
+   *
+   * 按 file_id 认出来之后，它**仍然是"我发出去的东西"这个事实**，
+   * 所以照旧写成 self:true（留档纪律：不留档她下一轮不知道自己发过），
+   * 但打上 `origin:'receipt'` 让渲染层能写清楚「我（已发送）」。
+   *
+   * 🔴 文案里**绝不写"对方已接收"**：那个事件协议端根本不转发（§1.3 第 6 点实测），
+   *    写了就是编一个我们观察不到的事实。
+   */
+  appendReceipt(chatKey, { mid = null, ts, text, fileId = null } = {}) {
+    const st = this.#state(chatKey);
+    const entry = {
+      id: st.nextLocalId++,
+      mid: mid ?? null,
+      ts: ts || Date.now(),
+      senderId: 'self',
+      senderName: '我',
+      text: String(text ?? ''),
+      self: true,
+      read: true,
+      reply: null,
+      media: [],
+      origin: 'receipt'
+    };
+    if (fileId) entry.fileId = String(fileId);
     st.messages.push(entry);
     this.#trim(st);
     saveChat(st);

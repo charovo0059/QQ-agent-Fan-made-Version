@@ -16,12 +16,112 @@
 
 import { getConfig } from './config.js';
 import { cfFetch, looksLikeCfChallenge } from './cf-fetch.js';
+import { describeFetchError } from './fetch-error.js';
+import { resolveProxyFor } from './proxy.js';
+import { lensSearch } from './lens-search.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-const TIMEOUT_MS = 30000;
 
-function timeoutSignal(ms = TIMEOUT_MS) {
-  return AbortSignal.timeout(ms);
+// ── 超时（2026-10-22 第五十二对话 · 用户拍板 Q3「超时预算按你的来，要设置可调」）─────────
+//   改造前是**写死** 30000，各引擎又各自写 45000 —— 设置页改不动、也没人知道真实预算是多少。
+//   现在一律从 `config.imageSearch` 现读 + 钳制（模板见 `src/jm-download.js` 的 jmDownloadConf）。
+//   ⚠️ 这三个函数**每次调用都现读**，所以设置页改完下一次搜图就生效，不用重启。
+const TIMEOUT_DEFAULT_MS = 15000;      // 单引擎默认超时
+const RETRIES_DEFAULT = 1;             // 默认重试次数
+const AUTO_BUDGET_DEFAULT_MS = 90000;  // auto 链默认总预算
+
+function intIn(v, dflt, min, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
+/** 单引擎超时（毫秒）。3000~60000 之外一律收敛回边界值。 */
+function engineTimeoutMs() {
+  return intIn(getConfig().imageSearch?.engineTimeoutMs, TIMEOUT_DEFAULT_MS, 3000, 60000);
+}
+
+/** 失败重试次数（只对幂等瞬时错误用）。0~3。 */
+function engineRetries() {
+  return intIn(getConfig().imageSearch?.engineRetries, RETRIES_DEFAULT, 0, 3);
+}
+
+/** auto 链总预算（毫秒）。留 30 秒余量给 TOOL_TIMEOUT_MS=120_000。 */
+function autoBudgetMs() {
+  return intIn(getConfig().imageSearch?.autoBudgetMs, AUTO_BUDGET_DEFAULT_MS, 15000, 115000);
+}
+
+function timeoutSignal(ms) {
+  return AbortSignal.timeout(intIn(ms, engineTimeoutMs(), 3000, 60000));
+}
+
+/**
+ * 这次请求有没有走代理 —— 只读判断，**不**用来改 cfFetch 的行为。
+ * 目的：失败文案里必须能说清"是代理那段断了还是直连那段断了"，否则只能靠猜。
+ * ⛔ 解析失败一律当"没走代理"（抛出去会让一条本来只是慢的请求变成崩溃）。
+ */
+function usingProxyFor(host) {
+  try { return !!resolveProxyFor(host); } catch { return false; }
+}
+
+/** 代理端点字符串（给 Lens 那份会话用）；没命中规则时返回 null。 */
+function proxyEndpointFor(host) {
+  try {
+    const hit = resolveProxyFor(host);
+    if (!hit) return null;
+    const ep = hit.endpoint;
+    return `${ep.protocol}//${ep.hostname}:${ep.port}`;
+  } catch { return null; }
+}
+
+/**
+ * 把引擎抛出来的失败补成人话（判据 'test-搜图失败分类.mjs' 钉的那句）。
+ * ⚠️ 引擎自己**已经**给过人话的错（比如「额度用完了」）不要覆盖 —— 那些不是网络问题。
+ */
+const NETWORKY_RE = /fetch\s+failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|CERT_|network|网络|超时|连接/i;
+function humanizeEngineError(err, host) {
+  const msg = String(err?.message ?? err ?? '');
+  const isNetworky = NETWORKY_RE.test(msg) || !msg;
+  if (!isNetworky) return err;
+  const human = describeFetchError(err, { host, usedProxy: usingProxyFor(host) });
+  return Object.assign(new Error(human), { cause: err?.cause, attempts: err?.attempts });
+}
+
+/**
+ * 幂等瞬时错才值得重试。
+ * ⛔ 4xx / 人机验证 / 额度用完 一律不重试：重试一个 403 只是把这次运行的时间烧掉。
+ */
+const TRANSIENT_RE = /TIMEOUT|ETIMEDOUT|UND_ERR_SOCKET|ECONNRESET|EPIPE|ECONNABORTED|ERR_SOCKET|ENOTFOUND|EAI_AGAIN|socket hang up|fetch\s+failed/i;
+function isTransient(err) {
+  const code = String(err?.cause?.code || err?.code || '');
+  const status = Number(err?.status ?? err?.statusCode ?? 0);
+  if (status >= 400 && status <= 599) return false;      // 对方答话了 ⇒ 不是"没连上"，重试没意义
+  if (CHALLENGE_LIKE.test(String(err?.message ?? ''))) return false;
+  return TRANSIENT_RE.test(code) || TRANSIENT_RE.test(String(err?.message ?? ''));
+}
+const CHALLENGE_LIKE = /人机验证|Cloudflare|额度用完|Rate Limit|rate limit|API Key/i;
+
+/**
+ * 跑一个引擎：失败按"幂等瞬时错"重试，次数来自配置。
+ * @param {string} label 引擎标签（只进错误文案）
+ * @param {string} host 目标主机（只进错误文案：说清走没走代理）
+ * @param {() => Promise<any>} fn
+ */
+async function runWithRetry(label, host, fn) {
+  const retries = engineRetries();
+  let last = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      last = error;
+      const canRetry = attempt < retries && isTransient(error);
+      if (!canRetry) break;
+      // 退避：给对面一点喘息（同时避免"重试三次＝三次一起撞限流"）
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+  throw humanizeEngineError(last, host);
 }
 
 function htmlUnescape(s) {
@@ -40,12 +140,13 @@ function makeImageForm(buffer, mime, fieldName, filename = 'image.jpg') {
 
 // ── trace.moe：动画截图识番（官方免费 JSON API，无需 key）──────────────────
 async function tracemoe(buffer, mime) {
-  const res = await cfFetch('https://api.trace.moe/search?anilistInfo', {
+  const ms = engineTimeoutMs();
+  const res = await runWithRetry('trace.moe', 'api.trace.moe', () => cfFetch('https://api.trace.moe/search?anilistInfo', {
     method: 'POST',
     headers: { 'user-agent': UA },
     body: makeImageForm(buffer, mime, 'image'),
-    signal: timeoutSignal()
-  }, { timeoutMs: TIMEOUT_MS });
+    signal: timeoutSignal(ms)
+  }, { timeoutMs: ms }));
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error) throw new Error(`trace.moe 查询失败：${data.error || `HTTP ${res.status}`}`);
   const results = (data.result || []).slice(0, 3).map((r) => {
@@ -90,12 +191,13 @@ async function saucenao(buffer, mime) {
 // 官方 JSON API（output_type=2）
 async function saucenaoApi(buffer, mime, apiKey) {
   const qs = new URLSearchParams({ output_type: '2', api_key: apiKey, numres: '3', db: '999', hide: '0' });
-  const res = await cfFetch(`https://saucenao.com/search.php?${qs}`, {
+  const ms = engineTimeoutMs();
+  const res = await runWithRetry('SauceNAO API', 'saucenao.com', () => cfFetch(`https://saucenao.com/search.php?${qs}`, {
     method: 'POST',
     headers: { 'user-agent': UA },
     body: makeImageForm(buffer, mime, 'file'),
-    signal: timeoutSignal(45000)
-  }, { timeoutMs: 45000 });
+    signal: timeoutSignal(ms)
+  }, { timeoutMs: ms }));
   const data = await res.json().catch(() => null);
   if (!data) throw new Error(`SauceNAO API 返回了无法解析的内容（HTTP ${res.status}）`);
   const status = Number(data.header?.status ?? 0);
@@ -132,12 +234,13 @@ async function saucenaoHtml(buffer, mime) {
   form.append('frame', '1');
   form.append('hide', '0');
   form.append('database', '999');
-  const res = await cfFetch('https://saucenao.com/search.php', {
+  const ms = engineTimeoutMs();
+  const res = await runWithRetry('SauceNAO', 'saucenao.com', () => cfFetch('https://saucenao.com/search.php', {
     method: 'POST',
     headers: { 'user-agent': UA },
     body: form,
-    signal: timeoutSignal(45000)
-  }, { timeoutMs: 45000 });
+    signal: timeoutSignal(ms)
+  }, { timeoutMs: ms }));
   const html = await res.text();
   if (/Search Rate Limit Exceeded/i.test(html)) {
     throw new Error('SauceNAO 匿名额度用完了（有频率限制），等 30 秒～几小时再试，或换 iqdb');
@@ -182,7 +285,7 @@ async function saucenaoHtml(buffer, mime) {
 // 所以一旦 POST 被拦，整个流程（含首页 GET）都切到 Electron 通道重来一遍。
 async function ascii2d(buffer, mime) {
   for (const forceElectron of [false, true]) {
-    const out = await ascii2dAttempt(buffer, mime, forceElectron);
+    const out = await runWithRetry('ascii2d', 'ascii2d.net', () => ascii2dAttempt(buffer, mime, forceElectron));
     if (out !== null) return out;
     // null = POST 被 CF 拦且本层没绕过去，升级到全 Electron 通道再来
   }
@@ -190,10 +293,11 @@ async function ascii2d(buffer, mime) {
 }
 
 async function ascii2dAttempt(buffer, mime, forceElectron) {
-  const home = await cfFetch('https://ascii2d.net/', {
+  const ms = engineTimeoutMs();
+  const home = await runWithRetry('ascii2d', 'ascii2d.net', () => cfFetch('https://ascii2d.net/', {
     headers: { 'user-agent': UA },
-    signal: timeoutSignal()
-  }, { timeoutMs: TIMEOUT_MS, forceElectron });
+    signal: timeoutSignal(ms)
+  }, { timeoutMs: ms, forceElectron }));
   const homeHtml = await home.text();
   const token = homeHtml.match(/id="file_upload"[\s\S]*?name="authenticity_token" value="([^"]+)"/)?.[1]
     || homeHtml.match(/name="authenticity_token" value="([^"]+)"/)?.[1];
@@ -206,6 +310,8 @@ async function ascii2dAttempt(buffer, mime, forceElectron) {
   const form = makeImageForm(buffer, mime, 'file');
   form.append('utf8', '✓');
   form.append('authenticity_token', token);
+  // ⚠️ 这一发**不**套 runWithRetry：它返回 null 表示"被 CF 拦住、该升级到全 Electron 通道"，
+  //    那是**控制流**不是异常；重试逻辑放在调用方 `ascii2d()` 那一层（只对真抛出来的瞬时错重试）。
   const res = await cfFetch('https://ascii2d.net/search/file', {
     method: 'POST',
     headers: {
@@ -217,8 +323,8 @@ async function ascii2dAttempt(buffer, mime, forceElectron) {
     },
     body: form,
     redirect: 'follow',
-    signal: timeoutSignal(45000)
-  }, { timeoutMs: 45000, forceElectron });
+    signal: timeoutSignal(ms)
+  }, { timeoutMs: ms, forceElectron });
   const html = await res.text();
   if (res.status === 403 && looksLikeCfChallenge(res.status, html.slice(0, 2000))) return null;
   if (!res.ok) throw new Error(`ascii2d 上传失败：HTTP ${res.status}`);
@@ -290,12 +396,13 @@ async function soutubot(buffer, mime) {
   const form = makeImageForm(buffer, mime, 'file', 'clipboard.png');
   form.append('factor', '1.2');
   form.append('metadata_mode', 'display');
-  const res = await cfFetch('https://soutubot.moe/api/search', {
+  const ms = engineTimeoutMs();
+  const res = await runWithRetry('搜图 bot', 'soutubot.moe', () => cfFetch('https://soutubot.moe/api/search', {
     method: 'POST',
     headers: { 'user-agent': UA, accept: 'application/json', 'accept-language': 'zh-CN' },
     body: form,
-    signal: timeoutSignal(45000)
-  }, { timeoutMs: 45000 });
+    signal: timeoutSignal(ms)
+  }, { timeoutMs: ms }));
   let payload = await res.json().catch(() => ({}));
   if (!res.ok) {
     // 多级绕过后仍被拦（多半是需要点滑块的交互验证）
@@ -310,12 +417,13 @@ async function soutubot(buffer, mime) {
   // 有缺席子库时轮询 /api/results/{id} 等它补全（最多 ~15 秒）。
   const incomplete = (p) => Array.isArray(p?.api_results) && p.api_results.some((a) => a && a.status && a.status !== 'ok');
   if (payload.result_id && incomplete(payload)) {
+    const pollMs = Math.min(20000, engineTimeoutMs());
     for (let i = 0; i < 6 && incomplete(payload); i++) {
       await new Promise((r) => setTimeout(r, 2500));
       const pRes = await cfFetch(`https://soutubot.moe/api/results/${encodeURIComponent(payload.result_id)}`, {
         headers: { 'user-agent': UA, accept: 'application/json', 'accept-language': 'zh-CN' },
-        signal: timeoutSignal(20000)
-      }, { timeoutMs: 20000 }).catch(() => null);
+        signal: timeoutSignal(pollMs)
+      }, { timeoutMs: pollMs }).catch(() => null);
       if (!pRes?.ok) continue;
       const p = await pRes.json().catch(() => null);
       if (p && Array.isArray(p.results)) payload = p;
@@ -347,12 +455,13 @@ async function soutubot(buffer, mime) {
 
 // ── iqdb：插画/完整图（免 key、反爬弱，ascii2d 被拦时的替代）──
 async function iqdbSearch(host, engineName, buffer, mime) {
-  const res = await cfFetch(host, {
+  const ms = engineTimeoutMs();
+  const res = await runWithRetry(engineName, 'iqdb.org', () => cfFetch(host, {
     method: 'POST',
     headers: { 'user-agent': UA },
     body: makeImageForm(buffer, mime, 'file'),
-    signal: timeoutSignal(45000)
-  }, { timeoutMs: 45000 });
+    signal: timeoutSignal(ms)
+  }, { timeoutMs: ms }));
   const html = await res.text();
   if (!res.ok) throw new Error(`${engineName} 查询失败：HTTP ${res.status}`);
   const tables = html.match(/<table>[\s\S]*?<\/table>/gi) || [];
@@ -382,6 +491,38 @@ async function iqdbSearch(host, engineName, buffer, mime) {
   };
 }
 
+// ── 谷歌 Lens：真 Chromium 里跑一遍（2026-10-22 第五十二对话 · 用户拍板 Q10「选免费的 Electron 路线」）──
+//   ⚠️ 它与上面五个引擎**有一个本质区别**：它不是 HTTP 抓取，而是开一个隐藏窗口在真 Chromium
+//      里跑一遍（详见 `src/lens-search.js` 头部的四条硬纪律）。所以：
+//      · 慢得多（顺利也要 3~7 秒，还可能等不到结果）；
+//      · **不并入 auto 链** —— auto 是"随手试三个快的"，把它放进去会让每次都慢一大截；
+//      · 只由模型在明确要"谷歌搜一下"、或在别的引擎都没结果时**显式选**。
+//   🔴 它的失败**不抛错**（lensSearch 返回 {ok:false,error}），因为"没等到内容"和"引擎报错"
+//      在这里的成因几乎一样（出口网络），而文案已经够清楚；这里把它转成 Error 交给上层统一处理。
+async function lens(buffer, mime) {
+  const timeoutMs = intIn(getConfig().imageSearch?.lensTimeoutMs, 30000, 5000, 120000);
+  const out = await lensSearch(buffer, mime, {
+    timeoutMs,
+    proxyEndpoint: proxyEndpointFor('lens.google.com')
+  });
+  if (!out.ok) throw new Error(out.error);
+  // 结果页正文是**非结构化的**（Lens 没有公开 API），所以如实告诉模型"这是一段网页正文"，
+  // 别让它当成"确定匹配"。这比编一个相似度诚实。
+  return {
+    engine: 'lens',
+    results: [{
+      title: '谷歌 Lens 结果页正文',
+      url: out.url || '',
+      similarity: '',
+      extra: String(out.text || '').replace(/\s+/g, ' ').trim().slice(0, 1200)
+    }],
+    resultPageUrl: out.url || '',
+    note: '🔴 这是**谷歌 Lens 结果页的正文摘录**，不是结构化匹配结果：里面可能混着无关推荐、'
+      + '广告文案或界面文字。请只采纳其中**明确指向出处**的部分（站点名/作品名/作者），'
+      + '其余一律当成背景噪声；拿不准就说不确定。'
+  };
+}
+
 // ── 统一入口 ───────────────────────────────────────────────────────────────
 export const IMAGE_ENGINES = {
   tracemoe: { label: 'trace.moe（动画截图识番）', run: tracemoe },
@@ -390,7 +531,9 @@ export const IMAGE_ENGINES = {
   // ascii2d **不在**下面 SELECTABLE_ENGINES 里（模型选不了），但保留在 auto 的降级链里当第三级保险。
   // 理由：它 0 次被模型选中、且常触 CF 交互验证；而在链里是懒执行，不触发就零成本。
   ascii2d: { label: 'ascii2d（二次元插画）', run: ascii2d },
-  soutubot: { label: '搜图 bot（本子/漫画页）', run: soutubot }
+  soutubot: { label: '搜图 bot（本子/漫画页）', run: soutubot },
+  // 🆕 2026-10-22 第五十二对话（用户拍板 Q10）：谷歌 Lens。⚠️ 有意**不**并入 auto 链（见上面注释）。
+  lens: { label: '谷歌搜图（Lens，最全但最慢）', run: lens }
 };
 
 /**
@@ -398,7 +541,7 @@ export const IMAGE_ENGINES = {
  * 2026-09-17 精简：原来 8 个选项太多（实测 381 个会话里只有 6 次调用，
  * 而 tracemoe/ascii2d/iqdb3d 一次都没被选过），且 yandex/iqdb3d 那一格"三次元"两个引擎都不可靠。
  */
-export const SELECTABLE_ENGINES = ['auto', 'tracemoe', 'saucenao', 'iqdb', 'soutubot'];
+export const SELECTABLE_ENGINES = ['auto', 'tracemoe', 'saucenao', 'iqdb', 'soutubot', 'lens'];
 
 /**
  * 以图搜图统一入口。
@@ -409,7 +552,16 @@ export async function searchImageSource(engine, buffer, mime) {
   if (engine === 'auto') {
     const errors = [];
     let bestEffort = null;   // 沿途最好的低置信结果，全链路失败时兜底返回
+    // 🔴 总预算（用户 10-22 拍板 Q3「要设置可调」）：三个引擎串行 + 各自重试，
+    //    合起来最多花 autoBudgetMs，到点就不再起新的引擎。
+    //    为什么必须有它：工具层 `TOOL_TIMEOUT_MS = 120_000` 是死线，超了工具被掐掉、
+    //    模型只看到一句超时 —— 那时连"我们试过哪些引擎"都报不出来。
+    const deadline = Date.now() + autoBudgetMs();
     for (const key of ['saucenao', 'iqdb', 'ascii2d']) {
+      if (Date.now() >= deadline) {
+        errors.push(`总预算用完了（${autoBudgetMs()} 毫秒），后面的引擎没来得及试`);
+        break;
+      }
       try {
         const out = await IMAGE_ENGINES[key].run(buffer, mime);
         const top = Number.parseFloat(out.results?.[0]?.similarity);

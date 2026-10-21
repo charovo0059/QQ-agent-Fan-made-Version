@@ -444,6 +444,36 @@ function customRulesBlock(persona) {
 }
 
 /**
+ * 【种子/磁力清单的内容策略】—— 一段**可编辑的提示词约束**（🆕 2026-10-22 第五十二对话）。
+ *
+ * 🔴 为什么是提示词而不是代码关键词表（用户 2026-10-22 原话）：
+ *    「q6 也可以在设置里改，用提示词的形式约束就好，不用代码关键词硬约束，
+ *      模型越来越智能了，我们很多代码限制有时候会妨碍到她，希望你理解。」
+ *    ⇒ 关键词表有三个真毛病：① 加词要改代码发版；② 中文变体/外文写法永远盖不全，
+ *      该拦的漏、不该拦的误伤；③ 它给模型一个"命中就闭嘴"的硬闸，而模型判断力更好。
+ *
+ * ⚠️ 三条**不在这里**、永远留在代码里的硬边界（清空这段文字也不受影响）：
+ *    ① `inspect_torrent` 只输出清洗后的文件名 + 大小 + 计数，不给内容摘要；
+ *    ② 机械清洗（去控制字符 / 去方向覆盖字符 / 单条截断）照旧；
+ *    ③ 不下载、不做种、不缓存。
+ *
+ * ⚠️ 生效时机：`buildSystemPrompt` 每次组装都现读配置（`getConfig()`），
+ *    所以**改完下一次对话就生效**，不用重启。
+ * ⚠️ 空串 / 功能关掉 ⇒ 整块消失（返回空串），输出与加这段之前逐字节相同。
+ */
+function contentPolicyBlock() {
+  let ti = null;
+  try { ti = getConfig()?.torrentInspect; } catch { ti = null; }
+  if (!ti || ti.enabled === false) return '';
+  const text = String(ti.contentPolicyText ?? '').trim();
+  // ⚠️ 分隔符是**单个 \n**（不是别处的 `\n\n`），这是被判据逼出来的选择，别顺手改成空行：
+  //    `测试-现行\test-skills基础设施.mjs` 第 7 节靠"把已登记的整行删掉再比 sha256"守着
+  //    系统提示的前缀缓存不被顺手改坏，而它**只能整行删**——多出来的那个空行删不掉，
+  //    于是判据会红在一个"看起来什么都没有"的位置。单 \n 让"删掉这几行 == 恢复改造前"成立。
+  return text ? `\n${text}` : '';
+}
+
+/**
  * 把技能提示词片段渲染成一个块。
  *
  * ⚠️ 没有片段时返回**空字符串** —— 于是"没有任何技能生效"时系统提示与改造前逐字节相同
@@ -482,7 +512,13 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
   //    工具已经在 tools 列表里给模型了，提示词里不跟着说一句，模型会少用它。
   //    位置同样在【管理员附加规则】之前、块尾。
   const full = String(cfg.systemPrompt ?? '').trim();
-  if (full) return expandPlaceholders(full, cfg) + skillBlock + customRulesBlock(cfg);
+  // 内容策略块（可编辑的提示词约束，见 contentPolicyBlock 注释）—— 与技能片段/管理员规则同位置：
+  // 无论系统提示是内置还是被整份/逐段覆盖，都追加在最后；空串时整块消失。
+  const policyBlock = contentPolicyBlock();
+  // ⚠️ policyBlock 排在 skillBlock **之前**（用户 10-22 定的顺序：内容策略是常驻约束，技能是临时能力）。
+  //    这同时满足 `test-skills基础设施.mjs` 第 7 节那条长期性质："开/关一个技能 == 只在块尾追加"——
+  //    它对开/关两种状态都要求"关的是开的前缀"，所以会变的那块（技能）必须排在固定的那块之后。
+  if (full) return expandPlaceholders(full, cfg) + policyBlock + skillBlock + customRulesBlock(cfg);
 
   // ② 逐段覆盖：persona.systemPromptSegments[key] 非空时替换该段，其余走内置。
   const defaults = buildDefaultSegments(cfg, { platform });
@@ -531,7 +567,7 @@ export function buildSystemPrompt({ persona, skillContext, platform = 'qq' } = {
     const s = String(text ?? '');
     if (s.trim()) blocks.push(s);
   });
-  return blocks.join('\n\n') + skillBlock + customRulesBlock(cfg);
+  return blocks.join('\n\n') + policyBlock + skillBlock + customRulesBlock(cfg);
 }
 
 // ── 用户消息 ─────────────────────────────────────────────────────────────
@@ -559,8 +595,13 @@ function formatEntry(m, { withId = true } = {}) {
   //    她原来无从分辨"这句是我说的"还是"管理端拿我的名义发的"，
   //    在别的群里被认成别的鱼也只能认。标记写成"我（管理员代发）"——
   //    **自带解释**，不必再往系统提示里加一段（那会碰系统提示哈希判据，见 §系统提示那两处测试）。
+  // 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）：**文件发送回执**也标出来。
+  //   协议端把她自己发出的文件**以对方的名义**回显了一条 ⇒ 她读到"某人： [文件:…]"，
+  //   以为是对方把文件传回来了。标成「我（已发送）」之后一眼就能分辨。
+  //   ⚠️ 用「已发送」而**不是**「已送达/对方已接收」：前者是我们真的做过的动作，
+  //      后者协议端根本不转发（拿不到），写了就是编 —— 判据里有反向断言盯着这五个字。
   const who = m.self
-    ? (m.origin === 'admin' ? '我（管理员代发）' : '我')
+    ? (m.origin === 'admin' ? '我（管理员代发）' : (m.origin === 'receipt' ? '我（已发送）' : '我'))
     : (notes[senderId] || m.senderName || senderId || '未知');
   const replyPrefix = m.reply?.text || m.reply?.sender ? `[引用 ${[m.reply?.sender, m.reply?.text].filter(Boolean).join('：')}]` : '';
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';

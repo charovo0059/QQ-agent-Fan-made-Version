@@ -520,10 +520,18 @@ export class SendQueue {
         : `[文件${note}:${name} ${fmtBytes(stat.size)}]`;
       // 留档：与图片同一条纪律 —— 不留档的话下一轮她不知道自己发过，
       // 用户说"你刚发的那个打不开"时她完全接不上。
-      this.store.appendSelf(chatKey, { text: label, ts, mid: data?.message_id ?? null });
-      this.onSent?.({ chatKey, text: label, messageId: data?.message_id ?? null, file: fp, flash: viaFlash });
+      // 🆕 2026-10-22（第五十二对话，提案 c8a2bc35）：把协议端回的 `file_id` 一路带出去。
+      //   为什么（踩过的坑）：协议端上传完会**自己补发一条 file 消息**，而那条消息的
+      //   `user_id` 写的是**对方** ⇒ 它会绕过 selfId 过滤、被当成"对方发来的文件"入库，
+      //   她于是以为"对方把文件转回来了"（用户报的现象就是这个）。
+      //   `file_id` 是唯一能认出"那条回显是我自己刚发的"的抓手（两边同源，见 onebot.sendFile）。
+      //   ⚠️ 只在**有值**时才往条目里落（老存档一个字节不多占 —— 与 `origin` 同一个纪律）。
+      const fileId = String(data?.file_id ?? data?.fileId ?? '').trim() || null;
+      this.store.appendSelf(chatKey, { text: label, ts, mid: data?.message_id ?? null, fileId });
+      this.onSent?.({ chatKey, text: label, messageId: data?.message_id ?? null, fileId, name, file: fp, flash: viaFlash });
       return {
         message_id: data?.message_id ?? null,
+        file_id: fileId,
         name,
         bytes: stat.size,
         flash: viaFlash,

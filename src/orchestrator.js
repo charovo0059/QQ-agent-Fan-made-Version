@@ -818,7 +818,9 @@ export class Orchestrator {
     // ⚠️ `visionEnabled` 已在**组装提示词之前**算好（skillContext 与这里共用它）—— 别在这里重算，
     //    两份判定迟早会漂移（本项目"两个真相源"的老毛病）。
     // 工具集按配置过滤（搜索开关 / 视觉 / 本子查询开关）—— 判定逻辑在 tools.js 里，便于单测
-    const toolDefs = gateToolDefs(this.toolDefs, cfg, { visionEnabled });
+    // 🆕 2026-10-22 第五十二对话：多传一个 `kind` —— 种子只读清单的"群聊允许"闸必须在这里判，
+    //    否则那个开关只能把工具留在列表里再拒调用（判据要的是"列表里就没有"）。
+    const toolDefs = gateToolDefs(this.toolDefs, cfg, { visionEnabled, kind });
     const openAiTools = toOpenAiTools(toolDefs);
 
     const ctx = {

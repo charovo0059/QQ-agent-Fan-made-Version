@@ -397,6 +397,22 @@ async function saveConfig({ quiet = false } = {}) {
   //      （同白名单那条：**"这一节没渲染" ≠ "名单是空的"**）。
   if (sec === 'abilities') {
     // ⚠️ 别用 `intIn` —— 它是上面 `if (sec === 'search')` 块里的**局部函数**，这里取不到（会 ReferenceError）。
+    //    ⇒ 本块自带一个**局部**读数器（⛔ 别提到模块级：判据用 `new Function` 只注入 val/chk/… 这几个名字，
+    //      多一个模块级依赖就会让那两个判据 ReferenceError 红掉）。
+    //
+    // 🔴 为什么不用 `Number(val(...)) || 默认值`（本页最常见的写法）：
+    //    `engineRetries` 的合法值里 **0 = 不重试**，而 `|| 1` 会把 0 当假值丢掉 ⇒
+    //    用户填 0 之后**照样在重试**（与 `normalizeDedupeWindowMs` 是同一个坑）。
+    //    ⇒ 只有"空/非数字"才回落，显式的 0 照实写。
+    const numIn = (raw, min, max, fallback) => {
+      // ⚠️ 前四个参数里**先给值**（不是先给选择器）：调用处写的是
+      //    `numIn(val('#cfg-…', 现值), 下限, 上限, 现值)` —— 这样"没渲染 ⇒ 回落现值"与
+      //    "渲染了 ⇒ 就按界面值钳制"两条路共用一份代码，且现值不经过钳制（原样保住）。
+      if (raw === null || raw === undefined || String(raw).trim() === '') return fallback;
+      const n = Math.round(Number(raw));
+      if (!Number.isFinite(n)) return fallback;
+      return Math.min(max, Math.max(min, n));
+    };
     const daysRaw = Math.round(Number(val('#cfg-selfelsewhere-days', c.selfElsewhere?.days ?? 7)));
     patch.selfElsewhere = {
       ...(c.selfElsewhere || {}),
@@ -442,7 +458,33 @@ async function saveConfig({ quiet = false } = {}) {
       //      ⛔ 前端松、后端紧会让用户"填了却看不出为什么没生效"。
       resultLimit: Math.max(1, Math.min(50, Number(val('#cfg-img-result-limit', c.imageSearch?.resultLimit ?? 6)) || 6)),
       resultLimitMax: Math.max(1, Math.min(50, Number(val('#cfg-img-result-limit-max', c.imageSearch?.resultLimitMax ?? 12)) || 12)),
-      sendMaxPerRun: Math.max(0, Math.min(50, Number(val('#cfg-img-send-max', c.imageSearch?.sendMaxPerRun ?? 0)) || 0))
+      sendMaxPerRun: Math.max(0, Math.min(50, Number(val('#cfg-img-send-max', c.imageSearch?.sendMaxPerRun ?? 0)) || 0)),
+      // ── 🆕 2026-10-22（第五十三对话 · 方案 §4.2③）：搜图的**超时与重试** ────────────
+      //   ⚠️ 这四个**不能**写成上面那种 `Number(...) || 默认值`：
+      //      `engineRetries` 的合法值里 **0 是"不重试"**（不是"没填"），`|| 1` 会把 0 当假值
+      //      丢掉 ⇒ 用户填 0 之后"还是在重试"（与 dedupeWindowMs 同一个坑，见 normalizeDedupeWindowMs）。
+      //   ⚠️ 钳制范围与渲染侧（12-settings-render.js 的 min/max）**同口径**。
+      //   ⚠️ 没渲染时回落 `c.imageSearch?.` 原值（"这一节没渲染" ≠ "把它设成默认值"）。
+      engineTimeoutMs: numIn(val('#cfg-img-engine-timeout', c.imageSearch?.engineTimeoutMs ?? 15000), 3000, 60000, c.imageSearch?.engineTimeoutMs ?? 15000),
+      engineRetries: numIn(val('#cfg-img-engine-retries', c.imageSearch?.engineRetries ?? 1), 0, 3, c.imageSearch?.engineRetries ?? 1),
+      autoBudgetMs: numIn(val('#cfg-img-auto-budget', c.imageSearch?.autoBudgetMs ?? 90000), 15000, 115000, c.imageSearch?.autoBudgetMs ?? 90000),
+      lensTimeoutMs: numIn(val('#cfg-img-lens-timeout', c.imageSearch?.lensTimeoutMs ?? 30000), 5000, 120000, c.imageSearch?.lensTimeoutMs ?? 30000)
+    };
+
+    // ── 🆕 2026-10-22（第五十三对话 · 方案 §5.12）：种子/磁力**只读**清单 ──────────────
+    //   🔴 `...c.torrentInspect` 展开**必须有**：这个顶层键以后再加字段时，靠它保住
+    //      "这一页没渲染的键不被一次保存抹掉"（本项目老坑）。
+    //   ⚠️ 三个开关都是"默认开" ⇒ 判定一律 `!== false`（⛔ 写成 `=== true` 会把默认开静默变成默认关）。
+    //   ⚠️ 内容边界是**提示词文本**（不是代码黑名单）：照实写、含空串 —— 用户清空它就真的清空，
+    //      ⛔ 不要在这里回填默认文案（那会让"删掉这段约束"这个操作永远失效）。
+    patch.torrentInspect = {
+      ...(c.torrentInspect || {}),
+      enabled: chk('#cfg-torrent-enabled', c.torrentInspect?.enabled !== false),
+      allowInGroup: chk('#cfg-torrent-allowgroup', c.torrentInspect?.allowInGroup !== false),
+      cacheLookup: chk('#cfg-torrent-cache', c.torrentInspect?.cacheLookup !== false),
+      maxFiles: numIn(val('#cfg-torrent-maxfiles', c.torrentInspect?.maxFiles ?? 30), 1, 500, c.torrentInspect?.maxFiles ?? 30),
+      timeoutMs: numIn(val('#cfg-torrent-timeout', c.torrentInspect?.timeoutMs ?? 25000), 5000, 110000, c.torrentInspect?.timeoutMs ?? 25000),
+      contentPolicyText: String(val('#cfg-torrent-policy', c.torrentInspect?.contentPolicyText ?? '')).slice(0, 4000)
     };
 
     // ── 🆕 2026-10-05（第四十四对话 · 用户拍板 B1 / 交接 §3-121）────────────────────
