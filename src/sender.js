@@ -4,7 +4,7 @@
 // - Markdown → 纯文本、QQ 硬长度切分、CQ 转义
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
 import { getConfig, DEFAULT_CONFIG } from './config.js';
-import { sleep, randInt, createSendChain, escapeCqText, formatClockTime, toFileUri } from './util.js';
+import { sleep, randInt, createSendChain, escapeCqText, formatClockTime, toFileUri, fmtBytes } from './util.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { resolveFreshImageUrl } from './onebot.js';
 import { pathToFileURL } from 'node:url';
@@ -441,6 +441,59 @@ export class SendQueue {
     });
   }
 
+  /**
+   * 发一个**文件**（群文件 / 离线文件）。🆕 2026-10-21 第五十一对话（交接 §3-174 需求②）。
+   *
+   * 🔴 为什么它是 `sendImage` 的**兄弟**而不是复用它：
+   *   `sendImage` 的整个骨架是"把一个 URL 落成本地文件 → 交给协议端的 image 段"，
+   *   而文件是 `upload_group_file` / `upload_private_file` 这个**独立动作**
+   *   （参数是 `{file, name}`、不进消息段）。硬套会写出一个"两个分支各干一半"的函数。
+   *   ⇒ 单独一个方法，但**故意照抄 sendImage 的骨架**（chain 串行 → 限频 → 停顿 →
+   *     记账 → 留档 → onSent），因为那几条纪律对文件同样成立。
+   *
+   * ⚠️ 与图片的三处**有意差异**（都是想过的，不是漏抄）：
+   *   ① **没有去重**。图片按 URL 指纹去重（模型可能把同一个链接连发两次）；
+   *      文件的参数是**本地路径**，同一天下两本同名本子是完全合法的两件事，
+   *      按路径去重会把"真的想发第二份"静默吃掉。
+   *   ② **留档文本带文件名与大小**（`[文件:xxx.zip 12.3MB]`）而不是 `[文件]`：
+   *      下次运行时她需要知道"我发过什么"，光写 `[文件]` 等于没留。
+   *   ③ **不压缩、不转 uri**（见 `onebot.js` 的 `sendFile` 注释：实测雪花这条路吃裸路径）。
+   *
+   * @param {string} filePath 本地**绝对**路径（协议端与宿主同机，见 jm-bridge.js 的同一前提）
+   * @param {object} options { name（发出去时显示的文件名，默认取 basename）, note }
+   */
+  sendFile(chatKey, filePath, options = {}) {
+    const [kind, id] = String(chatKey).split(':');
+    if (kind !== 'group' && kind !== 'private') return Promise.reject(new Error(`非法会话 key：${chatKey}`));
+    const fp = String(filePath ?? '').trim();
+    if (!fp) return Promise.reject(new Error('文件路径为空'));
+    // ⚠️ 存在性在**排队之前**就查：文件不在是"调用方搞错了"，不该去占发送队列的位置，
+    //    更不该等几百毫秒的真人停顿之后才说。
+    let stat = null;
+    try { stat = fs.statSync(fp); } catch { /* 下面统一报 */ }
+    if (!stat || !stat.isFile()) return Promise.reject(new Error(`要发的文件不存在或不是普通文件：${fp}`));
+    const chain = this.#chain(chatKey);
+    const client = this.clientFor(chatKey);
+    const name = String(options.name ?? '').trim() || path.basename(fp);
+    return chain(async () => {
+      this.#checkRate(chatKey);
+      await sleep(randInt(400, 1000));   // 发文件前也来一下真人式的停顿（别紧接着上一条消息蹦出来）
+      const data = await client.sendFile(kind, id, fp, { name });
+      const ts = Date.now();
+      const note = options.note ? `:${String(options.note).slice(0, 40)}` : '';
+      const label = `[文件${note}:${name} ${fmtBytes(stat.size)}]`;
+      // 留档：与图片同一条纪律 —— 不留档的话下一轮她不知道自己发过，
+      // 用户说"你刚发的那个打不开"时她完全接不上。
+      this.store.appendSelf(chatKey, { text: label, ts, mid: data?.message_id ?? null });
+      this.onSent?.({ chatKey, text: label, messageId: data?.message_id ?? null, file: fp });
+      return {
+        message_id: data?.message_id ?? null,
+        name,
+        bytes: stat.size
+      };
+    });
+  }
+
   /** 发送一个收藏表情（独立气泡）。 */
   sendSticker(chatKey, sticker, options = {}) {
     const [kind, id] = String(chatKey).split(':');
@@ -551,8 +604,7 @@ export class SendQueue {
   }
 
   /** 拍一拍。发送成功后留档（self 记录），否则下一次运行不知道自己拍过。 */
-  poke(chatKey, targetUserId) {
-    const [kind, id] = String(chatKey).split(':');
+  poke(chatKey, targetUserId) {    const [kind, id] = String(chatKey).split(':');
     const chain = this.#chain(chatKey);
     return chain(async () => {
       // 🆕 2026-09-21（第十对话）：限频。放在**这里**而不是 send_poke 工具里，

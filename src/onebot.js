@@ -1,6 +1,7 @@
 // OneBot v11 客户端：WebSocket 只收事件，HTTP API 负责发送与查询。
 // （原版经 @snowluma/sdk 收事件；这里直接实现标准 OneBot v11，去掉 SDK 补丁依赖。）
 import WebSocket from 'ws';
+import path from 'node:path';
 import { sanitizeUserText, escapeCqText, toFileUri, fmtBytes } from './util.js';
 import { getConfig, DEFAULT_CONFIG } from './config.js';
 import { initProxyConfig, resolveProxyFor } from './proxy.js';
@@ -38,6 +39,23 @@ export function imageSendTimeoutMs() {
   try { raw = getConfig()?.send?.imageTimeoutMs; } catch { raw = undefined; }
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_CONFIG.send.imageTimeoutMs;
+}
+
+/**
+ * 发**文件**那一档的超时（毫秒）—— 从 `config.send.fileTimeoutMs` 现读。
+ *
+ * 🆕 2026-10-21（第五十一对话 · 交接 §3-174 需求②）：文件比图片大一个量级
+ *   （一本本子打成 zip 几十 MB），而且协议端要**先收下再上传到群文件/离线文件**，
+ *   图片那档 60 秒明显不够。默认 180 秒。
+ *
+ * ⚠️ 与 `imageSendTimeoutMs` 同一套口径（非法值回落 `DEFAULT_CONFIG`），
+ *   理由也一样：它是**第三档**，不能把文字/查询那档跟着一起放长。
+ */
+export function fileSendTimeoutMs() {
+  let raw;
+  try { raw = getConfig()?.send?.fileTimeoutMs; } catch { raw = undefined; }
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_CONFIG.send.fileTimeoutMs;
 }
 
 /** 判断一个错误是不是 `AbortSignal.timeout` 抛出来的超时（要把它翻译成人话）。 */
@@ -441,6 +459,54 @@ export class OneBotClient {
   /** 发一个收藏表情。**就是 `sendImage`**（表情与普通图片走完全相同的报文），保留此名是为了调用方语义清晰。 */
   async sendSticker(kind, id, imageUrl, opts = {}) {
     return this.sendImage(kind, id, imageUrl, opts);
+  }
+
+  /**
+   * 发一个**文件**（群文件 / 离线文件）。🆕 2026-10-21 第五十一对话（交接 §3-174 需求②）。
+   *
+   * 与 `sendImage` 是**两条路**，不能合并：
+   *   · 图片走 `send_*_msg` 的 `image` 段（进聊天记录，能引用/能点开看）；
+   *   · 文件走 `upload_group_file` / `upload_private_file` 这个**独立动作**（不进消息段），
+   *     参数是 `{ file, name }` 而不是 `message`。
+   *   ⇒ 类型化方法仍放在这一层：动作名与参数**只在这一个文件里出现**（与
+   *     `getFriendList` / `getGroupInfo` 同一条纪律 —— 以后某个实现要换动作名只改这一处）。
+   *
+   * ⚠️ `file` 的语义**各家实现不一样**：OneBot v11 原文写的是"绝对路径 / URL / base64"。
+   *   我们只传**绝对路径**（协议端与宿主同机，见 `jm-bridge.js` 的同一前提），
+   *   并且**不做 `file://` 转换** —— 实测 SnowLuma 这条吃裸路径，喂 `file://` 反而失败。
+   *
+   * 🔴 两个已知的现实约束（写在这里，免得调用方以为是自己的 bug）：
+   *   ① **群文件有配额**：QQ 群文件 10GB 满了会一律 `retcode=-403`（jm-comic 的 README 实测记录）。
+   *      ⇒ 报错时要让调用方看出来"是配额还是网络"，所以下面把 retcode 原样带进错误信息；
+   *   ② **发文件不进聊天记录**（它是"文件区"的动作），所以留档文本由**调用方**给
+   *      （`sender.js` 的 `sendFile` 用 `[文件:名字]`）。
+   */
+  async sendFile(kind, id, filePath, { name = '' } = {}) {
+    const p = String(filePath ?? '').trim();
+    if (!p) throw new Error('文件路径为空');
+    const fileName = String(name ?? '').trim() || path.basename(p);
+    const action = kind === 'private' ? 'upload_private_file' : 'upload_group_file';
+    const params = kind === 'private'
+      ? { user_id: Number(id), file: p, name: fileName }
+      : { group_id: Number(id), file: p, name: fileName };
+    const timeoutMs = fileSendTimeoutMs();
+    try {
+      return await this.call(action, params, timeoutMs);
+    } catch (error) {
+      if (isTimeoutError(error)) {
+        const secs = Math.max(1, Math.round(timeoutMs / 1000));
+        throw new Error(`文件上传超时（等了 ${secs} 秒）：协议端没能在这个时限内把文件传完，`
+          + '**这次很可能没发出去**。文件越大越慢，可以在「设置 → 发送保护 → 发文件超时」里调大这个时限。');
+      }
+      const msg = String(error?.message ?? error);
+      // −403 在 SnowLuma 上是"群文件配额满"，与网络故障长得完全不一样 —— 直接翻译成人话，
+      // 否则调用方只会看到一句 `retcode=-403`，然后去查网络（方向完全错）。
+      if (/-403\b|retcode=-403/.test(msg)) {
+        throw new Error(`发文件被拒（群文件配额可能已经满了，QQ 群文件上限 10GB）：${msg}`
+          + '　换个群/私聊发，或者先清理群文件。');
+      }
+      throw error;
+    }
   }
 
   async sendPoke(kind, id, targetUserId) {

@@ -62,6 +62,8 @@ const TOOL_META = {
   read_forward:        { name: '看合并转发', cat: '查看', icon: '📨' },
   search_images:       { name: '找图',       cat: '联网', icon: '🔎' },
   send_image:          { name: '发图片',     cat: '发言', icon: '🖼️' },
+  // 🆕 2026-10-21（第五十一对话 · 交接 §3-174 需求②）：发文件（群文件/离线文件）
+  send_file:           { name: '发文件',     cat: '发言', icon: '📎' },
   save_core_memory:    { name: '存核心记忆', cat: '记忆', icon: '📸' },
   list_core_memories:  { name: '列核心记忆', cat: '记忆', icon: '🗂️' },
   read_core_memory:    { name: '读核心记忆', cat: '记忆', icon: '📖' },

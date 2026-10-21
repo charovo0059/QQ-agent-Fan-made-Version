@@ -37,6 +37,11 @@ import { compressImage } from './image-compress.js';
 // 技能工具（带 skillId）的可用性统一问 getToolAvailability()。
 import { registerTool, listTools, getToolAvailability } from './tool-registry.js';
 import { appendProposal, listProposals, PROPOSAL_KINDS } from './proposals.js';
+// 🆕 2026-10-21（第五十一对话 · 交接 §3-174 需求②）：`send_file` 的目录白名单要用
+//   `jmDownloadRoot()` / `jmZipRoot()` 判"这个路径是不是我们自己造的"。
+//   ⚠️ 只取这两个纯路径函数，**不 import `startDownload` 那套** —— 工具层不该顺手把
+//      下载编排也拉进来（循环依赖的风险，而且会让"发文件"这条路径依赖上 jmcomic）。
+import { jmDownloadRoot, jmZipRoot, jmDownloadConf } from './jm-download.js';
 
 /**
  * 提案状态 → 给她看的中文（🆕 2026-09-21 第十对话，配合 get_my_proposals）。
@@ -790,6 +795,13 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true } = {}) {
     // 🆕 2026-09-25：关键词图搜与发图**跟"搜图"总开关一起走**（同一个 imageSearch.enabled）——
     //    它们同属"给不给图片能力"这一件事；关掉就两个工具都不给。
     if (!imageSearchEnabled && (d.name === 'search_images' || d.name === 'send_image')) return false;
+    // 🆕 2026-10-21（第五十一对话 · 交接 §3-174）：`send_file` 跟**本子下载**同一个开关。
+    //   为什么绑在一起：它的目录白名单**只认** `<数据目录>/downloads/`（见工具里那段注释），
+    //   而那个目录只有 `jm-download__download` 会往里写 ⇒ 下载关着时它一个文件也发不出去，
+    //   留在工具列表里只是白占 token、还会让她去试一个注定失败的调用。
+    //   ⚠️ 判定写 `!== true`：`jmDownload.enabled` 的默认方向是**关**（与上面两个
+    //      `!== false` 的默认开开关**有意相反**，别改错方向）。
+    if (d.name === 'send_file' && cfg?.jmDownload?.enabled !== true) return false;
     // ② 技能注册的工具（带 skillId 的那批，如 doujin-lookup__lookup）：走**统一可用性口径** ——
     //    Skill 开关 / requires 能力 / 分类开关 / 单工具 overrides / vision / search / tool.guard
     //    全在 getToolAvailability() 里判，这里不再自己拼条件。
@@ -1940,6 +1952,84 @@ export function buildToolDefs() {
               + (pidInfo
                 ? `（pixiv 作品 ${pidInfo.pid} 的第 ${pidInfo.page}/${pidInfo.pageCount} 页）`
                 : '')
+          });
+        } catch (error) {
+          return err(error?.message ?? error);
+        }
+      }
+    },
+    {
+      // 🆕 2026-10-21（第五十一对话 · 交接 §3-174 需求②）：发**文件**（群文件 / 离线文件）。
+      //
+      // 🔴 安全边界**照抄 send_image 那套思路**，但判据不一样 —— 这里不判"她见过没有"，
+      //   而是判"**这个文件是不是我们自己造的**"：只允许发 `<数据目录>/downloads/` 下面的东西
+      //   （JM 下载的图、打好的 zip）。
+      //   为什么必须这么严（这不是洁癖，是真实的洞）：模型如果能把任意路径塞进来，它就能
+      //   把 `%LOCALAPPDATA%\QQ Agent\data\config.json` 发到群里 —— 那里面**存着 API Key 与
+      //   p 站 cookie**。发图那条路没这个风险（图片链接它编不出来也没用），发文件有。
+      //   ⇒ 白名单是**目录**级的，且用 realpath 解掉 `..` 与符号链接（`plugin-loader.js` 同一做法）。
+      name: 'send_file',
+      description: '发一个**文件**给对方（群里进群文件区，私聊走离线文件）。'
+        + '⚠️ 只能发 `jm-download__download` 下载回来的东西（`downloads/` 目录里的图或打包好的 zip）—— '
+        + '其它任何路径都会被拒绝，这是代码层边界，改不了。'
+        + '发文件**不占**消息位置、也不会进聊天记录，所以想说的那句话要用 send_message 单独发。'
+        + '⚠️ 大文件上传慢（几十 MB 可能要一两分钟），超时会被如实报错，不会静默失败。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '要发的文件在本机的**绝对路径**（工具会回给你的那个路径，逐字照抄）' },
+          name: { type: 'string', description: '可选：对方看到的名字（不给就用文件名）' },
+          note: { type: 'string', description: '可选：一句话说明这是啥（只写进你自己的记录，方便下次知道发过什么）' }
+        },
+        required: ['path']
+      },
+      async execute(ctx, args) {
+        const raw = String(args.path ?? '').trim();
+        if (!raw) return err('要发哪个文件？`path` 不能为空。');
+        // ① 目录白名单：解掉 `..` / 符号链接之后再判包含关系。
+        //   ⚠️ realpath 对**不存在**的路径会抛 ⇒ 先 existsSync 一次，把"文件不在"与"越界"
+        //      分成两句人话报出去（否则模型只知道"失败了"，会一直重试同一个路径）。
+        let real = '';
+        try {
+          if (!fs.existsSync(raw)) return err(`这个文件不存在：${raw}`);
+          real = fs.realpathSync(raw);
+        } catch (error) {
+          return err(`这个路径没法解析（可能权限不够或是个坏链接）：${error?.message ?? error}`);
+        }
+        let st = null;
+        try { st = fs.statSync(real); } catch { /* 下面统一报 */ }
+        if (!st || !st.isFile()) return err(`这个路径不是一个普通文件：${raw}`);
+        const roots = [jmDownloadRoot(), jmZipRoot()].map((d) => {
+          try { return fs.realpathSync(d); } catch { return path.resolve(d); }
+        });
+        const inside = roots.some((root) => real === root || real.startsWith(root + path.sep));
+        if (!inside) {
+          return err('只能发本程序自己下载/打包出来的文件（在 `downloads` 目录里），这个路径不在允许范围内，已拒绝。'
+            + '要发本子请先用 jm-download__download 下载，它会给你一个可以直接用的路径。');
+        }
+        // ② 单次运行的发文件个数上限（与发图同一个思路，只是独立计数）。
+        //   ⚠️ 默认 0 = 不限；配了才拦。计数挂 ctx（只属于本次运行）。
+        //   走 `jmDownloadConf()` 而不是直接读 getConfig()：那里已经把非数字/超范围的值
+        //   收敛过一遍（与 UI 上的 min/max 同一口径），免得"界面填 0.5 个"这种怪值漏进来。
+        const cap = Math.max(0, Number(jmDownloadConf().sendMaxPerRun) || 0);
+        if (cap > 0) {
+          const sent = Number(ctx.__fileSentCount) || 0;
+          if (sent >= cap) return err(`本次运行已经发过 ${sent} 个文件，达到上限（${cap} 个）。不要再发了。`);
+          ctx.__fileSentCount = sent + 1;
+        }
+        try {
+          const r = await ctx.sender.sendFile(ctx.chatKey, real, {
+            name: String(args.name ?? '').trim() || path.basename(real),
+            note: String(args.note ?? '').trim()
+          });
+          ctx.session.sent.push({ type: 'file', text: `[文件:${r?.name ?? ''}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
+          ctx.emit?.('session-update', ctx.session.id);
+          return ok({
+            sent: true,
+            messageId: r?.message_id ?? null,
+            name: r?.name ?? '',
+            size: fmtBytes(r?.bytes ?? st.size),
+            note: `文件发出去了（${r?.name ?? ''} ${fmtBytes(r?.bytes ?? st.size)}）。`
           });
         } catch (error) {
           return err(error?.message ?? error);

@@ -1,0 +1,80 @@
+{
+  "id": "jm-download",
+  "name": "本子下载",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "把一本 JM（禁漫）本子整本下到本地，打成 zip 发出去。",
+  "author": "QQ Agent",
+  "entry": "index.js",
+  "enabledByDefault": true,
+  "_note_enabledByDefault": "真正的开关是 config.jmDownload.enabled（默认关），由 index.js 的 available() 判定。这里写 true 是为了绕过上游 isEnabled 短路 —— 理由与 skills/doujin-lookup/skill.json 完全相同，见那边的 _note。",
+  "permissions": [],
+  "capabilities": [],
+  "requires": [],
+  "_note_configSchema": "本扩展的值**不落在** config.skills['jm-download']，而是 config.jmDownload。后端 src/app.js 的 CONFIG_BY_PATH / ENABLED_BY_PATH 做了声明式覆盖，读写都走真实的那个键。",
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用本子下载",
+      "default": false,
+      "description": "打开后她才有 jm-download__download 工具。⚠️ 下载离不开搜索那套 Python 子进程 ⇒ 这里开着、但「本子查询」关着时，下载照样用不了（会如实报原因）。"
+    },
+    "maxImages": {
+      "type": "number",
+      "label": "一次最多下多少页",
+      "default": 300,
+      "description": "防止误点一本几百页的巨物把磁盘和时间吃掉。1~2000。"
+    },
+    "maxZipMb": {
+      "type": "number",
+      "label": "单个压缩包上限（MB）",
+      "default": 64,
+      "description": "超过就**明确拒绝**，不会静默截断成半个包。1~500。"
+    },
+    "imageThreads": {
+      "type": "number",
+      "label": "图片下载并发",
+      "default": 8,
+      "description": "别超过 16，会被站点限速甚至封。1~16。"
+    },
+    "allowInGroup": {
+      "type": "boolean",
+      "label": "群聊里也能用",
+      "default": false,
+      "description": "关掉（默认）则只在私聊可用 —— 群里丢一个几十 MB 的本子包容易被盯。"
+    },
+    "keepImages": {
+      "type": "boolean",
+      "label": "发完之后把图留着",
+      "default": false,
+      "description": "关掉（默认）= 发完即删；打开 = 留在数据目录里给你自己看，6 小时后由清扫收走。"
+    },
+    "maxWaitSeconds": {
+      "type": "number",
+      "label": "单次调用最多等几秒",
+      "default": 90,
+      "description": "工具层硬上限是 120 秒。超时不是失败 —— 她会拿到一个任务号，用 jm-download__download_status 再查。5~110。"
+    },
+    "sendMaxPerRun": {
+      "type": "number",
+      "label": "单次运行最多发几个文件（0 = 不限）",
+      "default": 0,
+      "description": "与「单次运行最多发几张图」各算各的。0 = 不限。"
+    }
+  },
+  "tools": [
+    {
+      "id": "download",
+      "name": "下载本子",
+      "category": "media",
+      "icon": "📥"
+    },
+    {
+      "id": "download_status",
+      "name": "查下载进度",
+      "category": "media",
+      "icon": "⏳"
+    }
+  ]
+}

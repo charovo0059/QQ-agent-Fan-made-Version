@@ -2655,7 +2655,12 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       //   ⇒ 用下面的 ENABLED_BY_PATH 声明式地覆盖，读和写都走真实的那个键，
       //     避免出现"两套口径"或"写一个不起作用的影子开关"。
       const ENABLED_BY_PATH = {
-        'doujin-lookup': { path: ['doujinLookup', 'enabled'], label: 'config.doujinLookup.enabled' }
+        'doujin-lookup': { path: ['doujinLookup', 'enabled'], label: 'config.doujinLookup.enabled' },
+        // 🆕 2026-10-21（第五十一对话 · 交接 §3-174 需求①）：本子下载同理 ——
+        //   它也是"enabledByDefault: true 绕过 isEnabled 短路 + 自己在 available() 里判"，
+        //   真实开关是 `config.jmDownload.enabled`。不登记的话，技能页上那个开关会写进
+        //   `config.skills['jm-download'].enabled` 这个**谁都不读的影子键**（最难查的静默失效）。
+        'jm-download': { path: ['jmDownload', 'enabled'], label: 'config.jmDownload.enabled' }
       };
       // 整份配置的**真实归属键**（与上面同一取向，只是粒度大一点）。
       // 🆕 2026-09-23（第十二对话）：本子查询的参数（返回几本 / 超时 / 群里允许 / 工具目录 /
@@ -2665,7 +2670,10 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       //    字段本身由 skills/doujin-lookup/skill.json 的 configSchema 声明，
       //    这里只声明"值放在哪"，读（settingsOf 的替代）和写都按它走。
       const CONFIG_BY_PATH = {
-        'doujin-lookup': { path: ['doujinLookup'], label: 'config.doujinLookup' }
+        'doujin-lookup': { path: ['doujinLookup'], label: 'config.doujinLookup' },
+        // 🆕 2026-10-21（第五十一对话）：本子下载的参数落在 `config.jmDownload`
+        //   （与上面同一条理由：不覆盖的话用户在技能页改的是影子键，看着成功实际没人读）。
+        'jm-download': { path: ['jmDownload'], label: 'config.jmDownload' }
       };
       /** 按 CONFIG_BY_PATH 覆盖后的设置视图（密文脱敏规则与 manager.settingsView 保持一致）。 */
       const settingsOverrideOf = (id, st) => {
