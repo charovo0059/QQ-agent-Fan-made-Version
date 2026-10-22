@@ -167,6 +167,25 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
     };
     // 人话结论：把 ECONNREFUSED / 401 这类术语翻成"下一步该做什么"
     const slErrorText = String(s.onebot?.error || '');
+    // ── 🆕 2026-10-22（第五十二对话 · 用户拍板）：**身份不对要红得看得见** ──────
+    // 为什么必须放这里：上错号的症状**从界面上完全看不出来** —— connected=true、
+    // 昵称显示得也对，只是那个号不是她的（实测那次她顶着用户的号跟用户的朋友聊了
+    // 23 条才被人工发现）。与端口预检同一个道理：把"它以为自己是谁 / 实际是谁"直接
+    // 写在能查到的地方，而不是等人去翻日志。
+    // 三态：expected 空串 = 没开锚定（永不告警）；ok=false = 只读中。
+    const slIdentity = s.onebot?.identity || {};
+    const slIdentityOn = !!String(slIdentity.expected || '');
+    const slIdentityBad = slIdentityOn && slIdentity.ok === false;
+    // 告警条：只用普通字符串拼（**不**在注释/文案里用反引号 —— 本函数在模板串里，坑 186）。
+    const identityBarHtml = slIdentityBad
+      ? '<div class="safetybar"><span>🔴</span><span><b>身份不对，已进入只读</b>：现在连的是 QQ '
+        + esc(String(slIdentity.actual || '（没拿到）'))
+        + (s.onebot?.self?.nickname ? '（' + esc(s.onebot.self.nickname) + '）' : '')
+        + '，而她该用的是 QQ ' + esc(String(slIdentity.expected))
+        + '。这一轮她只能看不能出声（消息 / 文件 / 闪传都会被拦下来），读查询照常。'
+        + '<br />最常见原因：电脑上同时登着几个 QQ，SnowLuma 的 OneBot 端口（3000 / 3001）'
+        + '被<b>先登录的那个号</b>占走了。处置：退出多余的那个 QQ（或在 SnowLuma 里给多余账号关掉 OneBot 网络），再重启应用。</span></div>'
+      : '';
     let slConclusion = '';
     if (!slGateway) slConclusion = 'SnowLuma 网关还没起来 —— 点第 1 步的「启动」。';
     else if (/401/.test(slErrorText)) slConclusion = '网关在跑，但还没有注入的 QQ 账号 —— 完成第 2、3 步即可。';
@@ -226,6 +245,7 @@ async function loadSnowlumaPage({ quiet = false } = {}) {
           },
         ])}
         ${initialPwdHtml}
+        ${identityBarHtml}
         ${slConclusion ? `<div class="safetybar"><span>⚠️</span><span>连接失败：${esc(slConclusion)}
           <details style="display:inline-block"><summary style="cursor:pointer;display:inline">查看原始报错</summary>
           <div class="muted" style="font-family:var(--mono);font-size:11px;margin-top:4px">${esc(slErrorText || '（无）')}</div></details></span></div>` : ''}

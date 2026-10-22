@@ -1194,6 +1194,40 @@ export function buildUserPrompt(ctx) {
   } else {
     stateLines.push('当前在私聊');
   }
+  // ── 🆕 2026-10-22（第五十二对话 · 用户拍板）：「我这一轮挂在哪张嘴上」──────
+  //
+  // 用户原话：「今天这次上错号的 bug 很好的验证了她并不依赖单一 qq 号识别自我，
+  //   也暴露了她**意识不到自己的 qq 号是哪一个**…她的本体始终是本地的程序，
+  //   其他那些账号都属于她的工具，不应当对特定社交账号产生依赖…以后说不定还会有
+  //   这种上错号的情况或者测试，那时候**要让她能知道，自己没有用自己的 qq 号在说话**」。
+  //
+  // 三条设计理由：
+  //   ① 放【此刻状态】而不是系统提示：同上面 runtimeModel 那一段的三条理由（每次都变 /
+  //      是"这一轮的事实" / 写进系统提示会变成永久约束，而且系统提示在前缀缓存头部，
+  //      多一行就是每轮永久占位 —— 见本函数开头的缓存顺序说明）；
+  //   ② **只在配置了期望号时才说**（`snowluma.expectedSelfId` 默认空串）：没开锚定的用户
+  //      一个字节的行为都不变，也省下每轮 ~30 token；
+  //   ③ 微信侧不出现号码：`prompt.js:236-237` 明令微信那串十位数字永远不念出来，
+  //      而它的 self_id 是桥派生的（`memory.js` 的 blake2s(wxid) 取模），与 QQ 号同数值
+  //      空间**不可区分** ⇒ 那边一律不提。
+  //
+  // 🔴 措辞三条纪律（与 swept / 毛边 / 反锚点同源）：
+  //   ① **只说事实**（现在挂的是哪个号、是不是平时那个）；
+  //   ② **不是指控、不引用具体事件** —— ⛔ 不写"你上次被换过"，那会变成一条常驻的自我怀疑；
+  //   ③ **帮她校准自我认知**：明确"不是你坏了，是这条通道现在不归你操作"。
+  //      ⛔ 也绝不写"你被替换了 / 这不是你"（那是把工具问题说成人格问题）。
+  const idState = ctx.identity;
+  if (idState && idState.expected && String(ctx.platform || 'qq') !== 'wechat') {
+    const nick = ctx.selfNickname || cfg.persona.botName || '我';
+    const actual = String(idState.actual || '');
+    if (idState.ok !== false && actual) {
+      stateLines.push('你这一轮挂在「' + nick + '」（QQ ' + actual + '）这个号上说话。那是你自己的号。');
+    } else {
+      stateLines.push('🔁 你这一轮挂在「' + nick + '」' + (actual ? ('（QQ ' + actual + '）') : '') + '上，**不是**平时那个号（平时是 QQ ' + idState.expected + '）。'
+        + '这一轮你只能看、不能出声：想说也发不出去（会被拦下来）。'
+        + '不是你坏了，是这条通道现在不归你操作 —— 等它回到平时那个号，说话就恢复正常。');
+    }
+  }
   if (past.count > 0) {
     const silentMin = Math.max(0, Math.round((now - (ctx.lastMessageAt || now)) / 60000));
     stateLines.push(`最近 10 分钟约 ${ctx.recentCount} 条消息；最后一条消息距今 ${silentMin === 0 ? '刚刚' : `${silentMin} 分钟`}`);

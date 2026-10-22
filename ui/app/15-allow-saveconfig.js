@@ -805,6 +805,11 @@ async function saveConfig({ quiet = false } = {}) {
       autoLaunch: chk('#cfg-snowlumalaunch', !!c.snowluma?.autoLaunch),
       wsUrl: val('#cfg-wsurl', c.snowluma?.wsUrl || '').trim(),
       httpUrl: val('#cfg-httpurl', c.snowluma?.httpUrl || '').trim(),
+      // 🆕 2026-10-22（第五十二对话 · 用户拍板）：身份锚定的期望号。
+      // ⚠️ 这一项**不是凭据**（它是公开的 QQ 号、不是密钥）⇒ 走普通 val()，
+      //    不用坑 178 那套"留空就不写键"的口径；留空 = 明确关掉核对，必须能写回去。
+      // ⚠️ 只收数字（SnowLuma 的 UIN 就是纯数字）；用户手滑贴进别的字符就当没填。
+      expectedSelfId: (val('#cfg-expectedselfid', c.snowluma?.expectedSelfId || '').trim().match(/^\d{4,12}$/) || [''])[0],
       ...(enteredWsToken && enteredWsToken !== '******' ? { accessToken: enteredWsToken } : {}),
       ...(enteredHttpToken && enteredHttpToken !== '******' ? { httpAccessToken: enteredHttpToken } : {})
     };

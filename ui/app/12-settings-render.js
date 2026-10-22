@@ -1923,6 +1923,9 @@ function renderOnebotSection(c) {
       <div class="field"><label>WebSocket 令牌</label><input type="password" id="cfg-obtoken" value="${esc(c.snowluma?.hasAccessToken ? '******' : '')}" placeholder="留空保持不变" autocomplete="new-password" /></div>
       <div class="field"><label>HTTP 令牌（与 WS 不同时填；SnowLuma 默认分开）</label><input type="password" id="cfg-obhttptoken" value="${esc(c.snowluma?.hasHttpAccessToken ? '******' : '')}" placeholder="留空保持不变" autocomplete="new-password" /></div>
     </div>
+    <div class="field"><label>我应该是哪个 QQ 号（留空 = 不核对；填了就只在自己这个号上说话）</label>
+      <input type="text" id="cfg-expectedselfid" value="${esc(c.snowluma.expectedSelfId || '')}" placeholder="例如 10001，留空 = 不核对" />
+      <div class="hint">电脑上同时登着几个 QQ 时，SnowLuma 的 OneBot 端口会被**先登录的那个号**占走，机器人就可能顶着别人的号说话（2026-10-22 真发生过）。填上她自己的号之后：连上的号不对 ⇒ 只读不发（消息/文件/闪传都拦住，读查询照常），界面会红字告警，聊天里她也会看到「这一轮只能看不能出声」。留空则完全不核对（老行为）。</div></div>
     <div class="hint">改完 OneBot 地址需要重启应用生效；模型/人设/白名单即时生效。</div>`;
 }
 

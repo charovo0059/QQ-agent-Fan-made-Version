@@ -761,6 +761,15 @@ export class Orchestrator {
       // 平台一并传下去：记忆互通要在提示词里标出"这条来自哪个平台"（QQ↔微信）。
       // 不传的话 formatForPrompt 会自己去问 memory.platformOf（有缓存），只是多一次查找。
       platform,
+      // 🆕 2026-10-22（第五十二对话 · 用户拍板）：**这一轮挂在哪张嘴上**。
+      // 传的是 onebot 的身份核对结果（`snowluma.expectedSelfId` 没配时 expected 为空 ⇒
+      // prompt 那边整行都不出现，零行为变化）。
+      // ⚠️ 只传事实（期望号/实际号/一致与否），措辞归 prompt.js —— 与 runtimeModel 同一条分工。
+      identity: this.onebot?.identity ? {
+        expected: this.onebot.identity.expectedId || '',
+        actual: this.onebot.identity.actualId || '',
+        ok: this.onebot.identity.ok !== false
+      } : null,
       runtimeModel,
       triggerEntries,
       store: this.store,

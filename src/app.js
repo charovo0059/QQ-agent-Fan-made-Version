@@ -613,6 +613,10 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     httpUrl: cfg.snowluma?.httpUrl,
     accessToken: cfg.snowluma?.accessToken,
     httpToken: cfg.snowluma?.httpAccessToken || cfg.snowluma?.accessToken,
+    // 🆕 2026-10-22（第五十二对话 · 用户拍板）：**QQ 这条通道要身份锚定**。
+    // 只影响"配置了 snowluma.expectedSelfId"的用户（默认空串 = 不锚定、零行为变化）；
+    // 配了但连上的号不对 ⇒ 写动作被拒（onebot.js 的 call() 闸）+ 提示词里告知"这一轮只读"。
+    enforceIdentity: true,
     onEvent: (event) => handleOneBotEvent(event).catch((error) => log('[ingest] 处理事件出错:', error?.message ?? error))
   });
 
@@ -1989,6 +1993,17 @@ export function createApp({ log = console.log, resume = [] } = {}) {
             everConnected: onebot.everConnected,
             error: onebot.lastConnectError,
             self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null,
+            // 🆕 2026-10-22（第五十二对话 · 用户拍板）：**身份核对的结果要能被查到**。
+            // 为什么必须暴露：上错号的症状是"机器人在说话，但发的是别人的号"——
+            //   从界面上**完全看不出来**（connected=true、昵称也对，只是不对的那个号）。
+            //   与端口预检同一个道理：把"它以为自己是谁 / 实际是谁"写在能查到的地方。
+            // 三态：expected 空串 = 没开锚定（ok 恒 true）；ok=false = 只读中。
+            identity: {
+              expected: onebot.identity?.expectedId || '',
+              actual: onebot.identity?.actualId || '',
+              ok: onebot.identityOk !== false,
+              checkedAt: onebot.identity?.at || 0
+            },
             // 🆕 2026-09-29（第三十对话）：QQ 名字表的状态。为什么放进 /api/status ——
             //   名字表是**内存态**，它的失败症状是"界面又只剩数字 id"，而那种症状
             //   光看界面**分不出**"OneBot 没连上"与"连上了但没同步成功"。

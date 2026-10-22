@@ -23,6 +23,29 @@ const RECONNECT_MAX_MS = 30000;
 export const TEXT_TIMEOUT_MS = 15000;
 
 /**
+ * **会往聊天里写东西**的 OneBot 动作（`call()` 的 action 名）。
+ *
+ * 🆕 2026-10-22（第五十二对话 · 用户拍板）：身份锚定那道闸只拦这些 ——
+ *   其余全是只读查询（get_msg / get_login_info / get_group_* / get_friend_list…），
+ *   **上错号时照样要能读**，否则她连"现在是什么情况"都看不到（更要紧的是：
+ *   她得能在提示词里被告知"这一轮只读"，而不是整轮不醒、什么都不知道）。
+ *
+ * ⚠️ 新增任何写动作（往聊天里塞东西的）都必须登记进来，否则身份闸会漏。
+ *   判定口径：**动作在那边产生的效果会被别人看见**（消息、文件、闪传、戳一戳）。
+ */
+export const WRITE_ACTIONS = new Set([
+  'send_private_msg',
+  'send_group_msg',
+  'upload_private_file',
+  'upload_group_file',
+  'create_flash_task',
+  'send_flash_msg',
+  'send_poke',
+  'friend_poke',
+  'group_poke'
+]);
+
+/**
  * 发**图片**那一档的超时（毫秒）—— 从 `config.send.imageTimeoutMs` 现读。
  *
  * 为什么在这里读、而不是让 `sender.js` 传进来：
@@ -146,7 +169,16 @@ export function judgeSilence({ heartbeatCount, heartbeatGapMs, lastEventAtMs, no
 }
 
 export class OneBotClient {
-  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
+  /**
+   * @param {object} opts
+   * @param {boolean} [opts.enforceIdentity] 是否执行**身份锚定**（默认 false = 零行为变化）。
+   *   🆕 2026-10-22（第五十二对话 · 用户拍板）：只有 **QQ 那条通道**打开它 ——
+   *   期望号来自 `config.snowluma.expectedSelfId`（默认空串 = 不锚定）。
+   *   ⚠️ 微信那条通道**故意不开**：微信的 self_id 是桥派生的数字（`memory.js` 里
+   *   `blake2s(wxid) % (2^31-1) + 1`），与 QQ 号同数值空间、根本不可区分
+   *   （`prompt.js:236-237` 也明令那串数字永远不念出来）⇒ 那边只能判"有没有 selfInfo"。
+   */
+  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent, enforceIdentity = false }) {
     this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
     this.httpUrl = String(httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     this.accessToken = String(accessToken || '');
@@ -158,6 +190,22 @@ export class OneBotClient {
     this.everConnected = false;
     this.lastConnectError = '';
     this.selfInfo = null;      // { user_id, nickname }
+    // ── 身份锚定（2026-10-22 第五十二对话 · 用户拍板）────────────────────────
+    // 为什么要有它：SnowLuma 一个进程同时服务多个已登录账号，**每个账号各自起一套
+    // OneBot 网络栈去抢同一对端口**（http-default:3000 / ws-default:3001）。谁先起谁赢，
+    // 输的那个账号直接 `EADDRINUSE` 降级成"没有网络"。实测后果（2026-10-22 05:12）：
+    // 电脑上同时登了用户号与 DeepSleep 号，重启用的是**用户号**的端口 ⇒
+    // 机器人顶着用户的号跟用户的朋友聊了 23 条（存档 private_541388979.json）。
+    // ⇒ 应用侧必须**自己知道"我该是哪个号"**，连上后发现不是就不许说话。
+    //
+    // 三条设计纪律：
+    //   ① 默认 `enforceIdentity = false` + 期望号默认空串 ⇒ **零行为变化**
+    //      （老配置、微信通道、判据里的假客户端全都不受影响）；
+    //   ② 只拦 WRITE_ACTIONS，**读动作一律放行**（她要能看见"现在是什么情况"）；
+    //   ③ ⛔ 绝不在默认值里写任何真实 QQ 号（`config.js:342-343` 的纪律 +
+    //      `test-真实标识符不外泄.mjs` 会拦）。
+    this.enforceIdentity = enforceIdentity === true;
+    this.identity = { expectedId: '', actualId: '', ok: true, at: 0 };
     this.#closedByUs = false;
     this.statusListeners = new Set();
     this.reconnectDelayMs = RECONNECT_MIN_MS;   // 退避当前档位（连上一次就复位）
@@ -319,6 +367,14 @@ export class OneBotClient {
       } catch (error) {
         console.error('[onebot] 获取登录信息失败:', error?.message ?? error);
       }
+      // 🆕 2026-10-22（第五十二对话 · 用户拍板）：连上之后**立刻核对身份**。
+      // 为什么必须在这一刻：`#setStatus(true)` 已经发出去了（前端/编排层都以为"连上了"），
+      // 而事件马上就会开始流进来；核对放在这里 ⇒ 第一条事件进来之前闸就已经生效。
+      // ⚠️ 无论 `enforceIdentity` 开没开都跑一次（它自己会判"期望号为空就跑通"），
+      //   这样 `/api/status` 永远能报出"现在实际挂在哪个号上"。
+      try { this.checkIdentity(); } catch (error) {
+        console.error('[identity] 核对出错:', error?.message ?? error);
+      }
     });
     socket.on('message', (data) => {
       if (!isCurrent(socket)) return;
@@ -366,8 +422,32 @@ export class OneBotClient {
     this.#setStatus(false);
   }
 
-  /** OneBot HTTP API（发送与查询都走这里）。 */
+  /**
+   * OneBot HTTP API（发送与查询都走这里）。
+   *
+   * 🆕 2026-10-22（第五十二对话 · 用户拍板）：**写动作在发出之前先过身份闸**。
+   *
+   * 为什么闸装在这里（全项目唯一的写收口点）：`sendSegments` / `sendFile` /
+   *   `sendFlashFile` / `sendPoke` 全部最终走到 `call()`，而 `sender.js` 与 `tools.js`
+   *   里**没有**任何直连 `onebot.call` 的写动作（只有 getMsg / getGroupFileUrl 这些读）。
+   *   ⇒ 一处拦住 = 所有往聊天里写东西的路径都拦住（含将来新加的，只要动作名登记进
+   *   `WRITE_ACTIONS`）。
+   *
+   * ⚠️ 只拦 `WRITE_ACTIONS`；**读动作一律放行** —— 上错号时她还得能查消息/群文件/
+   *   自己是谁，否则连"现在什么情况"都看不见，只能整轮沉默装死。
+   * ⚠️ 报错文案是给**模型**看的（它会读到工具返回），所以要说清"不是功能坏了"
+   *   和"等回到自己的号再发"，而不是丢一串英文。
+   */
   async call(action, params = {}, timeoutMs = TEXT_TIMEOUT_MS) {
+    if (this.enforceIdentity && WRITE_ACTIONS.has(String(action)) && !this.identityOk) {
+      const id = this.identity || {};
+      throw new Error(
+        `身份不匹配，已拒绝发送（${action}）。现在连的是 QQ ${id.actualId || '（未知）'}`
+        + `，不是该用的 QQ ${id.expectedId || '（未配置）'}。`
+        + '这不是功能坏了，是为了不让机器人顶着别人的号说话；'
+        + '等它回到自己的号上，发送会自动恢复正常。'
+      );
+    }
     const res = await fetch(`${this.httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -396,6 +476,47 @@ export class OneBotClient {
 
   get selfNickname() {
     return this.selfInfo?.nickname ? String(this.selfInfo.nickname) : '';
+  }
+
+  /**
+   * 校验"我连上的这个号，是不是我该用的那个号"（2026-10-22 第五十二对话 · 用户拍板）。
+   *
+   * 调用点只有一个：`socket.on('open')` 里 `get_login_info` **成功之后**
+   * （那时 selfInfo 已就位、事件还没开始流）。
+   *
+   * 语义（三态，别把"没配期望号"当成"不匹配"）：
+   *   - 期望号是空串（默认）⇒ `ok = true`，一行日志都不打（老配置零噪音）；
+   *   - 期望号非空且**一致** ⇒ `ok = true`，记一行正常日志（"我挂在自己的号上"）；
+   *   - 期望号非空且**不一致** ⇒ `ok = false`，红字告警 + 只读（见 `call()` 的闸）。
+   *
+   * ⚠️ 拿不到 selfInfo（get_login_info 失败）时按 `ok = false` 处理但**不设 actualId**：
+   *   连自己是谁都不知道，就不该以"我"的身份说话。这条比"连不上"更该保守。
+   */
+  checkIdentity() {
+    let expected = '';
+    try { expected = String(getConfig()?.snowluma?.expectedSelfId ?? '').trim(); } catch { expected = ''; }
+    const actual = this.selfId;
+    const at = Date.now();
+    if (!expected) {
+      // 没配期望号 = 不锚定。这里**故意**不打印"未配置"：老用户每次启动都被教育一遍很烦。
+      this.identity = { expectedId: '', actualId: actual, ok: true, at };
+      return this.identity;
+    }
+    const ok = !!actual && actual === expected;
+    this.identity = { expectedId: expected, actualId: actual, ok, at };
+    if (ok) {
+      console.log(`[identity] 身份核对通过（QQ ${actual} / ${this.selfNickname || '未知名'}）`);
+    } else {
+      // 🔴 措辞只讲事实，⛔ 不追究"谁干的"、⛔ 不写"你被换掉了"（那个文案在提示词侧，
+      //    见 prompt.js 里【此刻状态】那条；这一行是给维护者看的）。
+      console.error(`[identity] 🔴 身份不匹配，已进入只读：期望 QQ ${expected}，实际连上 QQ ${actual || '（连自己是谁都没拿到）'}（昵称 ${this.selfNickname || '无'}）。报告自己发的消息/文件都会被拒。最常见原因：SnowLuma 里同时登了多个号，OneBot 端口被另一个号抢去了。`);
+    }
+    return this.identity;
+  }
+
+  /** 身份核对是否通过（没配期望号时恒 true）。 */
+  get identityOk() {
+    return this.identity ? this.identity.ok !== false : true;
   }
 
   /**
