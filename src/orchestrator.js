@@ -829,7 +829,10 @@ export class Orchestrator {
     // 工具集按配置过滤（搜索开关 / 视觉 / 本子查询开关）—— 判定逻辑在 tools.js 里，便于单测
     // 🆕 2026-10-22 第五十二对话：多传一个 `kind` —— 种子只读清单的"群聊允许"闸必须在这里判，
     //    否则那个开关只能把工具留在列表里再拒调用（判据要的是"列表里就没有"）。
-    const toolDefs = gateToolDefs(this.toolDefs, cfg, { visionEnabled, kind });
+    // 🆕 2026-10-23 第五十四对话（提案 7467c225）：再多传一个 `platform` —— 微信侧根本没有的能力
+    //    （拍一拍 / 发文件 / 收表情进 QQ 表情库）要**从列表里拿掉**，而不是留着让她调到再说
+    //    "我做不到"。判定与 `platform` 的来源都在上面（第 700 行那段），这里只负责透传。
+    const toolDefs = gateToolDefs(this.toolDefs, cfg, { visionEnabled, kind, platform });
     const openAiTools = toOpenAiTools(toolDefs);
 
     const ctx = {
@@ -858,6 +861,13 @@ export class Orchestrator {
       usageByModelToday: (dayKey) => this.sessions.todayUsageByModel(dayKey),
       triggerEntries,                   // 提示词要用它排除重复（【过去状态】不该再带这几条）
       sameTurnContext,                  // 同一轮的上文（见 wake() 里的说明）
+      // 🆕 2026-10-23 第五十四对话（提案 7467c225）：工具**自己要知道在哪个平台**。
+      //   起因：`send_image` 在微信侧是能用的，但它前面那道"只允许发本轮见过的地址" +
+      //   "只允许公网 http(s)" 会把微信本地图片（`file://`）挡掉 —— 而工具层没法靠
+      //   `ctx.chatKey` 反查平台（那是 app.js 的 store 才知道的事，工具不该再查一遍）。
+      //   ⚠️ 与上面 `gateToolDefs(..., { platform })` 是**同一份判定**（都来自第 700 行那个
+      //   `platform` 常量），别在工具里另算一套 —— 本项目对"两个真相源"栽过跟头。
+      platform,
       emit: (type, payload) => this.emit(type, payload)
     };
 

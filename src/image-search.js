@@ -74,11 +74,102 @@ function proxyEndpointFor(host) {
   } catch { return null; }
 }
 
+// ── 分引擎计时与失败归类（2026-10-23 第五十四对话 · 提案 ce4188cf）────────────
+//  提案原话：「soutubot 搜图引擎一直报 aborted，单引擎失败不该拖死整条」「报错区分超时/连接失败/被中断并带引擎耗时」。
+//  改造前的问题：① 每个引擎**不留耗时**（全文件没有 duration/elapsed），用户问"哪个引擎慢"只能靠猜；
+//             ② 失败只 push 一句字符串拼进大括号，模型分不清是**超时**、**连不上**还是**被掐断**；
+//             ③ 一个引擎耗掉整段预算，后面的引擎根本没机会起跑（"拖死整条"）。
+//  ⇒ 现在每个引擎都留一条 trace：{key,label,ok,ms,kind}，失败也照留（ok:false），
+//     成功也一样；上层（工具层）把它原样交给模型，用户能直接看到"谁慢/谁错/花了几秒"。
+
+/** 毫秒 → 人话（<1s 报毫秒，其余报一位小数秒）。 */
+export function fmtMs(ms) {
+  const n = Math.max(0, Number(ms) || 0);
+  return n < 1000 ? `${Math.round(n)} 毫秒` : `${(n / 1000).toFixed(1)} 秒`;
+}
+
+/**
+ * 失败归类（给人看的三个大类 + 兜底）：
+ *   timeout   —— 到点被我们自己掐断（DOMException TimeoutError/AbortError，code 是数字 23/20）
+ *   connect   —— 根本没连上（DNS / 拒连 / 重置 / 证书 / 裸 fetch failed）
+ *   aborted   —— 外部打断（调用方 abort、页面导航被打断），既不是我们超时也不是对面拒绝
+ *   other     —— 引擎自己抛的业务错（额度用完 / 结构变了 / 触发了人机验证…）
+ * ⚠️ 判 timeout 必须看 **name**：DOMException 的 code 是数字，TIMEOUT_RE 对它永远失配（ce4188cf 的根因）。
+ */
+const CONNECT_RE = /fetch\s+failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|CERT_|ERR_TLS|网络|连接|解析/i;
+/** ⚠️ 导出是给判据（'测试-现行/test-搜图分引擎计时.mjs'）用的，业务代码只在本文件内调用。 */
+export function classifyEngineError(err) {
+  const name = String(err?.name || err?.cause?.name || '');
+  const code = String(err?.cause?.code || err?.code || '');
+  const msg = String(err?.message || '');
+  if (name === 'TimeoutError') return 'timeout';
+  if (name === 'AbortError') return 'aborted';
+  if (/aborted|abort/i.test(msg) && /timeout/i.test(msg)) return 'timeout';
+  if (/aborted/i.test(msg) || /aborted/i.test(code)) return 'aborted';
+  if (CONNECT_RE.test(code) || CONNECT_RE.test(msg)) return 'connect';
+  return 'other';
+}
+
+/** 归类 → 中文标签（拼进失败汇总，让模型一眼分出"超时"和"连不上"）。 */
+const KIND_LABEL = {
+  timeout: '超时（到点被我们自己掐断）',
+  connect: '连接失败（根本没连上）',
+  aborted: '被中断',
+  other: '引擎报错'
+};
+export function kindText(kind) { return KIND_LABEL[kind] || KIND_LABEL.other; }
+
+/** 一条 trace 的短描述，例：「搜图 bot：超时 15.0 秒」（失败）或「iqdb：1.2 秒」（成功）。 */
+function traceLine(t) {
+  return t.ok ? `${t.label}：${fmtMs(t.ms)}` : `${t.label}：${kindText(t.kind)}，${fmtMs(t.ms)}`;
+}
+
+/**
+ * 给一次引擎调用**独立计时**并按超时切片把它掐掉。
+ *
+ * 🔴 为什么必须切片（提案 ce4188cf「单引擎失败不该拖死整条」）：
+ *   各引擎内部已有 AbortSignal.timeout(engineTimeoutMs)，但 soutubot 还会轮询子库
+ *   （6 × 2.5 秒）+ 重试 1 次 ⇒ 单个引擎最坏能吃掉 45 秒。auto 链的总预算只有 90 秒，
+ *   于是一个慢引擎就能让后面两个根本没机会起跑，用户看到的还是"自动搜图没找到结果"。
+ *   ⇒ 这里在**链这一层**再切一刀：每个引擎最多花 min(单引擎超时, 剩余预算)，
+ *     到点就记为超时、**继续跑下一个引擎**（不等它）。
+ *   ⚠️ 被切掉的那个请求不会立刻停（它自己的 AbortSignal 到点会收），但我们**不再等它** ——
+ *      "不等"才是这条提案要的效果；泄漏一个已定死超时的请求是可接受的代价。
+ */
+/** ⚠️ 同上，导出给判据用；业务代码只在 searchImageSource 里调用。 */
+export async function runEngineTimed(key, label, fn, timeoutMs) {
+  const started = Date.now();
+  let timer = null;
+  let timedOut = false;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      const e = new Error(`${label} 超过 ${fmtMs(timeoutMs)} 还没回来，先跳过它`);
+      e.name = 'TimeoutError';   // 让 classifyEngineError 认成 timeout
+      reject(e);
+    }, Math.max(1000, Number(timeoutMs) || 1000));
+  });
+  try {
+    const out = await Promise.race([Promise.resolve().then(fn), guard]);
+    return { ok: true, out, ms: Date.now() - started };
+  } catch (error) {
+    return { ok: false, error, ms: Date.now() - started, kind: timedOut ? 'timeout' : classifyEngineError(error) };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * 把引擎抛出来的失败补成人话（判据 'test-搜图失败分类.mjs' 钉的那句）。
  * ⚠️ 引擎自己**已经**给过人话的错（比如「额度用完了」）不要覆盖 —— 那些不是网络问题。
  */
-const NETWORKY_RE = /fetch\s+failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|CERT_|network|网络|超时|连接/i;
+// 🔴 2026-10-23（提案 ce4188cf 的可见症状修复）：这条正则原来**漏了 aborted**。
+//   `AbortSignal.timeout` 抛的 DOMException 文案是英文 "The operation was aborted" /
+//   "...aborted due to timeout" —— 既没有 'fetch failed'、也没有中文'超时'两个字
+//   ⇒ `humanizeEngineError` 判它"不是网络问题"，**原样抛给模型**
+//   ⇒ 用户看到的就是那句莫名其妙的 "aborted"（实测 soutubot 每次慢都这样）。
+//   ⚠️ 加入 aborted 之后，这类错误才会被翻成「等到超时了（到点被我们自己掐断…）」。
+const NETWORKY_RE = /fetch\s+failed|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|CERT_|network|网络|超时|连接|abort(?:ed)?|TimeoutError|AbortError|operation was aborted/i;
 function humanizeEngineError(err, host) {
   const msg = String(err?.message ?? err ?? '');
   const isNetworky = NETWORKY_RE.test(msg) || !msg;
@@ -93,6 +184,13 @@ function humanizeEngineError(err, host) {
  */
 const TRANSIENT_RE = /TIMEOUT|ETIMEDOUT|UND_ERR_SOCKET|ECONNRESET|EPIPE|ECONNABORTED|ERR_SOCKET|ENOTFOUND|EAI_AGAIN|socket hang up|fetch\s+failed/i;
 function isTransient(err) {
+  // 🔴 2026-10-23（提案 ce4188cf）：**被我们自己掐断的那一类不重试**。
+  //   原因：`AbortSignal.timeout(engineTimeoutMs)` 到点抛 DOMException，文案里带 'timeout'
+  //   ⇒ 会被下面的 TRANSIENT_RE 判成"值得重试"，于是同一个引擎再来一遍、再烧 15 秒。
+  //   而这次超时说明**这条路本来就慢/不通**，重试只是把一条命拖成两条（实测 soutubot 最坏 ~45 秒，
+  //   用户在那边看到的就是"一直转圈然后报 aborted"）。
+  //   超时该做的是**换引擎**，那是 auto 链（上层）的事，不是这里原地重试。
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') return false;
   const code = String(err?.cause?.code || err?.code || '');
   const status = Number(err?.status ?? err?.statusCode ?? 0);
   if (status >= 400 && status <= 599) return false;      // 对方答话了 ⇒ 不是"没连上"，重试没意义
@@ -506,20 +604,48 @@ async function lens(buffer, mime) {
     proxyEndpoint: proxyEndpointFor('lens.google.com')
   });
   if (!out.ok) throw new Error(out.error);
-  // 结果页正文是**非结构化的**（Lens 没有公开 API），所以如实告诉模型"这是一段网页正文"，
-  // 别让它当成"确定匹配"。这比编一个相似度诚实。
+  // 🆕 2026-10-23（提案 a0009a16「希望返回直连的作品页链接，而不是只给结果页」）：
+  //   改造前这里**只有一条** result，url 是结果页地址（= 你刚才那次搜索），正文塞进 extra
+  //   ⇒ 模型手里除了"一段网页正文"什么都没有，报出处只能报个站点名。
+  //   现在把从锚点里解析出的**直连作品页**放在 results 最前面，结果页单独收在 resultPageUrl。
+  //
+  //   🔴 三个不许：
+  //     ① 解析不到就**不编**（directLinks 空 ⇒ 只剩结果页 + 正文，note 里明说"没解析到直连"）；
+  //     ② **不拿结果页冒充作品页**（见 lens-search.js 里 pickWorkLinks 的注释）；
+  //     ③ 不动"这不是结构化匹配结果"这个诚实口径 —— 解析出来的链接也只是"页面上的锚点"，
+  //        不保证就是这张图的出处（Lens 结果页会混推荐、广告）。
+  const body = String(out.text || '').replace(/\s+/g, ' ').trim();
+  const direct = Array.isArray(out.directLinks) ? out.directLinks : [];
+  const others = Array.isArray(out.otherLinks) ? out.otherLinks : [];
+  const results = [];
+  for (const d of direct.slice(0, 4)) {
+    results.push({
+      title: d.title ? `${d.site}：${d.title}` : d.site,
+      url: d.url,
+      similarity: '',
+      extra: '从结果页锚点解析出的**直连作品页**（点开就是原站点，不是谷歌搜索页）'
+    });
+  }
+  // 再补一条"结果页正文"（既有口径保留：模型认识这个形状，判据也钉着）
+  results.push({
+    title: '谷歌 Lens 结果页正文',
+    url: out.url || '',
+    similarity: '',
+    extra: body.slice(0, 1200)
+  });
+  const noteLines = [
+    '🔴 这是**谷歌 Lens 结果页**的解析结果，不是结构化匹配结果：正文里可能混着无关推荐、广告文案或界面文字。',
+    direct.length
+      ? `上面的 ${direct.length} 条${direct.length >= 4 ? '+' : ''}是结果页里**指向已知站点的直连链接**（站点：${[...new Set(direct.map((d) => d.site))].join('/')}），优先用它们报出处。`
+      : '⚠️ 这次**没解析到直连作品页**（只拿到正文）：只能按正文里出现过的站点名/作品名/作者说，别自己拼链接。',
+    others.length ? `另有 ${others.length} 条其它外链（非已知作品站，仅供参考）。` : '',
+    '只采纳其中**明确指向出处**的部分，拿不准就说不确定。'
+  ].filter(Boolean);
   return {
     engine: 'lens',
-    results: [{
-      title: '谷歌 Lens 结果页正文',
-      url: out.url || '',
-      similarity: '',
-      extra: String(out.text || '').replace(/\s+/g, ' ').trim().slice(0, 1200)
-    }],
+    results,
     resultPageUrl: out.url || '',
-    note: '🔴 这是**谷歌 Lens 结果页的正文摘录**，不是结构化匹配结果：里面可能混着无关推荐、'
-      + '广告文案或界面文字。请只采纳其中**明确指向出处**的部分（站点名/作品名/作者），'
-      + '其余一律当成背景噪声；拿不准就说不确定。'
+    note: noteLines.join('')
   };
 }
 
@@ -549,41 +675,88 @@ export const SELECTABLE_ENGINES = ['auto', 'tracemoe', 'saucenao', 'iqdb', 'sout
  * 其余引擎单独调用 —— 选引擎是模型的工作（它能看图，提示词里教了怎么选）。
  */
 export async function searchImageSource(engine, buffer, mime) {
+  const started = Date.now();
   if (engine === 'auto') {
+    // 🔴 2026-10-23（提案 ce4188cf）：auto 链改成"**每引擎独立计时 + 独立失败 + 独立切片**"。
+    //   改造前：try/catch 里串行跑，一个引擎慢/挂就把整段时间吃光，错误只拼成一句字符串
+    //   （'自动搜图没找到结果。SauceNAO…；iqdb…'）⇒ 模型分不清哪一句是超时、哪一句是连不上。
+    //   现在：
+    //     · 每个引擎花多少毫秒都记进 trace（成功也记 —— "谁慢"是用户真正在问的那个问题）；
+    //     · 失败按 timeout / connect / aborted / other 分类，拼人话给模型；
+    //     · 每引擎最多花 min(单引擎超时, 剩余总预算)，到点**跳过它去跑下一个**，不等它。
+    const trace = [];
     const errors = [];
     let bestEffort = null;   // 沿途最好的低置信结果，全链路失败时兜底返回
+    let budgetCut = false;   // 总预算用完、后面还有引擎没试过
     // 🔴 总预算（用户 10-22 拍板 Q3「要设置可调」）：三个引擎串行 + 各自重试，
     //    合起来最多花 autoBudgetMs，到点就不再起新的引擎。
     //    为什么必须有它：工具层 `TOOL_TIMEOUT_MS = 120_000` 是死线，超了工具被掐掉、
     //    模型只看到一句超时 —— 那时连"我们试过哪些引擎"都报不出来。
-    const deadline = Date.now() + autoBudgetMs();
-    for (const key of ['saucenao', 'iqdb', 'ascii2d']) {
-      if (Date.now() >= deadline) {
-        errors.push(`总预算用完了（${autoBudgetMs()} 毫秒），后面的引擎没来得及试`);
+    const deadline = started + autoBudgetMs();
+    const chain = ['saucenao', 'iqdb', 'ascii2d'];
+    for (let i = 0; i < chain.length; i++) {
+      const key = chain[i];
+      const label = IMAGE_ENGINES[key].label;
+      const leftMs = deadline - Date.now();
+      if (leftMs <= 0) {
+        budgetCut = true;
+        const rest = chain.slice(i).map((k) => IMAGE_ENGINES[k].label).join('、');
+        errors.push(`总预算用完了（${fmtMs(autoBudgetMs())}），后面的引擎（${rest}）没来得及试`);
         break;
       }
-      try {
-        const out = await IMAGE_ENGINES[key].run(buffer, mime);
+      // 单引擎切片：给剩下的每个引擎至少留一点时间，否则第一个就能把预算吃干净
+      const slot = Math.min(engineTimeoutMs(), Math.max(3000, Math.floor(leftMs / (chain.length - i))));
+      const r = await runEngineTimed(key, label, () => IMAGE_ENGINES[key].run(buffer, mime), slot);
+      if (r.ok) {
+        const out = r.out;
+        out.trace = trace.concat([{ key, label, ok: true, ms: r.ms }]);
+        out.totalMs = Date.now() - started;
         const top = Number.parseFloat(out.results?.[0]?.similarity);
         if (out.results.length && (!Number.isFinite(top) || top >= 50)) return out;
         if (out.results.length && !bestEffort) bestEffort = out;
-        errors.push(`${IMAGE_ENGINES[key].label} 没有高相似度结果`);
-      } catch (e) {
-        errors.push(`${IMAGE_ENGINES[key].label}：${e.message}`);
+        trace.push({ key, label, ok: true, ms: r.ms, empty: !out.results.length });
+        errors.push(out.results.length
+          ? `${label} 有结果但相似度只有 ${out.results[0].similarity || '未知'}（低于 50% 不采信），花了 ${fmtMs(r.ms)}`
+          : `${label} 没有搜到（${fmtMs(r.ms)}）`);
+      } else {
+        trace.push({ key, label, ok: false, ms: r.ms, kind: r.kind });
+        errors.push(`${label} ${kindText(r.kind)}，花了 ${fmtMs(r.ms)}`);
       }
     }
     // 有低置信候选也比两手空空强：附上候选 + 说明，bot 可以如实说"不太确定"
     if (bestEffort) {
       return {
         ...bestEffort,
+        trace,
+        totalMs: Date.now() - started,
         note: `所有引擎都没有高置信匹配，下面是相似度偏低的候选（不一定准）。${bestEffort.note || ''}`.trim()
       };
     }
-    const err = new Error(`自动搜图没找到结果。${errors.join('；')}`);
+    // 🔴 失败文案要**带上每个引擎的耗时与归类**（提案原话：「报错区分超时/连接失败/被中断并带引擎耗时」）。
+    const spent = trace.map(traceLine).join('；');
+    const err = new Error(`自动搜图没找到结果（一共花了 ${fmtMs(Date.now() - started)}）。`
+      + `${errors.join('；')}。`
+      + (budgetCut ? '预算已经用完，不要再原地重试同一批引擎了 —— 换个引擎或直接如实说"没搜到"。' : '')
+      + `【各引擎实测】${spent || '（一个都没跑成）'}`)
     err.attempts = errors;
+    err.trace = trace;
+    err.totalMs = Date.now() - started;
     throw err;
   }
   const eng = IMAGE_ENGINES[engine];
   if (!eng) throw new Error(`未知引擎 ${engine}，可用：${SELECTABLE_ENGINES.join(' / ')}`);
-  return eng.run(buffer, mime);
+  // 单引擎调用同样计时：这样"某某引擎这次花了 18 秒"在报错里也能看见。
+  const label = eng.label;
+  const slot = engineTimeoutMs();
+  const r = await runEngineTimed(engine, label, () => eng.run(buffer, mime), slot);
+  if (r.ok) {
+    r.out.trace = [{ key: engine, label, ok: true, ms: r.ms }];
+    r.out.totalMs = Date.now() - started;
+    return r.out;
+  }
+  const e = r.error instanceof Error ? r.error : new Error(String(r.error ?? '未知错误'));
+  e.trace = [{ key: engine, label, ok: false, ms: r.ms, kind: r.kind }];
+  e.engineKind = r.kind;
+  e.engineMs = r.ms;
+  throw e;
 }

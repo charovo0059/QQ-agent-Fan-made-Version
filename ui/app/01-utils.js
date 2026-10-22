@@ -77,6 +77,8 @@ const TOOL_META = {
   search_image_source: { name: '以图搜图', cat: '联网',   icon: '🖼️' },
   // 🆕 2026-10-22 第五十二对话（提案 0f6288a1 落地）：种子只读清单（默认开，可在设置里关）
   inspect_torrent:     { name: '读种子清单', cat: '联网',   icon: '🧲' },
+  // 🆕 2026-10-23 第五十四对话（提案 17a954dc 落地）：部署环境自查（只读，默认开）
+  env_audit:           { name: '查部署环境', cat: '查看',   icon: '🖥️' },
   // 其他
   report_feedback:   { name: '汇报反馈',   cat: '其他',   icon: '📣' },
   finish:            { name: '结束本次',   cat: '其他',   icon: '🏁' }

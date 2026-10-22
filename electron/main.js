@@ -192,6 +192,12 @@ if (!gotLock) {
   startWhenReady();
   app.on('before-quit', () => {
     quitting = true;
+    // ⚠️ core.stop() 是 async，而这里是**同步**回调、我们刻意不 await ——
+    //    Electron 在 before-quit 返回后就会继续退出流程，await 在这里只会在
+    //    某些路径上把退出卡住（重启/关闭两条路都走它，风险不对等）。
+    //    ⇒ 所以「不执行就会留下孤儿进程」的清理**必须**在 core.stop() 里排在
+    //    第一个 await 之前（见 src/app.js 的 stop()：微信中继就排在那里）。
+    //    这条约定是 2026-10-23 定下的，动 stop() 里语句顺序前先读这段。
     try { core?.stop(); } catch { /* ignore */ }
   });
 }

@@ -6,6 +6,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+// 🆕 2026-10-23（提案 7467c225）：微信收来的图**没有公网地址**，只有中继解码后的本地文件
+//   ⇒ 看图与发图两条路都要能把 `file://` 还原成盘上路径。`fs` 上面已有，这里只补 URL 解析。
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { getConfig, DATA_DIR } from './config.js';
 import { normalizeMessageList, unquoteJsonString, todayKey, fmtBytes, withDeadline } from './util.js';
 // 用量 / 花费自检（2026-09-26 第二十四对话，提案 f789b40e）：
@@ -18,12 +21,16 @@ import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 //   `normalizePixivPid`）。⚠️ headers / 代理判定 / 浏览锁定全在 `web-search.js` 里，工具层只拿结果 ——
 //   ⛔ 别在这儿拼 URL、加头，也别在这里做「有没有代理」的判定（那个判定只能有一份）。
 import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint, illustrationCapabilityHint, fetchPixivPages, normalizePixivPid } from './web-search.js';
-import { searchImageSource, SELECTABLE_ENGINES } from './image-search.js';
-import { expandForwardNodes, fetchForward, resolveFreshImageUrl, extractFileSegments } from './onebot.js';
+import { searchImageSource, SELECTABLE_ENGINES, fmtMs, kindText } from './image-search.js';
+import { expandForwardNodes, fetchForward, resolveFreshImageUrl, extractFileSegments, hasUnexpandedForward } from './onebot.js';
 // 🆕 2026-10-22 第五十二对话（提案 0f6288a1 落地 · 方案 §5）：种子/磁力**只读清单**。
 //   ⚠️ 这个模块只做「字节 → 清单」，不联网、不写盘、不做种；取字节的活在这里（工具层）由
 //      safeFetchBinary 干（SSRF 校验 + 代理判定只能有一份，⛔ 不许在 torrent-meta.js 里再写一份）。
 import { inspectTorrent } from './torrent-meta.js';
+// 🆕 2026-10-23 第五十四对话（提案 17a954dc）：部署环境自查（只读）。
+//   ⚠️ 它只做"本地探测、未联网"那一套，三条硬边界（只问版本号 / 永不抛 / 出门脱敏）
+//      全在 env-audit.js 里做死 —— 这里只调用，⛔ 不要在本文件里再拼一份探测逻辑。
+import { auditEnvironment } from './env-audit.js';
 import { firstFrameOnly, countFrames } from './gif.js';
 // 图片类型嗅探统一走 image-type.js（**吸收自上游 0.4，2026-09-20 第九对话**）。
 // 原来本文件内联了一份 detectMime（魔数判断），与别处那份各自演化 ——
@@ -192,6 +199,32 @@ function imageLimits() {
 //    那份只到 MB 的实现会把它写成 `12288.0MB`。补一档 GB 并**两边共用**，⛔ 不再各留一份。
 
 /**
+ * 「这个图片地址是不是盘上已有的文件？」⇒ 是就返回真路径，否则空串。
+ *
+ * 🆕 2026-10-23（提案 7467c225 · 微信收图/发图）：微信这条链路**只有本地文件**。
+ *   · 收：中继解码后给 `file:///…/img-xxx.png`（见 relay-wechat 的 protocol.js seg.image）；
+ *   · 发：`sender.js` 交给协议端的也是 `file://`（QQ 侧由协议端自己读，微信侧由中继 toRealPath 还原）。
+ * ⚠️ 只认**两种形态**：`file://` URL 与 Windows 绝对路径（`E:/a.png` / `E:\a.png`）。
+ *   ⛔ 不要把它当"路径清洗器"用：非这两种形态一律返回空串，让调用方走原来的网络那条路
+ *   （拿不准的时候**不要**猜，猜错的表现是"图打不开"这种最难查的静默失败）。
+ */
+function localImagePath(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (/^file:/i.test(s)) {
+    try {
+      const p = fileURLToPath(s);
+      return fs.existsSync(p) ? p : '';
+    } catch {
+      return '';   // 不是合法的 file URL ⇒ 当成"不是本地图"，交给网络那条路报它自己的错
+    }
+  }
+  // Windows 绝对路径（`fs.existsSync('E:/a.png')` 在 Windows 上成立；`https://…` 不会命中这里）
+  if (/^[a-zA-Z]:[\\/]/.test(s) && fs.existsSync(s)) return s;
+  return '';
+}
+
+/**
  * 下载一张图并转成能进模型的 data URL，同时把它压到安全体积。
  *
  * 压缩手段有两条：
@@ -211,9 +244,29 @@ function imageLimits() {
  */
 async function prepareImage(onebot, url, file = '') {
   const lim = imageLimits();
-  const fresh = await resolveFreshImageUrl(onebot, { url, file });
-  const safeUrl = await validateImageUrl(fresh.url);
-  const { buffer, contentType } = await safeFetchBinary(safeUrl, lim.downloadBytes);
+  let buffer;
+  let contentType;
+  // 🆕 2026-10-23（提案 7467c225 · 微信收图）：**本地文件优先**，不走网络。
+  //   为什么：微信 4.x 的图在 hook 那边是密文，必须由中继调 Decode_Pic 解成本地 PNG
+  //   ⇒ 中继给过来的 `url` 是 `file:///…/data/media/img-….png`，**根本没有公网地址**。
+  //   改前这里一律走 resolveFreshImageUrl + validateImageUrl（只允许 http/https）
+  //   ⇒ 微信里的图**一张都看不了**，模型只能收到「没有可查看的图片」。
+  //   ⚠️ 本地文件这条路**不做公网校验**（它本来就在盘上、没有 SSRF 面），但要独立判大小，
+  //      否则一张 50MB 的图会直接把整轮请求顶爆。
+  const local = localImagePath(url) || localImagePath(file);
+  if (local) {
+    const size = fs.statSync(local).size;
+    if (size <= 0) throw new Error('图片文件是空的（0 字节）');
+    if (size > lim.downloadBytes) {
+      throw new Error(`这张图太大（${fmtBytes(size)}，上限 ${fmtBytes(lim.downloadBytes)}）`);
+    }
+    buffer = fs.readFileSync(local);
+    contentType = '';
+  } else {
+    const fresh = await resolveFreshImageUrl(onebot, { url, file });
+    const safeUrl = await validateImageUrl(fresh.url);
+    ({ buffer, contentType } = await safeFetchBinary(safeUrl, lim.downloadBytes));
+  }
   if (!buffer || !buffer.length) throw new Error('图片内容为空');
   const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
 
@@ -437,6 +490,14 @@ function ok(payload) {
 function err(message) {
   return { content: `错误：${message}`, isError: true };
 }
+
+// ── 部署环境自查的进程内缓存（🆕 2026-10-23 第五十四对话 · 提案 17a954dc）────────────
+// 为什么缓存：一次自查最坏要起 9 个子进程（各 3 秒上限、总 8 秒预算），
+//   而"再确认一下 / 刚才说的那个版本是多少"在同一轮里很常见 —— 每次都重探等于白等 8 秒。
+// ⛔ **只放内存、不落盘**：环境可能刚变过（比如用户刚装了 Python），
+//   落盘会让它报上一台机器的事，那正是本项目最忌的"看着成功其实是旧的"。
+const ENV_AUDIT_TTL_MS = 60_000;
+let envAuditCache = { at: 0, data: null };
 
 /**
  * 当前会话**真实可见**的那些 `#数字`（＝ `m.mid`）。
@@ -877,13 +938,52 @@ export function refineIllustrationList(list, { require = 'any', onlySafe = false
  *
  * @param {Array} defs buildToolDefs() 的结果
  * @param {object} cfg 当前配置
- * @param {{visionEnabled?: boolean}} opts 视觉是否可用（由 orchestrator 结合模型探测结果算出来）
+ * @param {{visionEnabled?: boolean, kind?: string|null, platform?: string|null}} opts
+ *   visionEnabled 视觉是否可用（由 orchestrator 结合模型探测结果算出来）；
+ *   kind 会话类型（群/私聊）；platform 会话来源平台（'qq' / 'wechat'，缺省当成 QQ）
  */
 
-export function gateToolDefs(defs, cfg, { visionEnabled = true, kind = null } = {}) {
+// 🆕 2026-10-23（提案 7467c225 · 微信收发图片/表情）：**微信侧根本不存在的能力**。
+//
+// 为什么要在**工具列表**里拿掉，而不是留着让它调用失败：
+//   ① 每轮工具 schema 都要占 token，留几个注定失败的工具是纯浪费；
+//   ② 更糟的是她会**真去调** —— 调完拿到一句"没有发文件的接口"，然后对人家说
+//      "我发不了文件"，那是一次白花的往返 + 一句本可以不说的话。
+//   ⚠️ 只摘"**这个平台上根本没有这个动作**"的；"能力弱、会失败"的一律留在列表里
+//      （失败时中继会明确回错，她能如实说"这张发不出去"—— 那是诚实，不是假能力）。
+//
+// ⚠️ **`send_image` 不在这里**：微信侧发图是真的能用的（中继 `SendImgMsg` 已支持，
+//    且 `sender.js` 的 `alreadyLocal` 分支认得 `file://`）—— 它跟 QQ 走同一条工具。
+// ⚠️ `send_message` / `read_forward` / `get_message_images` / `search_image_source` 等
+//    也都不摘：它们在中继侧有真实实现（看图靠本地文件解码、合并转发靠 get_forward_msg）。
+const WECHAT_MISSING_TOOLS = new Set([
+  'send_poke',          // 微信没有"拍一拍"这个动作（4.x hook 无对应接口）
+  'send_file',          // 中继 wxhook 明确回"没有发文件的接口"（见 wxhook.js 的 sendFile 分支）
+  'collect_sticker'     // 收表情是往 **QQ 表情库**（data/stickers.json）里写 ⇒ 在微信里收会把微信的图
+                        // 混进 QQ 的库，跨平台污染；而且收进来之后她也没法在微信里"发一个微信表情"
+]);
+
+// 💡 **表情包那三个工具（list_stickers / get_sticker_image / send_sticker）在微信侧保留** ——
+//    这不是漏摘，是提案 7467c225 要的"表情包发成本地图片降级"：
+//      `sender.sendSticker` → `clientFor(chatKey)` 选到**微信**的 OneBotClient
+//      → `onebot.sendSticker` **直接转调 sendImage**（见 onebot.js 的 sendSticker 注释）
+//      → 中继 `SendImgMsg` 收到真路径（`wxhook.js` 的 toRealPath）⇒ 对方收到的是一张**图片**，
+//        不是一个微信表情。
+//    ⚠️ 这等于"她有一个 QQ 表情库、在微信里只能当图发"。提示词里必须**如实说这件事**
+//       （见 prompt.js 的 wechatSceneRules 第 1 条），否则她会以为对方看到的是表情。
+//    ⚠️ **真机未验证**：微信 4.x 的 SendImgMsg 对 gif/apng 的支持没试过（收图那条路的
+//       Decode_Pic 对 gif 也不确定）。失败的表现是**中继明确回错**（不是静默），
+//       届时她要能如实说"这张发不出去"—— 所以这里不算"装了一个假能力"。
+
+export function gateToolDefs(defs, cfg, { visionEnabled = true, kind = null, platform = null } = {}) {
   const searchEnabled = cfg?.webSearch?.enabled !== false;
   const imageSearchEnabled = cfg?.imageSearch?.enabled !== false;
+  // ⚠️ 判定写 `=== 'wechat'`（严格等于）：缺省 / null / 不认识的平台**一律当 QQ**
+  //    —— 与 prompt.js 的 platformFactLine / toolProtocol 同一口径（宁可保守）。
+  const isWechat = platform === 'wechat';
   return defs.filter((d) => {
+    // ⓪ 微信侧根本不存在的能力（见上面 WECHAT_MISSING_TOOLS 的说明）
+    if (isWechat && WECHAT_MISSING_TOOLS.has(d.name)) return false;
     // ① 原生工具：保持改造前那一套逐条判断，一个字都没动
     //    （回归 test-image-limits.mjs / test-doujin-lookup.mjs 直接验这三条）
     if (!visionEnabled && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
@@ -938,6 +1038,15 @@ export function gateToolDefs(defs, cfg, { visionEnabled = true, kind = null } = 
     if (d.name === 'inspect_torrent') {
       if (cfg?.torrentInspect?.enabled === false) return false;
       if (kind === 'group' && cfg?.torrentInspect?.allowInGroup === false) return false;
+    }
+    // 🆕 2026-10-23 第五十四对话（提案 17a954dc）：部署环境自查。
+    //   默认**开** ⇒ 判定写 `=== false`（与上面微信那几条有意相反，与 torrentInspect 同方向）。
+    //   群聊闸 `allowInGroup` 默认开，同样 `=== false`，且**只影响群聊**（私聊不受影响）。
+    //   为什么群里也能用：它只报版本号，路径与密钥在 env-audit.js 里已经抹掉了，
+    //   而"你跑在什么环境"是群里最常见的提问之一。
+    if (d.name === 'env_audit') {
+      if (cfg?.envAudit?.enabled === false) return false;
+      if (kind === 'group' && cfg?.envAudit?.allowInGroup === false) return false;
     }
     return true;
   });
@@ -1358,7 +1467,7 @@ export function buildToolDefs() {
     },
     {
       name: 'read_forward',
-      description: '展开查看合并转发的聊天记录。消息文本出现 [合并转发聊天记录] 或 [转发消息 …] 占位符时用。参数填那条转发消息前的 #数字（别用方括号里那串长 id）。展开结果会写回存档，以后再看就是展开的文本，不用重复调。',
+      description: '展开查看合并转发的聊天记录。消息文本出现 [合并转发聊天记录]、[转发消息 …]、[转发的聊天记录·未展开 …] 时用。参数填那条转发消息前的 #数字（别用方括号里那串长 id）。**转发里套的转发会一起展开**（最多 3 层，每深一层缩进加 ↳）；真的展不开时会写明原因（循环引用/层级到顶/服务端已丢弃），不会假装里面没东西。展开结果会写回存档，以后再看就是展开的文本，不用重复调。',
       parameters: {
         type: 'object',
         properties: {
@@ -1370,17 +1479,44 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-          // 存档里已是展开文本（收消息时已展开/之前展开过）→ 直接给，不再请求 QQ
-          if (String(entry.text || '').startsWith('[合并转发 共')) {
-            return ok({ messageId: entry.mid, text: entry.text, note: '该转发已展开（读的是存档）' });
+          const archived = String(entry.text || '');
+          // 存档里已是展开文本，且**里面没有没展开的那一层** → 直接给，不再请求 QQ。
+          //
+          // 🔴 这里原来只判 startsWith('[合并转发 共')（2026-10-23 第五十四对话修，提案 89506008）：
+          //    入站钩子只展开外层（maxDepth:1），所以「外层展开了、里面的转发还卡着」的条目
+          //    也以 '[合并转发 共' 开头 —— 旧写法会把它当"已展开"直接返回，
+          //    于是套娃**永远**展不开、工具还骗它说"已展开"。判据必须加上 nested 这一维。
+          if (archived.startsWith('[合并转发 共') && !hasUnexpandedForward(archived)) {
+            return ok({ messageId: entry.mid, text: archived, note: '该转发已展开（读的是存档）' });
           }
           // 先试 res_id、再试 message_id（message_id 可能为负 → 取不到 payload；
           // 详见 onebot.js 的 fetchForward）。fwdId 是收消息时存下来的。
-          const ex = await fetchForward(ctx.onebot, { messageId: entry.mid, resId: entry.fwdId });
-          if (!ex.text) return err(`转发内容取不到（QQ 服务端可能已丢弃）：${ex.error || '未知原因'}`);
+          // maxDepth:3 —— 工具是"用户/模型点名要看"，下钻的代价值得付（入站那边是 1）。
+          const ex = await fetchForward(ctx.onebot, { messageId: entry.mid, resId: entry.fwdId, maxDepth: 3 });
+          if (!ex.text) {
+            // 外层在存档里已经有内容（只是里面那层没展开）→ 别把已有内容弄丢，
+            // 如实说"里面那层这次取不到"，把存档那份原样交回去。
+            if (archived.startsWith('[合并转发 共')) {
+              return ok({
+                messageId: entry.mid,
+                text: archived,
+                nestedLeft: true,
+                note: `里面还套着一层转发，这次没取到（${ex.error || '未知原因'}，多半是那个 res_id 已过期）。上面是外层的内容。`
+              });
+            }
+            return err(`转发内容取不到（QQ 服务端可能已丢弃）：${ex.error || '未知原因'}`);
+          }
           // 写回存档：一次展开，永久升级这条记录（模型/存档页/金句墙都受益）
           ctx.store.updateByMid(ctx.chatKey, entry.mid, { text: ex.text, appendMedia: ex.media || [] });
-          return ok({ messageId: entry.mid, text: ex.text, images: (ex.media || []).length, via: ex.via });
+          return ok({
+            messageId: entry.mid,
+            text: ex.text,
+            images: (ex.media || []).length,
+            via: ex.via,
+            // 到顶/循环/服务端没给时如实标出来 —— 让模型知道"可能还有更里面那层"
+            nestedLeft: Boolean(ex.nestedLeft),
+            ...(ex.nestedLeft ? { note: '最里面那层还套着转发，已经展开到上限（最多 3 层）；再深就展不开了。' } : {})
+          });
         } catch (error) {
           return err(`展开失败：${error?.message ?? error}`);
         }
@@ -1442,11 +1578,18 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!entry) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
-          const items = (entry.media || []).filter((m) => m.kind === 'image' && m.url);
+          // 🔴 2026-10-23（提案 7467c225）：过滤条件从 `m.url` 放宽成 `m.url || m.file`。
+          //   因为微信侧的图只有**本地文件**：中继解码后给的是 `file://` 地址（塞在 url 里），
+          //   而 QQ 侧一直是 http(s) 的 url。改前这里只认 url ⇒ 微信图被整条丢掉，
+          //   模型永远收到「没有可查看的图片」——用户看到的就是"微信里发图它装看不见"。
+          //   ⚠️ QQ 侧行为不变：QQ 的图片段 url 本来就非空，file 有没有都进得来。
+          const items = (entry.media || []).filter((m) => m.kind === 'image' && (m.url || m.file));
           if (!items.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
           // 🆕 2026-09-25：她把这条消息的图**真的看过了** ⇒ 登记进"见过的图片地址"，
           //    之后 `send_image` 才允许把这几张发出去（安全边界，见 rememberImageUrls 的注释）。
-          rememberImageUrls(ctx, items.map((m) => m.url));
+          // ⚠️ 微信侧那张图可能**只有本地文件**（中继把 file:// 塞在 url 里，file 留空）；
+          //    这里两个都登记，否则 `send_image` 那道"本轮见过"的闸会把微信图判成"自己编的"。
+          rememberImageUrls(ctx, items.map((m) => m.url || m.file));
 
           const total = items.length;
           let start = Math.floor(Number(args.start));
@@ -1495,7 +1638,10 @@ export function buildToolDefs() {
         + '⚠️ 只在**有人明确要求查出处**时才用 —— 群友问"什么番""求出处""画师是谁""图里是谁""这图哪来的"这类问题才搜。'
         + '以下情况**一律不要调用**：别人只是发图、斗图、发表情包、贴图玩梗；图只是聊天的背景或顺带一提；没人提到出处；你自己好奇想看。'
         + '没人问出处就正常看图聊天或安静结束，主动搜图会显得很怪。'
-        + '搜之前先 get_message_images 看清图，再按图的类型选引擎：动画截图→tracemoe（给番名+集数+时间点）；二次元插画/头像/画师图→saucenao（pixiv/推特出处，最准）或 iqdb；本子/漫画页→soutubot；拿不准→auto（插画类引擎自动串联）。'
+        + '搜之前先 get_message_images 看清图，再按图的类型选引擎：动画截图→tracemoe（给番名+集数+时间点）；二次元插画/头像/画师图→saucenao（pixiv/推特出处，最准）或 iqdb；本子/漫画页→soutubot；'
+        // 🆕 2026-10-23（提案 42eb3041）：模型原来根本不知道 lens = 谷歌 —— 提示词与工具描述
+        //   都没提过它（只有可选引擎列表里一个光秃秃的 `lens`），于是"帮我谷歌一下"只能瞎试。
+        + '**谷歌以图搜图→lens（lens 就是谷歌搜图，最全但最慢，一次 3~7 秒）**；拿不准→auto（插画类引擎自动串联；auto 只串快引擎，**不含** tracemoe/soutubot/lens，要用它们必须显式选）。'
         + '⚠️ tracemoe 对**任何**图都会返回最像的 3 条，而且它的相似度**不能当可信度**（实测纯色图也能得 100%）—— 只有你确认这张图**确实是动画截图**时才采信它，否则当它没搜到；报出处也要带不确定语气。'
         + '真人照片 / 游戏截图这类**三次元图目前没有可用引擎**（原来那两条实测不可靠、已移除）：直接如实说"这类图我搜不了"，不要硬试。'
         // 🆕 2026-10-17（第四十九对话 · 她提案 f3bebcf7 的收尾）：这里原来**写死**「最多搜 2 次」，
@@ -1514,7 +1660,11 @@ export function buildToolDefs() {
           imageUrl: { type: 'string', description: '直接给图片 URL（优先于 messageId）' },
           // 枚举从 SELECTABLE_ENGINES 取（单一来源）：模型选了不在里面的引擎会直接被 schema 挡掉。
           // 注意 ascii2d 不在这里 —— 它只在 auto 的降级链里用，不给模型主动选。
-          engine: { type: 'string', enum: SELECTABLE_ENGINES, description: '默认 auto' }
+          engine: {
+            type: 'string', enum: SELECTABLE_ENGINES,
+            // 🆕 2026-10-23（提案 42eb3041）：枚举里那个光秃秃的 `lens` 谁都看不懂 —— 这里点明它就是谷歌。
+            description: '默认 auto（插画类快引擎自动串联）。可选：tracemoe 动画截图 / saucenao 插画画师 / iqdb 插画 / soutubot 本子漫画页 / lens = 谷歌搜图（最全、最慢、3~7 秒，只在明确要谷歌或别的引擎都没结果时用）'
+          }
         }
       },
       async execute(ctx, args) {
@@ -1573,12 +1723,26 @@ export function buildToolDefs() {
               engine: out.engine,
               results: [],
               resultPageUrl: out.resultPageUrl || '',
-              tip: `这个引擎没搜到。可以换引擎重试：动画截图 tracemoe / 插画 saucenao·iqdb / 本子 soutubot（三次元图没有可用引擎，别硬试）。${out.note || ''}`
+              // 🆕 2026-10-23（提案 ce4188cf）：把"这个引擎花了多久"一并给模型 —— 用户问得最多的
+              //   就是"怎么这么慢"，而改造前这里一个字都没有。
+              ...(out.totalMs != null ? { engineMs: out.totalMs } : {}),
+              ...(Array.isArray(out.trace) ? { trace: out.trace } : {}),
+              tip: `这个引擎没搜到${out.totalMs != null ? `（花了 ${fmtMs(out.totalMs)}）` : ''}。可以换引擎重试：动画截图 tracemoe / 插画 saucenao·iqdb / 本子 soutubot（三次元图没有可用引擎，别硬试）。${out.note || ''}`
             });
           }
           return ok(out);
         } catch (error) {
-          return err(`搜图失败：${error?.message ?? error}`);
+          // 🔴 2026-10-23（提案 ce4188cf「单引擎失败不该拖死整条」+「报错要区分超时/连接失败并带耗时」）：
+          //   改造前这里只有一句 `搜图失败：${message}`，而 message 常常是被拼成一坨的英文原文
+          //   （最典型的就是 "The operation was aborted."）。现在：
+          //     ① message 已经被 fetch-error 翻成人话（含"是我们自己到点掐断"）；
+          //     ② 附上**每个引擎各自花了多久 / 怎么失败的**，用户能直接看出是谁拖的；
+          //     ③ 明确告诉模型"下一步换哪个引擎"，而不是让它原地重试同一个。
+          const trace = Array.isArray(error?.trace) ? error.trace : [];
+          const detail = trace.length
+            ? `\n【各引擎实测】${trace.map((t) => `${t.label}：${t.ok ? '' : kindText(t.kind)}${fmtMs(t.ms)}`).join('；')}`
+            : '';
+          return err(`搜图失败：${error?.message ?? error}${detail}`);
         }
       }
     },
@@ -2015,11 +2179,25 @@ export function buildToolDefs() {
               + '链接必须逐字一致，不要自己改。');
           }
           // ② 公网 http(s) 校验（挡内网/环回/本机 —— 否则等于让协议端去访问任意内网地址）
+          //
+          // 🆕 2026-10-23（提案 7467c225）：**微信侧的图本来就在本机上**，没有公网地址。
+          //   中继收到图片/表情后解码成 png 落在 `data/media/`，交给 app 的是 `file://` 地址
+          //   （见 relay-wechat 的 `wxhook.js` 的 `#tryDecodeImage`）⇒ 这里如果照旧只放行 http(s)，
+          //   她会拿到"只允许 http(s) 图片地址"，然后回一句"发不了图"—— 而图就在盘上。
+          //   ⚠️ **不是放宽安全边界**：本机文件不经过任何网络，没有 SSRF 面；而且它必须在上面
+          //      那道"本轮见过"的白名单里（`get_message_images` 登记过）才走得到这里。
+          //   ⚠️ 只对**微信**开这条路：QQ 侧的图来自协议端的公网链接，多一条本地路只会多一个口子。
           let safeUrl = raw;
-          try {
-            safeUrl = await validateImageUrl(raw);
-          } catch (error) {
-            return err(`这张图的地址不合法，已拒绝发送：${error?.message ?? error}`);
+          const localForWechat = String(ctx.platform ?? '') === 'wechat' ? localImagePath(raw) : '';
+          if (localForWechat) {
+            // `sender.js` 的 `alreadyLocal` 认的是 `file:` 前缀 ⇒ 纯 Windows 路径也统一转成 file URL
+            safeUrl = /^file:/i.test(raw) ? raw : pathToFileURL(localForWechat).href;
+          } else {
+            try {
+              safeUrl = await validateImageUrl(raw);
+            } catch (error) {
+              return err(`这张图的地址不合法，已拒绝发送：${error?.message ?? error}`);
+            }
           }
           const result = await ctx.sender.sendImage(ctx.chatKey, safeUrl, {
             note: String(args.note ?? '').trim(),
@@ -2760,6 +2938,113 @@ export function buildToolDefs() {
       }
     },
 
+    {
+      // ── 部署环境自查（2026-10-23 第五十四对话，提案 17a954dc）──────────────
+      // 定位：**只读**。回答"你这跑在什么环境 / 装了什么版本"，不改任何状态。
+      //
+      // 🔴 三条边界（与 env-audit.js 头部那三条同一份，⛔ 不许在别处再写一套）：
+      //   ① **只问版本号**：子进程只跑 `--version` / `reg query` / 读 application.ini，
+      //      **绝不启动浏览器窗口**（Windows 上 `chrome --version` 会真拉一个窗口出来）；
+      //   ② **永不抛**：探不到就如实写"读不到"，返回体永远完整（这里再包一层 try 是兜底）；
+      //   ③ **出门脱敏**：路径只留最后一段、密钥类字段一律抹掉 —— 所以群里也能用。
+      //
+      // ⚠️ 口径（写进描述里、也写进返回的 note 里，两处必须一致）：
+      //   · "读不到" ≠ "没装"（可能是绿色版 / 不在 PATH / 装在别处）；
+      //   · 版本名单是**本地维护**的，**不联网、不查 CVE** ⇒ ⛔ 不许说"你这个版本不安全"。
+      name: 'env_audit',
+      description: '查这台机器上你运行的环境（只读）：Node / Electron / 系统、以及本机装没装 '
+        + 'Python / Java / Go / PHP / nginx / 浏览器之类的版本号。有人问"你跑在什么环境 / '
+        + '什么系统 / 装了什么版本"时用。\n\n'
+        + '⚠️ 口径（如实说，别加工）：\n'
+        + '· 依据是**本地探测、未联网**，名单是本程序里维护的，**不查安全公告** —— '
+        + '所以**不要**据此说某个版本有漏洞、更不要催人去升级；\n'
+        + '· 返回里 `ok:false` 的那条 = **这次没探到**（可能是绿色版、不在 PATH、装在别处），'
+        + '**不等于没装** —— 要原话说"没读到"，别替它下结论；\n'
+        + '· 全程只读了版本号，**没有启动任何浏览器窗口**、没改任何设置。',
+      parameters: { type: 'object', properties: {} },
+      async execute(ctx) {
+        try {
+          const cfg = getConfig() || {};
+          const eaCfg = cfg.envAudit || {};
+          // ① 单轮限频：挂在 ctx 上（与 get_my_usage 同一套做法），只属于本次运行。
+          //    为什么要限：一次自查最坏要起 9 个子进程（各 3 秒上限、总 8 秒预算），
+          //    她若连着调三次，这一轮就白等了 24 秒。
+          const maxPerRun = Math.max(1, Number(eaCfg.maxPerRun) || 1);
+          const used = Number(ctx.__envAuditCalls) || 0;
+          if (used >= maxPerRun) {
+            return err(`本次运行已经查过 ${used} 次环境了（上限 ${maxPerRun} 次）。`
+              + '用手上已有的结果回答就好 —— 这类信息一次就够。');
+          }
+          ctx.__envAuditCalls = used + 1;
+          // ② 进程内缓存 60 秒：同一轮里"再确认一下"不该再起一遍子进程。
+          //    缓存只放内存、不落盘（环境可能刚变过，落盘会让它报上一台机器的事）。
+          const now = Date.now();
+          let data = null;
+          if (envAuditCache.data && now - envAuditCache.at < ENV_AUDIT_TTL_MS) {
+            data = envAuditCache.data;
+          } else {
+            const timeoutMs = Math.min(30000, Math.max(2000, Number(eaCfg.timeoutMs) || 8000));
+            data = await auditEnvironment({ timeoutMs });
+            envAuditCache = { at: now, data };
+          }
+          if (!data || typeof data !== 'object') {
+            return err('读不到：这次没组装出结果。别猜，直接说现在看不到。');
+          }
+          // ③ 出口**白名单**：只由下面这些字段拼出来（与 get_my_usage 同一条纪律）。
+          //    ⛔ 不把 data 整体透传给模型 —— 里面 notes/warnings 是给控制台看的，
+          //       原样塞进来只会白占 token。
+          const rt = data.runtime || {};
+          const deps = Array.isArray(data.deps) ? data.deps : [];
+          const externals = Array.isArray(data.externals) ? data.externals : [];
+          const trim = (s, n) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, n);
+          const out = {
+            ok: data.ok === true,
+            generatedAt: String(data.generatedAt || ''),
+            basis: String(data.basis || '本地探测、未联网'),
+            elapsedMs: Number(data.elapsedMs) || 0,
+            app: {
+              name: trim(data.app && data.app.name, 40),
+              version: trim(data.app && data.app.version, 24)
+            },
+            runtime: {
+              node: trim(rt.node, 24),
+              electron: trim(rt.electron, 24),
+              chrome: trim(rt.chrome, 32),
+              platform: trim(rt.platform, 20),
+              arch: trim(rt.arch, 12),
+              osRelease: trim(rt.osRelease, 40),
+              memGB: Number(rt.totalMemGB) || 0
+            },
+            // 依赖清单：只给名字 + 版本 + 探到没，⛔ 不给路径
+            deps: deps.slice(0, 12).map((d) => ({
+              name: trim(d && d.name, 40),
+              version: trim(d && d.version, 24),
+              ok: (d && d.ok) !== false
+            })),
+            // 外部程序：同样只给名字 + 版本 + 一句话，⛔ 不给安装路径
+            externals: externals.slice(0, 16).map((e) => ({
+              key: trim(e && e.key, 24),
+              title: trim(e && e.title, 40),
+              version: trim(e && e.version, 24),
+              ok: (e && e.ok) === true,
+              ...((e && e.ok) === true ? {} : { detail: trim(e && e.detail, 60) })
+            })),
+            notInstalledCount: externals.filter((e) => (e && e.ok) !== true).length,
+            note: '依据：本地探测、未联网；名单本地维护、**不查安全公告** ⇒ 不要据此判断"安不安全"。'
+              + '上面 ok:false 的是**这次没探到**（绿色版 / 不在 PATH / 装在别处），不等于没装，'
+              + '如实说"没读到"就好。只读了版本号，没有启动任何浏览器、没改任何设置。'
+          };
+          if (Array.isArray(data.warnings) && data.warnings.length) {
+            out.warnings = data.warnings.slice(0, 3).map((w) => trim(w, 80));
+          }
+          return ok(out);
+        } catch (error) {
+          // 出错也只给一句人话 —— ⛔ 不透传内部异常原文（那里面有本机路径）。
+          console.error(`[环境自查] 组装失败：${error?.message ?? error}`);
+          return err('读不到：这次环境自查失败了。别猜，直接说现在看不到。');
+        }
+      }
+    },
     {
       name: 'report_feedback',
       description: '向管理员（控制台）反馈你遇到的问题、困惑或需要人工介入的情况。不要用于聊天。',

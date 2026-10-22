@@ -69,6 +69,8 @@ import { builtinVisionResults } from './model-vision-docs.js';
 import { createEventBus, todayKey, fmtBytes } from './util.js';
 // 系统提示：管理端「人设 → 系统提示自定义」用它读取内置段落与当前生效文本。
 import { buildSystemPrompt, buildDefaultSegments, SYSTEM_SEGMENT_LABELS } from './prompt.js';
+// 🆕 2026-10-23 第五十四对话（提案 17a954dc）：部署环境自查的只读实现（绝不抛、出门脱敏）。
+import { auditEnvironment } from './env-audit.js';
 
 // 全局 fetch（undici）默认连接建立超时只有 10 秒，openrouter.ai 这类海外端点
 // 握手慢时会直接报 "Connect Timeout Error ... timeout: 10000ms"（注意这不是
@@ -1322,8 +1324,13 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       }
     }
     // 展开失败时占位符留在存档里，模型可用 read_forward 工具稍后重试（条目里带着 fwdId）。
+    //
+    // 🔴 maxDepth 必须是 1（2026-10-23 第五十四对话，提案 89506008 定下的边界）：
+    //    入站是"每条消息都要过"的热路径，每深一层就多一次 get_forward_msg 网络往返，
+    //    而 res_id 有寿命、入站又最怕慢。所以**入站只展开外层**，套娃里那层留标记，
+    //    等模型真的要看时用 read_forward（那里才下钻，且是用户点着要的）。
     if (segments && (text.includes('[合并转发') || text.includes('[转发消息'))) {
-      const ex = await fetchForward(onebot, { messageId: event.message_id, resId: fwdId });
+      const ex = await fetchForward(onebot, { messageId: event.message_id, resId: fwdId, maxDepth: 1 });
       if (ex.text) {
         text = ex.text;
         if (ex.media?.length) media.push(...ex.media);
@@ -2085,6 +2092,30 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       // ── 「关于」页数据 ──
       if (pathname === '/api/about' && method === 'GET') {
         return json(res, 200, aboutPayload());
+      }
+
+      // ── 🆕 部署环境自查（2026-10-23 第五十四对话 · 提案 17a954dc）──
+      // 为什么单独开一个接口、而不是塞进 /api/about：
+      //   ① 它会**起子进程**（最坏 9 个、总 8 秒预算），而 /api/about 会被「关于」弹窗
+      //      一点就拉、也被诊断包用 —— 让每个只看版本号的人等 8 秒是不能接受的；
+      //   ② 它同样**绝不能**塞进 /api/status：那是每 15 秒轮询的热路径（同 /api/ports 的理由）。
+      // ⇒ 独立路由 + 前端点按钮才拉 + 模块内有 60 秒进程内缓存（在 src/tools.js 那份之外，
+      //    这里再缓一次是因为"工具调用"与"界面点按钮"是两条独立的调用方）。
+      if (pathname === '/api/env-audit' && method === 'GET') {
+        try {
+          const timeoutMs = Math.min(30000, Math.max(2000, Number(getConfig().envAudit?.timeoutMs) || 8000));
+          const data = await auditEnvironment({ timeoutMs });
+          return json(res, 200, { ok: true, ...data });
+        } catch (error) {
+          // ⚠️ 这里**理论上到不了**（env-audit 承诺永不抛），兜着是为了"接口永远有完整形状"。
+          //    ⛔ 不把 error 原文透出去（里面可能有本机路径）。
+          return json(res, 500, {
+            ok: false,
+            error: '环境自查失败（内部出错，已按要求不抛异常）',
+            basis: '本地探测、未联网',
+            generatedAt: new Date().toISOString()
+          });
+        }
       }
 
       // 主动开口的只读评估（2026-09-19 加）：让设置页那一块能显示"现在会不会开口、为什么"。
@@ -4741,6 +4772,20 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     return port;  }
 
   async function stop() {
+    // ── 微信中继：**放在最前面，而且必须是同步的**（2026-10-23 第五十四对话补）──
+    // 🔴 原来这里什么都没有，后果是实打实的：应用退出后中继仍然活着，继续占着
+    //    11230（OneBot 端口）与 18999（推送回调端口）。下次启动时新中继
+    //    listen EADDRINUSE 当场死掉 ⇒ 界面全绿、消息永远不来，用户毫无线索
+    //    （这是交接文档「端口通了 ≠ 链路通了」那一层的地基）。
+    // ⚠️ 为什么必须在 `await` 之前：Electron 的 before-quit 是**同步**回调，
+    //    它调 core.stop() 但**不 await**（见 electron/main.js）。原本这些清理写在
+    //    `await orchestrator.abortAll()` 之后 —— 只要 abortAll 稍慢一点，进程就先退了，
+    //    后面那些清理**一行都不会执行**，中继于是成了孤儿。凡是
+    //    「不执行就会留下孤儿进程」的清理，一律排在第一个 await 之前。
+    try { wechatChannel.stop({ force: true }); } catch { /* ignore */ }
+    // 微信侧的 OneBot 客户端也要显式关：它自带重连定时器，不 close 会在退出瞬间
+    // 再试一次连接（把刚停掉的中继又探一遍，纯噪音）。
+    try { wechatOnebot?.close(); } catch { /* ignore */ }
     await orchestrator.abortAll();
     // 梦的定时器：不留一个还在跑的 interval
     try { dreamer.stop(); } catch { /* ignore */ }

@@ -249,11 +249,24 @@ function renderWechatStatus(st) {
         : (w.loginOk === null
           ? `hook 已通，但登录状态问不到（${w.error || '接口没回话'}）—— 这不等于没登录，先看下面那段通没通。`
           : `微信在跑、hook 已注入、已登录：${w.selfName || w.selfWxid || '(未知)'}`)));
+  // ── 自动重启的账（2026-10-23 补）────────────────────────────────────────
+  // 🔴 为什么界面必须说：中继崩了又自己爬起来，如果界面一个字都不说，
+  //    用户只会觉得「刚才那一阵怎么不回消息」，而排障时**最想知道的就是这件事**。
+  //    两种状态要分开说：pending（已判定要重启、定时器在跑，此刻端口不通）
+  //    与 count>0（已经重启过几次，现在其实在跑）—— 后者不是故障，但要留痕。
+  const rst = st.restart || {};
+  const restartNote = rst.pending
+    ? `🔴 中继刚刚退出，**正在自动重启**（第 ${rst.count}/${rst.max} 次）—— 这几秒里消息收不到。`
+    : (Number(rst.count) > 0
+      ? `（中继最近异常退出过 ${rst.count} 次，已自动拉起；最近一次退出码 ${rst.lastExit?.code ?? '?'}）`
+      : '');
   const step2Desc = !c.running
-    ? '中继没在跑（11230 没人听）。'
+    ? (rst.pending
+      ? `中继刚退出，正在第 ${rst.count}/${rst.max} 次自动重启（退避中，稍等几秒）。`
+      : '中继没在跑（11230 没人听）。')
     : (!c.bridgeConnected
       ? '中继在跑，但它没连上微信 hook（推送口 18999 没收到过东西）⇒ 消息进不来也发不出。'
-      : `通（已连上微信 hook${c.login ? `，微信侧登录 ${c.login.nickname || c.login.userId}` : ''}${c.eventsIn !== null && c.eventsIn !== undefined ? `，累计收到消息 ${c.eventsIn}` : ''}）`);
+      : `通（已连上微信 hook${c.login ? `，微信侧登录 ${c.login.nickname || c.login.userId}` : ''}${c.eventsIn !== null && c.eventsIn !== undefined ? `，累计收到消息 ${c.eventsIn}` : ''}）${restartNote}`);
   const step3Desc = !a.enabled
     ? '本应用的微信通道没启用（config.wechat.enabled=false）。'
     : (!a.connected ? '本应用没连上中继（会自己重试）。' : (a.bridgeConnected === false ? '连上中继了，但上游（②）不通。' : '通。'));

@@ -24,9 +24,33 @@ const REFUSED_RE = /^(ECONNREFUSED|EHOSTUNREACH|ENETUNREACH)/;
 // DNS 类：ENOTFOUND = 这个域名不存在；EAI_AGAIN = DNS 服务器没答上来（国内很常见）
 const DNS_RE = /^(ENOTFOUND|EAI_AGAIN|EAI_NODATA|EAI_NONAME)$/;
 
+// 🔴 自己被掐断的那一类（2026-10-23 第五十四对话实测补上，提案 ce4188cf 的根因）：
+//   `AbortSignal.timeout(ms)` 到点时抛的是 **DOMException**，不是 undici 的 TypeError：
+//     · TimeoutError  name='TimeoutError' code=23 message='The operation was aborted due to timeout'
+//     · AbortError    name='AbortError'   code=20 message='This operation was aborted'
+//   两者的 `code` 是**数字**，转成字符串是 '23' / '20' —— **都不含 TIMEOUT/ETIMEDOUT 字样**
+//   ⇒ 上面那条 `TIMEOUT_RE` 对它们必然落空，结果掉进最后的兜底分支：
+//     模型看到的是一句英文原文（"请求没成功：The operation was aborted."）外加
+//     「这是出口网络的问题」这个**错贴的结论**（实测 soutubot 每次慢都报这个）。
+//   ⇒ 判据不能只看 code，必须认 `name` 与 message 里的 aborted。
+const ABORT_NAME_RE = /^(TimeoutError|AbortError)$/;
+const ABORT_MSG_RE = /\babort(ed)?\b/i;
+
 function codeOf(err) {
   const c = err?.cause?.code || err?.code || err?.cause?.errno || err?.errno || '';
   return String(c || '').trim().toUpperCase().slice(0, 40);
+}
+
+/**
+ * 这个异常是不是"到点被我们自己掐断的"（DOMException TimeoutError / AbortError）。
+ * ⚠️ 为什么不复用 TIMEOUT_RE：那条正则匹配的是 **code**，而 DOMException 的 code 是数字
+ *    23/20，字符串化后一个 TIMEOUT 字也没有 —— 这就是 ce4188cf 的根因。
+ */
+function isAbortLike(err, detail) {
+  const name = String(err?.name || err?.cause?.name || '');
+  if (ABORT_NAME_RE.test(name)) return true;
+  // 有的包装层会把原始 DOMException 塞进 cause，name 丢了但 message 还在
+  return ABORT_MSG_RE.test(detail);
 }
 
 function statusOf(err) {
@@ -61,6 +85,13 @@ export function describeFetchError(err, { host = '', usedProxy = false } = {}) {
   if (CHALLENGE_RE.test(detail)) {
     what = '好像被 Cloudflare 的人机验证挡下了';
     tag = status ? `HTTP ${status}` : (code || '挑战页');
+  } else if (isAbortLike(err, detail)) {
+    // 🔴 2026-10-23（提案 ce4188cf 的根因修复）：这一条必须排在 DNS/超时/证书之前，
+    //    因为 DOMException 的 code 是数字 23/20，下面按 code 判的那几条对它全都失配，
+    //    最后会落到 detail 兜底 —— 把「我们自己到点掐断」说成「请求没成功 + 出口网络的问题」。
+    //    人话要点：① 是**我们**掐的（不是对面不回）；② 这种情况下慢是主因，可以和"连接超时"分开报。
+    what = '等到超时了（到点被我们自己掐断，不是对面明确报错）';
+    tag = String(err?.name || '') || code || 'aborted';
   } else if (DNS_RE.test(code)) {
     what = '域名解析不出来（DNS 没查到这个地址）';
     tag = code;

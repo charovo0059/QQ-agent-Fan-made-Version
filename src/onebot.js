@@ -1204,6 +1204,102 @@ export function extractFileSegments(segments) {
   return out;
 }
 
+/** 嵌套转发「这一次没展开」的标记（read_forward 靠它判断要不要再往下钻）。 */
+export const FORWARD_NESTED_MARK = '[转发的聊天记录·未展开';
+const FORWARD_NESTED_HINTS = ['[转发消息', '[合并转发聊天记录]', FORWARD_NESTED_MARK];
+
+/**
+ * 文本里还有没有**没展开的嵌套转发**。
+ *
+ * 🆕 2026-10-23（第五十四对话，提案 89506008，用户原话「合并转发里再套的转发希望能继续展开」）。
+ * 用途：read_forward 拿到存档时，原来只要文本以 `[合并转发 共` 开头就直接返回，
+ * 于是「外层展开了、内层还卡着」的条目永远修不好 —— 有了这个判据它才知道要再钻一层。
+ */
+export function hasUnexpandedForward(text) {
+  const s = String(text || '');
+  return FORWARD_NESTED_HINTS.some((h) => s.includes(h));
+}
+
+/** 落一行；超预算就收手（先落这一行再停，别断在半句上）。 */
+function pushForwardLine(st, line) {
+  st.lines.push(line);
+  st.chars += line.length + 1;
+  if (st.chars > st.maxChars) st.stop = true;
+}
+
+/**
+ * 取一层嵌套转发的节点。
+ * 三重闸：没 onebot（离线/入站不下钻）→ 深度到顶 → 循环引用（同一个 res_id 只进一次）。
+ * 任何一条都**如实返回原因**，绝不静默丢掉那一层。
+ */
+async function fetchNestedForward(resId, st, depth) {
+  if (!resId) return { ok: false, reason: '没有可用的转发标识' };
+  if (!st.onebot) return { ok: false, reason: '这次没带 OneBot 连接' };
+  if (depth >= st.maxDepth) return { ok: false, reason: '嵌套太深，只展开 ' + st.maxDepth + ' 层' };
+  if (st.visited.has(resId)) return { ok: false, reason: '循环引用' };
+  st.visited.add(resId);
+  try {
+    const r = await st.onebot.call('get_forward_msg', { id: String(resId) });
+    const nodes = Array.isArray(r?.messages)
+      ? r.messages
+      : (Array.isArray(r?.data?.messages) ? r.data.messages : []);
+    if (!nodes.length) return { ok: false, reason: '服务端没返回内容（可能已过期）' };
+    return { ok: true, nodes };
+  } catch (error) {
+    return { ok: false, reason: String(error?.message ?? error).replace(/\\s+/g, ' ').slice(0, 60) };
+  }
+}
+
+/** 递归渲染一层节点。prefix 给嵌套层级用（每深一层多两个空格 + 一个 ↳）。 */
+async function renderForwardNodes(nodes, st, prefix, depth) {
+  for (let i = 0; i < nodes.length; i++) {
+    if (st.stop) { st.truncated += nodes.length - i; return; }
+    if (st.lines.length >= st.maxNodes) { st.truncated += nodes.length - i; return; }
+    const n = nodes[i] || {};
+    const name = String(n.sender?.card || n.sender?.nickname || n.user_id || '?');
+    const nm = n.message ?? n.content;
+    let body = '';
+    const nested = [];
+    if (typeof nm === 'string') {
+      // 字符串形态一般是 CQ 码原文，剥掉 [CQ:xxx] 段保留纯文本
+      body = nm.replace(/\\[CQ:[^\\]]*\\]/g, '').trim();
+    } else if (Array.isArray(nm)) {
+      // ⚠️ forward 段**不再**清空 data 走占位符：它现在要么真展开（fetchNestedForward），
+      //    要么带原因标注。清空 data 是旧版「深度 1 封顶」的做法，用户看不见里面是什么。
+      const plain = [];
+      for (const s of nm) {
+        if (s && typeof s === 'object' && s.type === 'forward') { nested.push(s); continue; }
+        plain.push(s);
+      }
+      body = await segmentsToText(plain, {});
+      st.media.push(...extractMediaFromSegments(plain));
+    }
+    body = body.replace(/\\s+/g, ' ').trim().slice(0, 200);
+
+    if (!nested.length) {
+      if (body) pushForwardLine(st, prefix + name + ': ' + body);
+      continue;
+    }
+
+    // ── 这一条里带嵌套转发 ─────────────────────────────────────────────
+    const blocks = [];
+    for (const seg of nested) {
+      const resId = forwardIdFromData(seg?.data);
+      const r = await fetchNestedForward(resId, st, depth);
+      if (r.ok) blocks.push({ label: '[转发的聊天记录 共' + r.nodes.length + '条]', nodes: r.nodes });
+      else blocks.push({ label: FORWARD_NESTED_MARK + '：' + r.reason + ']', nodes: null });
+    }
+    const labels = blocks.map((b) => b.label).join(' ');
+    const lead = body ? prefix + name + ': ' + body + ' ' + labels : prefix + name + ': ' + labels;
+    pushForwardLine(st, lead);
+    // 子层缩进一层，并用 ↳ 明确「这是里面那层的谁在说话」
+    for (const b of blocks) {
+      if (!b.nodes || st.stop) continue;
+      await renderForwardNodes(b.nodes, st, prefix + '  ↳ ', depth + 1);
+    }
+  }
+}
+
 /**
  * 展开合并转发节点为可读文本（纯函数，便于测试）。
  *
@@ -1214,44 +1310,34 @@ export function extractFileSegments(segments) {
  *
  * 规则：
  *   - 每个节点一行「昵称: 内容」，内容复用 segmentsToText（@/图片/表情等占位一致）
- *   - 嵌套转发不再展开（深度 1 封顶，套娃截断）
- *   - 封顶：maxNodes 条 / maxChars 字符，超出注明"还有 N 条未展开"
+ *   - 🆕 嵌套转发**可以继续展开**（提案 89506008）：传了 onebot + maxDepth>1 就往里钻，
+ *     每深一层缩进加 ↳；钻不动（没连接 / 到顶 / 循环 / 服务端没内容）就**带原因标注**，
+ *     绝不静默丢那一层，也绝不假装「里面没东西」。
+ *   - 封顶：maxNodes 条 / maxChars 字符（**跨层共享**，嵌套绕不过预算）
  *   - 节点里的图片段同时提取到 media（url 新鲜，可用于取图/金句）
+ *
+ * ⚠️ 入站钩子**不要**下钻（app.js 传 maxDepth:1）：每层都要再发一次 get_forward_msg，
+ *    res_id 会过期、入站又最怕慢。深挖交给 read_forward 这个显式工具。
  *
  * @param {Array} nodes get_forward_msg 返回的 messages 数组
  * @returns {{ text: string, media: Array } | null} 无可用节点返回 null
  */
-export async function expandForwardNodes(nodes, { maxNodes = 30, maxChars = 3000 } = {}) {
+export async function expandForwardNodes(nodes, {
+  maxNodes = 30, maxChars = 3000, onebot = null, maxDepth = 2, depth = 1, visited = null
+} = {}) {
   if (!Array.isArray(nodes) || !nodes.length) return null;
-  const lines = [];
-  const media = [];
-  let truncated = 0;
+  const st = {
+    lines: [], media: [], chars: 0, truncated: 0, stop: false,
+    maxNodes, maxChars, onebot,
+    maxDepth: Math.max(1, Math.min(4, Number(maxDepth) || 2)),
+    visited: visited instanceof Set ? visited : new Set()
+  };
+  await renderForwardNodes(nodes, st, '', Math.max(1, Number(depth) || 1));
 
-  for (let i = 0; i < nodes.length; i++) {
-    if (lines.length >= maxNodes) { truncated = nodes.length - i; break; }
-    const n = nodes[i] || {};
-    const name = String(n.sender?.card || n.sender?.nickname || n.user_id || '?');
-    const nm = n.message ?? n.content;
-    let body = '';
-    if (typeof nm === 'string') {
-      // 字符串形态一般是 CQ 码原文，剥掉 [CQ:xxx] 段保留纯文本
-      body = nm.replace(/\[CQ:[^\]]*\]/g, '').trim();
-    } else if (Array.isArray(nm)) {
-      // 嵌套 forward 段清空 data → segmentsToText 输出 [转发消息] 占位（深度 1 封顶）
-      const segs = nm.map((s) => (s?.type === 'forward' ? { type: 'forward', data: {} } : s));
-      body = await segmentsToText(segs, {});
-      media.push(...extractMediaFromSegments(segs));
-    }
-    body = body.replace(/\s+/g, ' ').trim().slice(0, 200);
-    if (!body) continue;
-    lines.push(`${name}: ${body}`);
-    if (lines.join('\n').length > maxChars) { truncated = nodes.length - i - 1; break; }
-  }
-
-  const head = `[合并转发 共${nodes.length}条]`;
-  if (!lines.length) return { text: head, media };
-  const tail = truncated > 0 ? `\n…（还有 ${truncated} 条未展开）` : '';
-  return { text: `${head}\n${lines.join('\n')}${tail}`, media };
+  const head = '[合并转发 共' + nodes.length + '条]';
+  if (!st.lines.length) return { text: head, media: st.media };
+  const tail = st.truncated > 0 ? '\n…（还有 ' + st.truncated + ' 条未展开）' : '';
+  return { text: head + '\n' + st.lines.join('\n') + tail, media: st.media };
 }
 
 /**
@@ -1271,9 +1357,12 @@ export async function expandForwardNodes(nodes, { maxNodes = 30, maxChars = 3000
  * res_id 只在入站事件的 forward 段里出现一次，事后拿不回来 ——
  * 所以 app.js 入站时必须把它存进消息条目（fwdId），read_forward 才有得用。
  *
- * @returns {{text:string, media:Array, via:string}|{text:'',media:[],error:string}}
+ * 🆕 maxDepth（提案 89506008）：1 = 只看这一层（**入站钩子必须用 1**，理由见
+ *    expandForwardNodes 的注释）；>1 = 里面的转发也继续取。read_forward 走 3。
+ *
+ * @returns {{text:string, media:Array, via:string, nestedLeft:boolean}|{text:'',media:[],error:string}}
  */
-export async function fetchForward(onebot, { messageId = null, resId = null } = {}) {
+export async function fetchForward(onebot, { messageId = null, resId = null, maxDepth = 2 } = {}) {
   const attempts = [];
   if (resId) attempts.push(['res_id', { id: String(resId) }]);
   if (messageId !== null && messageId !== undefined && String(messageId) !== '') {
@@ -1286,8 +1375,16 @@ export async function fetchForward(onebot, { messageId = null, resId = null } = 
     try {
       const r = await onebot.call('get_forward_msg', params);
       const nodes = Array.isArray(r?.messages) ? r.messages : (Array.isArray(r?.data?.messages) ? r.data.messages : []);
-      const ex = await expandForwardNodes(nodes);
-      if (ex && ex.text) return { ...ex, via };
+      // 外层这一跳自己也算一层：把它塞进 visited，嵌套里再指回它时就直接判循环，
+      // 不会为"自己套自己"再发一次请求。
+      const visited = new Set(resId ? [String(resId)] : []);
+      const ex = await expandForwardNodes(nodes, { onebot, maxDepth, depth: 1, visited });
+      if (ex && ex.text) {
+        // nestedLeft = 展开完了、但里面还有没钻完的（到顶 / 循环 / 服务端没给）。
+        // 单独告诉调用方，是为了让它**如实**回一句"还有更里面那层没展开"，
+        // 而不是让模型以为整个转发就这些内容。
+        return { ...ex, via, nestedLeft: hasUnexpandedForward(ex.text) };
+      }
       errors.push(`${via}: 没有返回节点`);
     } catch (error) {
       errors.push(`${via}: ${error?.message ?? error}`);

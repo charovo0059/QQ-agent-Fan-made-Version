@@ -49,7 +49,13 @@ export class WechatChannel {
    * @param {(msg:string)=>void} [o.log]
    */
   constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weixinExe = '', injectExe = '', hookDll = '',
-    hookPort = 30001, hookCallbackPort = 18999, nodeExe = '', findPids = null, findChannelProcs = null, log = () => {} }) {
+    hookPort = 30001, hookCallbackPort = 18999, nodeExe = '', findPids = null, findChannelProcs = null, log = () => {},
+    // 🆕 2026-10-23（第五十四对话 · 中继稳定性）：中继进程**意外退出后自动拉起**的参数。
+    //   ⚠️ 判据是"**连续**快速退出"，不是"退出就重启"：崩溃通常会立刻再崩一次，
+    //     无限重启只会把日志刷满、把端口抢得一团糟。所以退避 + 次数上限。
+    restartOnExit = true, maxRestarts = 3, restartBaseMs = 2000, restartMaxMs = 30000,
+    // 退出后多久内重启算"又一次失败"（超过这个时长就认为跑稳了，计数清零）
+    restartStableMs = 60000 } = {}) {
     this.isPortOpen = isPortOpen
     this.relayStatusUrl = String(relayStatusUrl || 'http://127.0.0.1:11230').replace(/\/$/, '')
     // 中继端口从状态口 URL 里派生（写死 11230 的话，配置里改端口就成了谎话）
@@ -72,6 +78,21 @@ export class WechatChannel {
     this.proc = null
     this.startedAt = 0
     this.logs = []          // [{ at, text }]
+    // ── 自动重启（见构造函数里的说明）────────────────────────────────────
+    this.restartOnExit = restartOnExit !== false
+    this.maxRestarts = Math.max(1, Number(maxRestarts) || 3)
+    this.restartBaseMs = Math.max(500, Number(restartBaseMs) || 2000)
+    this.restartMaxMs = Math.max(this.restartBaseMs, Number(restartMaxMs) || 30000)
+    this.restartStableMs = Math.max(5000, Number(restartStableMs) || 60000)
+    /** 用户/应用**主动**停止过 ⇒ 不许再自己爬起来（否则"停止通道"会像没生效）。 */
+    this.stopping = false
+    /** 连续失败次数（跑稳一段时间后清零）。 */
+    this.restartCount = 0
+    /** 待执行的自动重启定时器句柄（stop() 必须能真的取消它）。 */
+    this.restartTimer = null
+    /** 最近一次自动重启的时间戳与原因（给页面/日志看"它为什么又起来了"）。 */
+    this.lastRestartAt = 0
+    this.lastExit = null
   }
 
   #candidatesFn = () => []
@@ -267,6 +288,18 @@ export class WechatChannel {
       },
       // 本模块自己拉起的中继进程（用户也可能在外面的窗口里自己跑 ⇒ 这里为 null 是正常的）
       managed: { pid: this.proc?.pid ?? null, startedAt: this.startedAt || null },
+      // ③ 自动重启的账（2026-10-23 补）：它**必须能被看见**。
+      //    中继自己崩了又自己爬起来，如果界面一个字都不说，用户只会觉得
+      //    「刚才那一阵怎么不回消息」—— 那正是本项目最忌的静默失败。
+      //    pending=true 表示"已经判定要重启、定时器在跑"，这时端口是不通的。
+      restart: {
+        onExit: this.restartOnExit,
+        pending: !!this.restartTimer,
+        count: this.restartCount,
+        max: this.maxRestarts,
+        lastRestartAt: this.lastRestartAt || null,
+        lastExit: this.lastExit ? { ...this.lastExit } : null
+      },
       script: { path: this.findScript(), candidates: this.candidates() }
     };
   }
@@ -306,27 +339,7 @@ export class WechatChannel {
         };
       }
       try {
-        // 🔴 用 Electron 自带的 node 跑（`ELECTRON_RUN_AS_NODE=1`）：
-        //    这样**不需要额外装 node**，打包环境里也成立。
-        const child = spawn(this.nodeExe, [script], {
-          cwd: path.dirname(script),
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-          stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true
-        });
-        this.proc = child;
-        this.startedAt = Date.now();
-        this.#push(`中继启动中（pid=${child.pid}，脚本 ${path.basename(script)}）…`);
-        for (const [stream, tag] of [['stdout', ''], ['stderr', '!']]) {
-          child[stream].on('data', (d) => {
-            for (const line of String(d).split(/\r?\n/)) if (line.trim()) this.#push(tag + line);
-          });
-        }
-        child.on('exit', (code, sig) => {
-          this.#push(`中继进程结束（code=${code} signal=${sig ?? ''}）`);
-          if (this.proc === child) this.proc = null;
-        });
-        child.on('error', (e) => this.#push(`中继进程启动失败：${e?.message ?? e}`));
+        const child = this.#spawnRelay(script);
         relayPart = { ok: true, pid: child.pid, script };
       } catch (e) {
         weixin = wxPromise ? await wxPromise : null;
@@ -337,6 +350,110 @@ export class WechatChannel {
     return { ...relayPart, weixin };
   }
 
+  /**
+   * 起一个中继子进程，并把「退出后要不要自己爬起来」挂上去。
+   *
+   * 🔴 为什么必须单独抽出来（2026-10-23 第五十四对话）：原来 spawn 与 exit 处理
+   *    都内联在 start() 里，exit 回调只写一行日志 ⇒ **中继死了没人管**。
+   *    而中继是本应用的子进程，微信那边一切正常、只有它没了的表现是
+   *    「界面全绿、消息永远不来」—— 用户完全看不出根因（实机日志 22:56:44
+   *    ERROR 11230 listen EADDRINUSE 之后进程即死，之后十几分钟无人补救）。
+   *    自动重启放进「拉起的那个动作」里，才能保证**每一代**都有兜底。
+   */
+  #spawnRelay(script) {
+    // 🔴 用 Electron 自带的 node 跑（ELECTRON_RUN_AS_NODE=1）：
+    //    这样**不需要额外装 node**，打包环境里也成立。
+    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null }
+    this.stopping = false;
+    const gen = (this.procGen = (this.procGen || 0) + 1);
+    const child = spawn(this.nodeExe, [script], {
+      cwd: path.dirname(script),
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+    this.proc = child;
+    this.startedAt = Date.now();
+    this.#push(`中继启动中（pid=${child.pid}，脚本 ${path.basename(script)}，第 ${gen} 代）…`);
+    for (const [stream, tag] of [['stdout', ''], ['stderr', '!']]) {
+      child[stream].on('data', (d) => {
+        for (const line of String(d).split(/\r?\n/)) if (line.trim()) this.#push(tag + line);
+      });
+    }
+    child.on('exit', (code, sig) => {
+      const ranMs = Date.now() - this.startedAt;
+      this.lastExit = { code, signal: sig ?? '', at: Date.now(), ranMs, gen };
+      this.#push(`中继进程结束（第 ${gen} 代，code=${code} signal=${sig ?? ''}，跑了 ${Math.round(ranMs / 1000)} 秒）`);
+      // ⚠️ 只有「当前这一代」退出才清 proc：旧代迟到退出的回调不许把新代指成"没了"
+      //    （否则下一次 start() 又会去 spawn 第二个，两个抢 11230）。
+      if (this.proc === child) this.proc = null;
+      if (this.proc && this.proc !== child) return;
+      this.#scheduleRestart({ code, sig, ranMs, script });
+    });
+    child.on('error', (e) => this.#push(`中继进程启动失败：${e?.message ?? e}`));
+    return child;
+  }
+
+  /**
+   * 决定「要不要把这个已经死掉的中继拉起来」，并把理由写清楚。
+   *
+   * 三条纪律：
+   *  ① **用户主动停的不重启**（stopping）—— 否则点「停止通道」后它自己又回来，
+   *    按钮看起来就像没生效（本项目最忌的"看起来做了、其实没做"）。
+   *  ② **连续快速崩溃有上限**：只有跑稳过 restartStableMs 才清零计数，否则 +1；
+   *    超过 maxRestarts 就**停止自动重启并把原因写进日志**（⛔ 不静默）。
+   *  ③ **宁可晚一点也不要抢端口**：退避从 restartBaseMs 起翻倍，封顶 restartMaxMs。
+   *     （实测 EADDRINUSE 时立刻重启＝立刻再撞一次，纯刷日志。）
+   */
+  #scheduleRestart({ code, sig, ranMs, script }) {
+    if (!this.restartOnExit || this.stopping) {
+      this.#push('中继已退出；本次不自动重启（' + (this.stopping ? '是主动停止的' : '配置里关了 restartOnExit') + '）');
+      return;
+    }
+    const clean = code === 0 && !sig;
+    if (ranMs >= this.restartStableMs && this.restartCount > 0) {
+      // 跑稳过一段时间 ⇒ 之前那串「连续崩溃」到此为止，重新从头数。
+      // ⚠️ 注意不是「清零就完事」：**这一次**崩溃仍然是新一轮的第 1 次
+      //    （下面统一 +1）。写成「清零后不计数」会让计数停在 0，日志出现
+      //    「第 0/3 次」这种读不懂的话。
+      this.#push(`中继稳定运行过 ${Math.round(ranMs / 1000)} 秒，自动重启计数清零（这次崩溃重新算第 1 次）`);
+      this.restartCount = 0;
+    }
+    this.restartCount += 1;
+    if (this.restartCount > this.maxRestarts) {
+      this.#push(`🔴 中继连续 ${this.restartCount - 1} 次异常退出（本次 code=${code}），已达上限 ${this.maxRestarts} 次 ⇒ **停止自动重启**。`
+        + '请到「微信通道」页看日志最后几行（常见原因：11230 被别的程序占着 / relay-wechat 依赖没装 / 端口配置冲突）。');
+      return;
+    }
+    const delay = Math.min(this.restartMaxMs, this.restartBaseMs * Math.pow(2, Math.max(0, this.restartCount - 1)));
+    // ⚠️ 毫秒级要说毫秒：配置里可以把退避调到 100ms 级（测试/调试），
+    //    写成 Math.round(delay/1000) 会变成「0 秒后自动重启」这种读不懂的话。
+    const delayText = delay < 1000 ? `${delay} 毫秒` : `${Math.round(delay / 1000)} 秒`;
+    this.#push(`${clean ? '中继正常退出' : '中继异常退出'} ⇒ ${delayText}后自动重启（第 ${this.restartCount}/${this.maxRestarts} 次）`);
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (this.stopping) return;
+      // 端口还开着 ⇒ 已经有别的东西在上面跑了，不要再抢（⛔ 不许出现两个中继）
+      this.isPortOpen('127.0.0.1', this.relayPort).then((up) => {
+        if (up) {
+          this.#push(`自动重启跳过：${this.relayPort} 已经有东西在监听（可能别人已经把它拉起来了）`);
+          return;
+        }
+        try {
+          const s = this.findScript();
+          if (!s) { this.#push('自动重启失败：找不到中继启动脚本（去设置里指定 wechat.channelScript）'); return; }
+          this.lastRestartAt = Date.now();
+          const child = this.#spawnRelay(s);
+          this.#push(`中继已自动重启（pid=${child.pid}）`);
+        } catch (e) {
+          this.#push(`自动重启失败：${e?.message ?? e}`);
+        }
+      }).catch((e) => this.#push(`自动重启前探端口失败：${e?.message ?? e}`));
+    }, delay);
+    // 同 OneBotClient 的重连定时器：别让它吊住事件循环（测试里要能干净退出）。
+    if (typeof this.restartTimer.unref === 'function') this.restartTimer.unref();
+  }
   /**
    * 保证微信在跑**且 hook 已注入**（不在就注入启动，然后等 30001 端口通）。
    * @returns {Promise<{ok:boolean, alreadyRunning?:boolean, launched?:boolean, waitedMs?:number, error?:string, exe?:string}>}
@@ -493,6 +610,12 @@ export class WechatChannel {
    *    —— 因为那个按钮**写的就是停止通道**，点了却不动才是不对。
    */
   stop({ force = false } = {}) {
+    // 🔴 这两行是自动重启的刹车（2026-10-23 加 restartOnExit 时必须配套）：
+    //    stopping=true 让已在排队的那次重启放弃；清掉定时器让还没到点的那次根本不发生。
+    //    少这两行，「停止通道」按下去两秒后中继自己又爬起来，用户看到的是这个按钮不管用。
+    this.stopping = true;
+    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null }
+    this.restartCount = 0;
     const proc = this.proc;
     if (proc) {
       try {

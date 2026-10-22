@@ -114,6 +114,12 @@ async function openAboutModal() {
       `<div class="hint" style="margin-bottom:5px">升级时对着这份清单核对"哪些要重新合并"。</div>
        <ol style="margin:0;padding-left:20px;font-size:12px;line-height:1.65">${patches.map((p) => `<li>${esc(p)}</li>`).join('')}</ol>`
     )}
+    ${section('部署环境自查（只读）',
+      `<div class="hint" style="margin-bottom:5px">问"这台机器跑在什么环境、装了什么版本"时用；也可以直接问她（她有同名工具）。
+        依据是<b>本地探测、未联网</b>：只读版本号，不启动浏览器、不改任何设置，路径与密钥已抹掉。</div>
+       <div id="about-envbody" style="font-size:12px"></div>
+       <button class="btn btn-small" id="about-envaudit" style="margin-top:6px">开始自查</button>`
+    )}
     <div class="hint">数据目录里是记忆、存档和配置本身 —— 升级或搬家前记得整个复制走。</div>`;
 
   const foot = `
@@ -169,6 +175,44 @@ async function openAboutModal() {
     }
     setTimeout(() => { e.target.textContent = '复制信息'; }, 2000);
   });
+
+  // ── 部署环境自查（🆕 2026-10-23 第五十四对话 · 提案 17a954dc）──
+  // 为什么要一个按钮、而不是弹窗一开就拉：它要**起子进程**（最坏 9 个、总 8 秒预算），
+  //   而这个弹窗是一点就开的 —— 让人为了看版本号干等 8 秒不能接受。
+  // ⚠️ 本段只用 overlay.querySelector 拿元素、全程可选链：
+  //   判据 test-about-ui.mjs 用假 DOM 跑这个函数，拿不到元素时**必须不炸**。
+  const envBtn = overlay.querySelector('#about-envaudit');
+  const envBody = overlay.querySelector('#about-envbody');
+  envBtn?.addEventListener('click', async () => {
+    const envLabel = envBtn.textContent;
+    envBtn.disabled = true;
+    envBtn.textContent = '正在探测…';
+    if (envBody) envBody.innerHTML = '<span class="muted">正在读本地版本号（最多几秒）…</span>';
+    try {
+      const res = await fetch('/api/env-audit', { headers: { 'x-console-token': CONSOLE_MARKER } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json();
+      const ext = Array.isArray(d.externals) ? d.externals : [];
+      const depList = (Array.isArray(d.deps) ? d.deps : []).map((x) => `${x.name}@${x.version || '?'}`).join('、');
+      const rt2 = d.runtime || {};
+      const extRows = ext.map((e) => row(e.title || e.key, e.ok ? (e.version || '读到了，但没解析出版本号') : (e.detail || '没读到'))).join('');
+      if (envBody) {
+        envBody.innerHTML = [
+          row('程序', `${d.app?.name || '-'} ${d.app?.version || ''}`.trim()),
+          row('Node / Electron', `${rt2.node || '-'} / ${rt2.electron || '-'}`),
+          row('系统', `${rt2.platform || '-'} ${rt2.arch || '-'} ${rt2.osRelease || ''}`.trim()),
+          row('依赖', depList || '-'),
+          extRows
+        ].join('');
+      }
+      envBtn.textContent = `自查完成（${Math.max(0, Number(d.elapsedMs) || 0)} 毫秒）`;
+    } catch (error) {
+      if (envBody) envBody.innerHTML = '<span style="color:var(--red)">自查失败：' + esc(error?.message || error) + '</span>';
+      envBtn.textContent = '自查失败';
+    }
+    setTimeout(() => { envBtn.textContent = envLabel; envBtn.disabled = false; }, 4000);
+  });
+
 }
 
 /**
