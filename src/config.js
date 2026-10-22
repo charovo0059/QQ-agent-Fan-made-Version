@@ -557,33 +557,50 @@ export const DEFAULT_CONFIG = {
     //   `test-真实标识符不外泄.mjs:52-67` 会拦任何真号入库。
     expectedSelfId: ''
   },
-  // 微信接入（2026-09-20 第八对话加）—— 走"中继"这条 OneBot v11 通道。
+  // 微信接入（2026-09-20 第八对话加；2026-10-22 第五十三对话**整条链路重做**）—— 走"中继"这条 OneBot v11 通道。
   //
-  // 链路（详见 工具-中继/README.md 与 事件映射实测结论.md）：
-  //   微信 ⇄ WeFlow(读) + AstrWeChat Bridge(读+UIA 发送) ──反向 WS──→ 中继 ──→ 本应用
+  // 链路（详见 relay-wechat/docs/契约-模块接口.md 与 docs/契约-微信页改造后状态.md）：
+  //   微信 4.1.10.27（E:\Weixin410）+ version.dll 注入 ──:30001──→ relay-wechat（本机 Node 进程）
+  //     ├─ :18999/hook  收微信推送（WinHTTP POST，地址来自微信目录里 wx.ini 的 recv_url）
+  //     └─ :11230       给本应用（WS /ws + HTTP POST /{action}，OneBot v11）
   // 本应用只是**再连一个 OneBot 客户端**到中继：WS 收事件、HTTP 调 API。
-  // 为什么能这么接：Bridge 推的就是标准 OneBot v11（实测事件形状见上面那份文档），
-  //   所以事件顺着现成的 handleOneBotEvent 流进同一套 store / 编排器，不用改架构。
+  // 为什么能这么接：中继对外就是标准 OneBot v11，所以事件顺着现成的 handleOneBotEvent
+  //   流进同一套 store / 编排器，不用改架构（app 本体零改动，这是重做方案的第一条硬约束）。
   //
-  // ⚠️ 默认关闭。开启前必须先把中继与 Bridge 跑起来，否则会不断重连（有退避，无害但刷日志）。
+  // 🔴 2026-10-22 起 **WeFlow / AstrWeChat Bridge / 5031 / 11229 全部下线**：
+  //   旧链路要靠 WeFlow 读库 + Bridge 用 UIA 点输入框才能发消息（微信 4.x 界面自绘、无输入框），
+  //   现在改成往微信进程里注入 version.dll，直接调微信自己的收发接口。
+  //
+  // ⚠️ 默认关闭。开启前必须先把中继跑起来（微信注入与否由 autoLaunchWeixin 决定），
+  //    否则会不断重连（有退避，无害但刷日志）。
   wechat: {
     enabled: false,                        // 总开关
     wsUrl: 'ws://127.0.0.1:11230/ws',      // 中继给 agent 的事件口
-    httpUrl: 'http://127.0.0.1:11230',     // 中继给 agent 的 API 口
+    httpUrl: 'http://127.0.0.1:11230',     // 中继给 agent 的 API 口（也是 /__status 自检口）
     accessToken: '',                       // 中继不校验（本机回环）；留作将来收紧
-    autoLaunchRelay: false,                // 🆕 已接线（2026-09-20）：true = app 启动时自动拉起整条微信通道
-    // 🆕 自动拉起通道时，要不要顺手把 WeFlow 也点着（默认 true）。
-    //    默认 true 的理由：WeFlow 没开时，通道会**起来得完全正常**（中继在跑、Bridge 也连上），
+    autoLaunchRelay: false,                // 已接线：true = app 启动时自动拉起整条微信通道
+    // 自动拉起通道时，要不要顺手把微信也注入起来（默认 true）。
+    //    默认 true 的理由：微信没注入时，中继会**起来得完全正常**（11230 在跑、本应用也连上了），
     //    只是永远收不到消息 —— 这是本项目最忌的"看着成功其实是空的"。
-    //    想自己手动管 WeFlow 的，把它设成 false。
-    autoLaunchWeFlow: true,
-    // 🆕 「微信」页签用：通道启动脚本（跑微信通道.mjs）的路径。
-    //    留空 = 自动找（开发布局在工作区「工具-中继」里；打包布局应随 app 分发）。
+    //    想自己手动管微信的，把它设成 false。
+    autoLaunchWeixin: true,
+    // 「微信」页签用：中继启动脚本（relay-wechat/index.js）的路径。
+    //    留空 = 自动找（开发布局在工作区「dsh qq\relay-wechat」里；打包布局应随 app 分发）。
     //    为什么要可配：开发机与别人机器上的目录结构不一样，写死必然有一边找不到。
     channelScript: '',
-    // 🆕 WeFlow 的可执行文件路径（第三方 GUI 应用）。只用于"没跑就替用户点一下火"，
-    //    我们**不打包分发它**（见 分析-微信接入插件化与分发评估.md）。
-    weflowExe: ''
+    // 微信主程序、注入器（wxinject.exe）、要注入的 DLL（version.dll）的路径。
+    //    全部留空 = 自动找常见布局；填了就只认填的那条。
+    //    ⚠️ 微信版本必须与 DLL 的偏移表对应（当前只适配 4.1.10.27）—— 换版本要换 DLL。
+    weixinExe: '',
+    injectExe: '',
+    hookDll: '',
+    // 微信进程内 hook 的 HTTP 端口（version.dll 在那个进程里起的）。
+    //    必须与中继的 wxhookPort 一致（relay-wechat/config.json）。
+    hookPort: 30001,
+    // 中继收推送的端口（注入时告诉微信"有新消息往这儿 POST"）。
+    //    必须与中继的 hookPort 一致（relay-wechat/config.json），也必须与微信目录里
+    //    wx.ini 的 recv_url 对得上 —— 三处不一致的表现是"微信在跑、中继也在跑，就是收不到消息"。
+    hookCallbackPort: 18999
   },
   // 控制台界面的偏好（纯显示层，不影响任何后端行为）
   //

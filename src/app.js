@@ -674,7 +674,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     wechatUpstream.checkedAt = Date.now();
 
     // 🆕 2026-09-27（第二十七对话）：通道真的在线时，**顺手同步一次名字表**。
-    //   放这里的理由：`online === true` 恰好就是"桥连着、WeFlow 也在"的那个时刻，
+    //   放这里的理由：`online === true` 恰好就是"微信进程在跑、hook 通了、也登录了"的那个时刻，
     //   而"开机自动更新一次"要的正是这个时机 —— 不必另起一个定时器（本项目对全局定时器很克制）。
     //   限流与失败处理都在 maybeSyncWechatContacts 里；这里 fire-and-forget，绝不拖慢 /api/status。
     if (wechatUpstream.online === true) {
@@ -716,7 +716,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     }
     const rows = Array.isArray(raw?.contacts) ? raw.contacts : (Array.isArray(raw) ? raw : []);
     if (!rows.length) {
-      return { ok: false, error: '桥回了 0 条 —— WeFlow 没跑、或者它的表当前是空的（这时保留旧名字，不覆盖）' };
+      return { ok: false, error: '中继回了 0 条联系人 —— 微信没登录、或 hook 还没学到通讯录（这时保留旧名字，不覆盖）' };
     }
     const stat = syncContacts(rows);
     log(`[wechat-contacts] 同步名字（${reason || '未注明'}）：读到 ${rows.length} 条 ⇒ `
@@ -732,12 +732,12 @@ export function createApp({ log = console.log, resume = [] } = {}) {
   //    手动按钮**绕过**这道闸（用户点了就该真的去问）。
   // 🔴 2026-10-03（第三十六对话 · 交接 §3-52）补上 `retryAt` 失败地板。
   //    为什么必须有它（真机实测的账）：原来**只在成功时**更新 `at` ⇒ 一旦桥那边永久失败
-  //    （实测：WeFlow 的数据组件从 13:00:40 起起不来，桥每问一次都回 0 条），
+  //    （实测：中继稳定回 0 条 —— 微信没登录就一直是空的），
   //    这道 30 分钟的闸就**整个失效**：`bridge.log` 的 `echo=relay-N` 实测从
   //    "间隔 30~31 分钟"变成"约 4 秒一次"，一晚上白敲上万次。
   //    ⚠️ 这不是新发现 —— **QQ 侧那套早就写对了**（见下面 `qqNameSync.retryAt` 与那段注释，
   //       它明确点出了微信侧这个不对称），只是当时没有回填。现在两边同构。
-  //    ⚠️ 与候选 1（桥日志带上 WeFlow 的错误体）是**一件事的两半**：只做这个不做那个，
+  //    ⚠️ 与候选 1（中继日志带上微信侧的错误体）是**一件事的两半**：只做这个不做那个，
   //       就变成"把日志变少"冒充"把问题暴露出来"。
   const WECHAT_CONTACT_SYNC_INTERVAL_MS = 30 * 60 * 1000;
   const WECHAT_CONTACT_SYNC_RETRY_MS = 60 * 1000;
@@ -826,65 +826,56 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     }
   }
 
-  // ── 微信通道（中继 + Bridge）的生命周期：与 SnowLuma 那套同构（用户要"统一类似的界面"）──
+  // ── 微信通道（微信注入 + 中继）的生命周期：与 SnowLuma 那套同构（用户要"统一类似的界面"）──
+  // 🔴 2026-10-22 第五十三对话**整条链路重做**：旧链路是 WeFlow(读) + AstrWeChat Bridge(UIA 发送)，
+  //    用户拍板整套下线（见 src/config.js 的 wechat 段注释与 relay-wechat/docs/ 两份契约）。
   const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  // 工作区根：app 在 <工作区>\QQ Agent\resources\app ⇒ 往上四层
+  // 工作区根：app 在 <工作区>\QQ Agent\resources\app ⇒ 往上三层 = 工作区（"dsh qq"）
   const WORKSPACE_DIR = path.resolve(APP_DIR, '..', '..', '..');
-  /** 通道脚本路径：**每次从当前配置读**（用户可能在设置里改过；启动时读一次就过期了）。 */
+  // 工作区所在的盘根（开发机上微信被解到 E:\Weixin410，见 relay-wechat/docs/契约-微信页改造后状态.md）
+  const DRIVE_ROOT = path.parse(WORKSPACE_DIR).root;
+  /** 中继脚本路径：**每次从当前配置读**（用户可能在设置里改过；启动时读一次就过期了）。 */
   const wechatScriptFromConfig = () => {
     try { return String(getConfig().wechat?.channelScript || '') } catch { return '' }
   };
-  // 脚本候选：① 设置里指定的 ② 开发布局（工作区「工具-中继」）③ 打包布局（随 app 的 wechat-channel\）。
-  // 为什么要一串候选：开发机与别人机器上的目录结构不一样，写死任何一条都必然有一边找不到。
-  // WeFlow 的 Access Token：**只有"探它读不读得到库"这一件事需要它**（2026-10-04 第四十对话 · 批 0）。
-  // 🔴 token 是**凭据** ⇒ 从本地两处已有凭据文件现读，⛔ 不写进代码、不进日志、不进任何 API 返回
-  //    （对外只报状态码/错误码，见 `wechat-channel.js` 的 `#probeWeFlowDb`）。
-  // 来源顺序与 `工具-中继\config.mjs`（**真正读库的那个人**）保持一致，再兜底 Bridge 自己那份：
-  //   ① 环境变量 WEFLOW_TOKEN
-  //   ② 工具-中继\本地-凭据.json 的 weflowToken（中继在用）
-  //   ③ 工具-中继\bridge-config.json 的 access_token（Bridge 在用，同样是它的 Access Token）
-  //   两份文件都被 .gitignore 挡着、都不入库；⛔ 别在这里另立"第四个凭据文件"。
-  // ⚠️ 为什么传**函数**而不是读一次存下来：与 scriptCandidates / weflowExe 同一个道理 ——
-  //    文件是人在外面改的，存成快照就得重启才认。
-  const weflowTokenFrom = () => {
-    const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
-    try {
-      const env = String(process.env.WEFLOW_TOKEN || '').trim();
-      if (env) return env;
-      const cred = readJson(path.join(WORKSPACE_DIR, '工具-中继', '本地-凭据.json'));
-      const fromCred = String(cred?.weflowToken || '').trim();
-      if (fromCred) return fromCred;
-      const bridge = readJson(path.join(WORKSPACE_DIR, '工具-中继', 'bridge-config.json'));
-      return String(bridge?.access_token || '').trim();
-    } catch (e) {
-      // 读不到就按"读不到库"处理（界面与自检会如实说），但**要出声** —— 本项目的头号病是静默失败。
-      log('[wechat] 读 WeFlow token 失败（本次按"读不到库"处理）：' + (e?.message ?? e));
-      return '';
-    }
+  /** 配置里的某个微信路径（同样每次现读 ⇒ 改配置不用重启）。 */
+  const wxPathFromConfig = (key) => {
+    try { return String(getConfig().wechat?.[key] || '').trim() } catch { return '' }
   };
+  // 脚本候选：① 设置里指定的 ② 开发布局（工作区「relay-wechat」）③ 打包布局（随 app 的 relay-wechat\）。
+  // 为什么要一串候选：开发机与别人机器上的目录结构不一样，写死任何一条都必然有一边找不到。
   const wechatChannel = new WechatChannel({
     isPortOpen,
     relayStatusUrl: cfg.wechat?.httpUrl || 'http://127.0.0.1:11230',
     // 传**函数**而不是数组：用户可能随时在设置里改 channelScript，现算才不用重启
     scriptCandidates: () => [
       wechatScriptFromConfig(),
-      path.join(WORKSPACE_DIR, '工具-中继', '跑微信通道.mjs'),
-      path.join(APP_DIR, 'wechat-channel', '跑微信通道.mjs')
+      path.join(WORKSPACE_DIR, 'relay-wechat', 'index.js'),
+      path.join(APP_DIR, 'relay-wechat', 'index.js')
     ],
-    // WeFlow 同理（也传函数）：先看配置，再试几个常见布局。
-    // ⚠️ 为什么是一串候选而不是一条：WeFlow 是**别人装的**第三方应用，装在哪我们说了不算。
-    //    写死一条的结果就是"在我机器上好好的，在别人机器上点了没反应"。
-    weflowExe: () => {
-      const fromCfg = (() => { try { return String(getConfig().wechat?.weflowExe || '') } catch { return '' } })()
-      return [
-        fromCfg,
-        path.join(path.resolve(WORKSPACE_DIR, '..'), 'weflow', 'WeFlow.exe'),          // 开发机：工作区的兄弟目录
-        path.join(WORKSPACE_DIR, 'AstrWeChat', 'WeFlow.exe'),
-        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'WeFlow', 'WeFlow.exe'),
-        path.join(process.env.PROGRAMFILES || '', 'WeFlow', 'WeFlow.exe')
-      ]
-    },
-    weflowToken: weflowTokenFrom,
+    // 微信主程序：只认 4.x 的 Weixin.exe（3.x 已被服务端硬封，见 config.js 注释）。
+    // ⚠️ 版本必须与 DLL 的偏移表对应（当前只适配 4.1.10.27）—— 换版本要换 DLL。
+    weixinExe: () => [
+      wxPathFromConfig('weixinExe'),
+      path.join(DRIVE_ROOT, 'Weixin410', 'Weixin.exe'),
+      path.join(DRIVE_ROOT, 'Weixin', 'Weixin.exe'),
+      path.join(process.env.PROGRAMFILES || '', 'Tencent', 'Weixin', 'Weixin.exe'),
+      path.join(process.env.LOCALAPPDATA || '', 'Tencent', 'Weixin', 'Weixin.exe')
+    ],
+    // 注入器与 DLL：随中继一起分发（relay-wechat/tools/），也可在设置里指定。
+    injectExe: () => [
+      wxPathFromConfig('injectExe'),
+      path.join(WORKSPACE_DIR, 'relay-wechat', 'tools', 'wxinject.exe'),
+      path.join(APP_DIR, 'relay-wechat', 'tools', 'wxinject.exe')
+    ],
+    hookDll: () => [
+      wxPathFromConfig('hookDll'),
+      path.join(WORKSPACE_DIR, 'relay-wechat', 'tools', 'version.dll'),
+      path.join(APP_DIR, 'relay-wechat', 'tools', 'version.dll')
+    ],
+    // 两个端口都在配置里（默认 30001 / 18999），且必须与中继的 config.json、微信目录的 wx.ini 三处一致。
+    hookPort: Number(wxPathFromConfig('hookPort')) || 30001,
+    hookCallbackPort: Number(wxPathFromConfig('hookCallbackPort')) || 18999,
     log: (...a) => log('[wechat-channel]', ...a)
   });
 
@@ -2354,13 +2345,13 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       }
       if (pathname === '/api/wechat/channel/start' && method === 'POST') {
         try {
-          // 🔴 起通道之前先把 WeFlow 点着（默认做）。
-          //    为什么默认做：少了这一步，用户会遇到"通道起来了、日志也正常，就是收不到消息"，
-          //    而原因是 WeFlow 没开 —— 这正是本项目最忌的"看着成功其实是空的"。
-          //    想只起通道、不碰 WeFlow 的，显式传 { launchWeFlowFirst: false }。
+          // 🔴 起通道之前先把微信注入起来（默认做）。
+          //    为什么默认做：少了这一步，用户会遇到"中继起来了、日志也正常，就是收不到消息"，
+          //    而原因是微信没注入（没有 hook，也就没有推送）—— 这正是本项目最忌的"看着成功其实是空的"。
+          //    想只起中继、不碰微信的，显式传 { launchWeixinFirst: false }。
           const body = await readBody(req).catch(() => ({}));
-          const launchWeFlowFirst = body?.launchWeFlowFirst !== false;
-          const r = await wechatChannel.start({ launchWeFlowFirst });
+          const launchWeixinFirst = body?.launchWeixinFirst !== false;
+          const r = await wechatChannel.start({ launchWeixinFirst });
           return json(res, r.ok ? 200 : 400, r);
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -2391,38 +2382,43 @@ export function createApp({ log = console.log, resume = [] } = {}) {
           const cfgNow = getConfig();
           const cfgWx = cfgNow.wechat || {};
           const st = await wechatStatusWithAgent();
-          const exe = wechatChannel.resolveWeFlowExe();
+          const exe = wechatChannel.resolveWeixinExe();
           const script = wechatChannel.findScript();
           const items = [];
           const add = (key, ok, title, detail) => items.push({ key, ok: !!ok, title, detail: String(detail || '') });
 
           add('enabled', cfgWx.enabled, '微信通道总开关',
             cfgWx.enabled ? 'config.wechat.enabled = true' : 'config.wechat.enabled = false ⇒ 收不到也不回；到「设置」打开');
-          add('script', !!script, '通道启动脚本',
-            script || `找不到（跑微信通道.mjs）。找过：${wechatChannel.candidates().join(' ｜ ') || '(无候选)'}；可在设置里填 wechat.channelScript`);
-          // 🔴 2026-10-04（第四十对话 · 批 0）：「端口通」**不等于**「读得到库」。
-          //    实测它的数据组件挂掉期间端口照样通、`/api/v1/health` 还是 200，而读库接口全 500
-          //    `{"error":"错误码: -101"}`。旧版这一项只看 `st.weflow.running` ⇒ 体检表打绿，
-          //    而同一屏的微信页那时也该是绿的（**假绿**），用户据此以为"能收能发"。
-          //    ⇒ 现在与微信页**同一口径**：`running && dbOk !== false`（都来自同一个 status()）。
-          const dbBad = st.weflow.dbOk === false;
-          add('weflow', st.weflow.running && !dbBad, '① WeFlow（读微信库）',
-            !st.weflow.running
-              ? (st.weflow.starting
-                ? `进程在（pid ${(st.weflow.pids || []).join(',')}）但端口 5031 没通 —— 它可能还在加载，或停在登录/选数据的界面`
-                : (exe.path ? `没在跑。点「启动 WeFlow」即可（会用 ${exe.path}）` : `没在跑，而且找不到它的程序。找过：${exe.candidates.join(' ｜ ') || '(没配任何路径)'}；到设置里填 wechat.weflowExe`))
-              : (dbBad
-                ? `🔴 端口 5031 已通，但**读不到库**（${st.weflow.dbError || '未知错误'}）⇒ 微信消息收不到、发出去也确认不了。这一层是它自己的数据组件（不归我们管，重启通常也没用）`
-                : `端口 5031 已通，读库正常；程序 ${st.weflow.exe || '(未解析到路径)'}`));
-          add('relay', st.channel.running, '② 中继（11230）',
-            st.channel.running ? '在跑' : '没在跑 —— 点「启动通道」（会顺手把 WeFlow 也点着）');
-          add('bridge', st.channel.running && st.channel.bridgeConnected, '② Bridge 有没有连进中继',
+          add('script', !!script, '中继启动脚本',
+            script || `找不到（relay-wechat/index.js）。找过：${wechatChannel.candidates().join(' ｜ ') || '(无候选)'}；可在设置里填 wechat.channelScript`);
+          // ① 微信：三段分开报（进程在 / hook 通了 / 登录了），因为**处置完全不同**。
+          //    hook 没通时 loginOk 是 null（**问不到**），⛔ 不许折成 false 说成"没登录" ——
+          //    这正是本项目反复栽的三态坑（旧版把"端口通"当"能收"，界面假绿过）。
+          add('wxproc', st.wx.running, '① 微信进程',
+            st.wx.running
+              ? (st.wx.starting
+                ? `进程在（pid ${(st.wx.pids || []).join(',')}），但 hook 端口 ${st.wx.port} 还没通 —— 它可能还在加载`
+                : `在跑；程序 ${st.wx.exe || '(未解析到路径)'}`)
+              : (exe.path
+                ? `没在跑。点「启动微信」即可（会用 ${exe.path}）`
+                : `没在跑，而且找不到它的程序。找过：${exe.candidates.join(' ｜ ') || '(没配任何路径)'}；到设置里填 wechat.weixinExe`));
+          add('wxhook', st.wx.hookOk, `① hook 注入（端口 ${st.wx.port}）`,
+            st.wx.hookOk
+              ? `注入通了（${st.wx.port} 在听）`
+              : (st.wx.running
+                ? `🔴 微信在跑，但进程里没有 hook（${st.wx.port} 没人听）⇒ 收不到也发不出。这一条不解决，后面全都不用看`
+                : `微信没跑，这一项无从谈起${st.wx.error ? `（${st.wx.error}）` : ''}`));
+          add('wxlogin', st.wx.loginOk === true, '① 微信登录状态',
+            st.wx.loginOk === true
+              ? `${st.wx.selfName || '(没昵称)'}（${st.wx.selfWxid}）`
+              : (st.wx.loginOk === false
+                ? '🔴 微信没登录（hook 回的身份是空的）⇒ 收到也回不了。去微信窗口扫码登录'
+                : `问不到登录状态（${st.wx.error || 'hook 没通'}）—— 这不是"没登录"，是"还问不到"`));
+          add('relay', st.channel.running, `② 中继（${wechatChannel.relayPort}）`,
+            st.channel.running ? '在跑' : '没在跑 —— 点「启动通道」（会顺手把微信也注入起来）');
+          add('bridge', st.channel.running && st.channel.bridgeConnected, '② 中继有没有连上微信 hook',
             !st.channel.running ? '中继没在跑，这一项无从谈起'
-              : (st.channel.bridgeConnected ? '已连入' : '🔴 中继在跑但 Bridge 没连入 —— **看着通了其实收不到**。Bridge 是微信侧那个常驻程序，去它的窗口看日志'));
-          add('login', !!(st.channel.login && st.channel.login.userId), '② 微信侧登录身份',
-            st.channel.login?.userId
-              ? `${st.channel.login.nickname || ''}（${st.channel.login.userId}）`
-              : '🔴 拿不到登录身份（self_id 为 0）。发出去的消息会带错 self_id，规则判定会跟着错');
+              : (st.channel.bridgeConnected ? '已连上' : `🔴 中继在跑但问不到微信 hook —— **看着通了其实收不到**。看中继日志（relay-wechat/log/relay.log）`));
           add('agent', !!(st.agent?.enabled && st.agent?.connected), '③ 本应用连上中继',
             !st.agent?.enabled ? '本应用的微信通道没启用（config.wechat.enabled）'
               : (st.agent?.connected ? '已连上' : '没连上（后端会自动重试；看主进程日志）'));
@@ -2451,11 +2447,11 @@ export function createApp({ log = console.log, resume = [] } = {}) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
         }
       }
-      if (pathname === '/api/wechat/channel/weflow/launch' && method === 'POST') {
+      if (pathname === '/api/wechat/channel/wx/launch' && method === 'POST') {
         try {
           const body = await readBody(req).catch(() => ({}));
-          // { wait: true } = 拉起后等 5031 端口通（最多 45 秒），给"一键把整条链开起来"用
-          const r = body?.wait ? await wechatChannel.ensureWeFlow(Number(body?.waitMs) || 45000) : wechatChannel.launchWeFlow();
+          // { wait: true } = 注入后等 30001 端口通（最多 45 秒），给"一键把整条链开起来"用
+          const r = body?.wait ? await wechatChannel.ensureWeixin(Number(body?.waitMs) || 45000) : wechatChannel.launchWeixin();
           return json(res, r.ok ? 200 : 400, r);
         } catch (error) {
           return json(res, 500, { ok: false, error: String(error?.message ?? error) });
@@ -4687,13 +4683,13 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     if (wechatOnebot) {
       wechatOnebot.connect().catch((e) => log(`[wechat] 连接失败（会自行重试）：${e?.message ?? e}`));
     }
-    // 微信**通道**（中继 + Bridge + 必要时 WeFlow）的自动启动。
+    // 微信**通道**（中继 + 必要时注入微信）的自动启动。
     // ⚠️ 与上面那行分工不同：`wechatOnebot.connect()` 是**我们去连**中继；
     //    这一段是**把中继本身开起来**。之前 `wechat.autoLaunchRelay` 是个没人读的占位
     //    ⇒ 用户重启 app 后必须记得手点页签上的「启动通道」，忘了就是"看着开着其实收不到"。
-    // ⚠️ 仍然**不 await**：拉 WeFlow 可能要等几十秒，不能拖住控制台的启动。
+    // ⚠️ 仍然**不 await**：注入微信可能要等十几秒，不能拖住控制台的启动。
     if (getConfig().wechat?.autoLaunchRelay) {
-      wechatChannel.start({ launchWeFlowFirst: getConfig().wechat?.autoLaunchWeFlow !== false })
+      wechatChannel.start({ launchWeixinFirst: getConfig().wechat?.autoLaunchWeixin !== false })
         .then((r) => log(`[微信通道] 自动启动：${r.alreadyRunning ? '中继已在跑' : r.ok ? '已拉起' : '失败 — ' + r.error}`))
         .catch((e) => log(`[微信通道] 自动启动异常：${e?.message ?? e}`));
     }
@@ -4705,7 +4701,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
     //       消息永远不来"（上面 4225 行那段注释记的就是这个）。
     //    ⚠️ 口径：**只恢复重启前确实在跑的那几样**，⛔ 不替用户多拉一个他没开的东西
     //       （微信通道是用户 2026-10-01 有意在页签上停掉的，见交接 §3-34 / §6-76）。
-    //    ⚠️ 仍然**不 await**（同上一段：拉 WeFlow 可能要等几十秒，不能拖住控制台启动）。
+    //    ⚠️ 仍然**不 await**（同上一段：注入微信可能要等十几秒，不能拖住控制台启动）。
     if (resumeTargets.length) log(`[续启] 本次重启要恢复：${resumeTargets.join('、')}`);
     if (resumeTargets.includes('snowluma')) {
       launchSnowluma()
@@ -4713,7 +4709,7 @@ export function createApp({ log = console.log, resume = [] } = {}) {
         .catch((e) => log(`[续启] SnowLuma 异常：${e?.message ?? e}`));
     }
     if (resumeTargets.includes('wechat')) {
-      wechatChannel.start({ launchWeFlowFirst: getConfig().wechat?.autoLaunchWeFlow !== false })
+      wechatChannel.start({ launchWeixinFirst: getConfig().wechat?.autoLaunchWeixin !== false })
         .then((r) => log(`[续启] 微信通道：${r.alreadyRunning ? '中继已在跑' : r.ok ? '已拉起' : '失败 — ' + r.error}`))
         .catch((e) => log(`[续启] 微信通道异常：${e?.message ?? e}`));
     }

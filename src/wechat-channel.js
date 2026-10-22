@@ -1,36 +1,26 @@
-// 微信通道（中继 + Bridge）的生命周期管理：状态探测 / 启动 / 停止 / 日志。
+// 微信通道的生命周期管理：状态探测 / 启动（拉起微信 + 注入 hook + 起中继）/ 停止 / 日志。
 //
-// ── 为什么要有它（2026-09-20，用户要求）────────────────────────────────────
-// 用户原话：「能不能做成和之前 snowluma 一样的操作逻辑，不方便的话类似也行，
-//            统一类似的界面更有助于用户操作」。
-// 而在此之前，微信通道**只能靠人在命令行开两个窗口**（`中继.mjs` + `跑Bridge.mjs`，
-// 后来合成 `跑微信通道.mjs`）—— 用户看不到状态、也没法在界面里开或关。
-// SnowLuma 早就有 `launchSnowluma/stopSnowluma/snowlumaStatus/logs` 那一套，
-// 这里就照它的形状做一份，**两个页签的操作逻辑保持一致**。
+// ── 链路（2026-10-22 重做，见 relay-wechat/docs/契约-微信页改造后状态.md）────────
+//   微信 4.1.10.27 (Weixin.exe) + version.dll 注入  → 进程内 HTTP API :30001
+//        ↓ WinHTTP POST（新消息推送）
+//   relay-wechat（Node，relay-wechat/index.js）: 18999 收推送，11230 给本应用
+//        ↓ OneBot v11
+//   QQ Agent（本应用，第二个 OneBot 客户端）
 //
 // ── 三段，缺一不可（界面要能一眼看出断在哪一段）──────────────────────────
-//   ① WeFlow      读微信本地库 + 推新消息的第三方应用（端口 5031）。**它不归我们管**，
-//                 只能"检测在不在跑"，必要时替用户把它拉起来。
-//                 🔴 2026-10-04（第四十对话 · 批 0，方案 §8.5）：**「端口通」不等于「读得到库」**。
-//                 实测它的数据组件挂掉时端口照样通、`/api/v1/health` 照样 200，而读库接口
-//                 `sessions`/`contacts`/`messages` 全 500 `{"error":"错误码: -101"}`
-//                 ⇒ 那时三个圆点全绿（**假绿**），真相却是"消息收不到、发出去也确认不了"。
-//                 所以现在多探一次**带 token 的读库接口**，把"端口通"（`running`）与
-//                 "读得到库"（`dbOk`/`dbError`）**分成两个字段**（判据见 #probeWeFlowDb）。
-//                 🔴 2026-09-20 用户拍板：**就停在"检测 + 拉起"这一步**。
-//                 我曾按用户早先那句「逆向 weflow，只保留我们需要的功能，逆向出来加进 app 里」
-//                 一路走到 wx_key.dll 的授权门（`AUTH_FAILED:auth_env_missing`，
-//                 它要 WEFLOW_XKEY_AUTH_* 四个环境变量并连回本机端口换授权），
-//                 再往前就是**伪造授权、破第三方商业软件的校验** —— 那超出委托范围，
-//                 我停手并把三条路线交给用户；用户选了本条（A：只做生命周期管理）。
-//                 事实与取舍见 `待办与决策记录.md` §12.27，**别从头再撞一遍**。
-//   ② 通道        我们的中继（11229 等 Bridge / 11230 给 agent）+ 真 Bridge。
-//                 这一段的生命周期由本模块负责。
+//   ① 微信        微信进程在不在跑、hook 注入通不通（30001）、登录了没。
+//                 这一段 2026-10-22 之前是 WeFlow（读库那套），用户拍板整套下线 ——
+//                 WeFlow 只能读、发送还得靠另一个 Bridge 用 UIA 点输入框，
+//                 而 WeFlow 的数据组件常年 -101 读不到库。hook 注入两头都管，只留它。
+//   ② 中继        本机 Node 进程。它的生命周期由本模块负责（拉起 / 停止）。
 //   ③ 我的链路    app 自己的第二个 OneBot 客户端有没有连上中继 ——
 //                 这个状态在 app 里（`/api/status.wechat`），不在这里重复实现。
 //
 // ⚠️ **不提权、不静默**：起不来就把原因原样报出来（找不到脚本/端口被占/进程立刻退出），
 //    绝不"点了没反应"。本项目的头号病就是静默失败。
+//
+// ⚠️ 三态纪律（本项目反复栽的坑）：拿不到读数 ⇒ 报 **null 并说"问不到"**，
+//    绝不折成 false 假装"确定没有"，也绝不折成 true 假装"确定好了"。
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
@@ -38,51 +28,45 @@ import { execFileSync, spawn } from 'node:child_process'
 /** 日志环形缓冲上限（够排障，又不会把内存吃光）。 */
 const LOG_LIMIT = 300
 
-/**
- * WeFlow「读得到库吗」的探测结果**缓存时长**（2026-10-04 批 0）。
- *
- * 为什么必须缓存：`status()` 被 `/api/status` 每 15 秒轮询一次，而"它能不能读库"不会在 60 秒里变
- * —— 每次轮询都真打一次它，等于我们自己给它加压（它本来就够脆了）。
- * 节奏照抄同一层里已有的 `WECHAT_CONTACT_SYNC_RETRY_MS = 60 * 1000`（那套是对的，⛔ 别另发明一个数）。
- */
-const WEFLOW_DB_PROBE_TTL_MS = 60 * 1000
+/** 微信进程名（4.1.x 是 Weixin.exe；3.x 叫 WeChat.exe，不认它 —— 3.x 已被服务端硬封）。 */
+const WX_PROC_NAME = 'Weixin.exe'
 
-/** WeFlow 的**读库**接口（带 token 打）。⚠️ 它没有发送端点 ⇒ 发送仍走 UIA，与本探针无关。 */
-const WEFLOW_DB_PROBE_URL = 'http://127.0.0.1:5031/api/v1/sessions?limit=1'
+/** hook 登录态探测的缓存时长：`/api/status` 每 15 秒轮询一次，不必每次都问微信。 */
+const WX_LOGIN_PROBE_TTL_MS = 10 * 1000
 
 export class WechatChannel {
   /**
    * @param {object} o
    * @param {(host:string,port:number,timeout?:number)=>Promise<boolean>} o.isPortOpen 注入（app 里已有）
    * @param {string} o.relayStatusUrl 中继状态口，如 http://127.0.0.1:11230
-   * @param {string[]|(()=>string[])} o.scriptCandidates 通道启动脚本的候选路径（按序找第一个存在的）
-   * @param {string|(()=>string[])} o.weflowExe WeFlow 可执行文件候选（字符串=单个路径；函数=现算一串）
-   * @param {string|(()=>string)} o.weflowToken WeFlow 的 Access Token（**只用于读库探测**；字符串或函数）
+   * @param {string[]|(()=>string[])} o.scriptCandidates 中继启动脚本候选（按序找第一个存在的）
+   * @param {string|(()=>string[])} o.weixinExe 微信主程序候选（字符串=单个路径；函数=现算一串）
+   * @param {string|(()=>string[])} o.injectExe 注入器（wxinject.exe）候选
+   * @param {string|(()=>string[])} o.hookDll 被注入的 version.dll 候选
+   * @param {number} o.hookPort 注入后微信进程内 HTTP API 端口（默认 30001）
+   * @param {number} o.hookCallbackPort 中继收推送的端口（默认 18999，写进 wxinject 命令行的 CallBackURL）
    * @param {string} o.nodeExe 用哪个 node 跑脚本（默认 process.execPath + ELECTRON_RUN_AS_NODE）
    * @param {(msg:string)=>void} [o.log]
    */
-  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weflowExe = '', weflowToken = '', nodeExe = '', findPids = null, findChannelProcs = null, log = () => {} }) {
+  constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weixinExe = '', injectExe = '', hookDll = '',
+    hookPort = 30001, hookCallbackPort = 18999, nodeExe = '', findPids = null, findChannelProcs = null, log = () => {} }) {
     this.isPortOpen = isPortOpen
     this.relayStatusUrl = String(relayStatusUrl || 'http://127.0.0.1:11230').replace(/\/$/, '')
-    // 候选路径可以是**数组**，也可以是**函数**（每次现算）。
-    // 为什么允许函数：用户可能在设置里改 `wechat.channelScript`，而本对象是 app 启动时建好的
-    // —— 存成快照的话"改了要重启才生效"，而那句注释会变成谎话。
+    // 中继端口从状态口 URL 里派生（写死 11230 的话，配置里改端口就成了谎话）
+    this.relayPort = Number(new URL(this.relayStatusUrl).port) || 11230
+    // 候选一律允许是**函数**（每次现算）。
+    // 为什么：用户可能在设置里改路径，而本对象是 app 启动时建好的 ——
+    // 存成快照的话"改了要重启才生效"，而那句注释会变成谎话（这个坑在本文件里犯过两次）。
     this.#candidatesFn = typeof scriptCandidates === 'function' ? scriptCandidates : () => scriptCandidates
-    // WeFlow 那条同理，而且是同一个坑：第一版我把 weflowExe 存成构造时的**快照**，
-    // 于是"用户在设置里填了路径"要重启才认 —— 和 channelScript 犯的是同一个错。
-    this.#weflowFn = typeof weflowExe === 'function' ? weflowExe : () => (weflowExe ? [weflowExe] : [])
-    // 🔴 WeFlow 的 Access Token：探"读得到库吗"必须带它（它的数据接口一律鉴权）。
-    //    ⚠️ 与 scriptCandidates / weflowExe 同一个道理 —— **传函数、每次现算**：凭据文件是人在
-    //       外面改的，存成快照就得重启才认（而这个坑在这个文件里已经犯过两次）。
-    //    🔴 token 是**凭据** ⇒ 在这里**只进不出**：绝不写日志、绝不出现在 status() 的返回里
-    //       （对外只报状态码与错误码）。来源见 `src/app.js` 的 `weflowTokenFrom()`。
-    this.#tokenFn = typeof weflowToken === 'function' ? weflowToken : () => String(weflowToken || '')
+    this.#wxExeFn = typeof weixinExe === 'function' ? weixinExe : () => (weixinExe ? [weixinExe] : [])
+    this.#injectFn = typeof injectExe === 'function' ? injectExe : () => (injectExe ? [injectExe] : [])
+    this.#dllFn = typeof hookDll === 'function' ? hookDll : () => (hookDll ? [hookDll] : [])
+    this.hookPort = Number(hookPort) || 30001
+    this.hookCallbackPort = Number(hookCallbackPort) || 18999
     this.nodeExe = nodeExe || process.execPath
-    // ⚠️ 进程探测**可注入**：它读的是"这台机器上真有没有 WeFlow 在跑"，
-    //    测试里必须能固定住，否则断言会随测试机的状态飘（本机恰好一直开着 WeFlow）。
-    this.#findPids = typeof findPids === 'function' ? findPids : () => this.#tasklistPids()
-    // 通道进程探测同理可注入：它读的是"这台机器上真有没有通道在跑"，
-    // 不固定住的话，**同一条断言会随测试机状态飘**（本机恰好一直开着通道 —— 已经栽过一次）。
+    // ⚠️ 进程探测**可注入**：它读的是"这台机器上真有没有微信在跑"，
+    //    测试里必须能固定住，否则断言会随测试机状态飘。
+    this.#findPids = typeof findPids === 'function' ? findPids : () => this.#tasklistWeixinPids()
     this.#findChannels = typeof findChannelProcs === 'function' ? findChannelProcs : () => this.#scanChannelProcesses()
     this.log = log
     this.proc = null
@@ -91,12 +75,13 @@ export class WechatChannel {
   }
 
   #candidatesFn = () => []
-  #weflowFn = () => []
-  #tokenFn = () => ''
+  #wxExeFn = () => []
+  #injectFn = () => []
+  #dllFn = () => []
   #findPids = () => []
   #findChannels = () => []
-  /** 最近一次读库探测的结论 `{ at, dbOk, dbError }`（60 秒内复用，见 WEFLOW_DB_PROBE_TTL_MS）。 */
-  #dbCache = null
+  /** 最近一次登录态探测的结论 `{ at, loginOk, selfWxid, selfName, error }`（10 秒内复用）。 */
+  #loginCache = null
 
   /** 当前的候选路径（现算，见构造函数的说明）。 */
   candidates() {
@@ -123,40 +108,60 @@ export class WechatChannel {
     return ''
   }
 
-  /** WeFlow 可执行文件的候选（现算，见构造函数的说明）。 */
-  weflowCandidates() {
+  /** 把"字符串或函数"的候选统一成去重后的字符串数组。 */
+  #resolveList(fn) {
     try {
-      const v = this.#weflowFn()
+      const v = fn()
       const list = Array.isArray(v) ? v : [v]
       return [...new Set(list.map((s) => String(s || '').trim()).filter(Boolean))]
     } catch { return [] }
   }
 
+  weixinCandidates() { return this.#resolveList(this.#wxExeFn) }
+  injectCandidates() { return this.#resolveList(this.#injectFn) }
+  dllCandidates() { return this.#resolveList(this.#dllFn) }
+
   /**
-   * 解析出"到底该点哪个 WeFlow"。
+   * 解析出"到底点哪个 Weixin.exe"。
    *
-   * ⚠️ 为什么不能只判断端口就够了：用户点「启动 WeFlow」时端口**必然**是通的判断为假，
-   *    我们要的是"哪个 exe 存在、来自哪条候选" —— 找不到时必须说清**找过哪些**，
-   *    否则就是本项目最忌的"点了没反应"。
+   * ⚠️ 找不到时必须说清**找过哪些**，否则就是本项目最忌的"点了没反应"。
    * @returns {{path:string, source:string, candidates:string[], missing:boolean}}
    */
-  resolveWeFlowExe() {
-    const candidates = this.weflowCandidates()
+  resolveWeixinExe() {
+    const candidates = this.weixinCandidates()
     for (const p of candidates) {
       try { if (fs.existsSync(p)) return { path: p, source: 'candidate', candidates, missing: false } } catch { /* ignore */ }
     }
     return { path: '', source: candidates.length ? 'none-exists' : 'unconfigured', candidates, missing: true }
   }
 
-  /** 按进程名找 WeFlow（端口还没开、但进程已经在加载时，这个能看出"它其实起来了"）。 */
-  findWeFlowPids() {
+  /** 解析注入器与 DLL（两个都得在，缺一个就注入不了 —— 分开报，别混成一句）。 */
+  resolveInjector() {
+    const pick = (candidates) => {
+      for (const p of candidates) {
+        try { if (fs.existsSync(p)) return p } catch { /* ignore */ }
+      }
+      return ''
+    }
+    const injects = this.injectCandidates()
+    const dlls = this.dllCandidates()
+    const injectExe = pick(injects)
+    const dll = pick(dlls)
+    return {
+      injectExe, dll, injectCandidates: injects, dllCandidates: dlls,
+      ok: Boolean(injectExe && dll)
+    }
+  }
+
+  /** 按进程名找微信（端口还没开、但进程已经在加载时，这个能看出"它其实起来了"）。 */
+  findWeixinPids() {
     try { return (this.#findPids() || []).map(Number).filter((n) => Number.isInteger(n) && n > 0) } catch { return [] }
   }
 
   /** 默认实现：问一次 tasklist。失败就当"没找到"（不要让它把状态接口带崩）。 */
-  #tasklistPids() {
+  #tasklistWeixinPids() {
     try {
-      const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq WeFlow.exe', '/FO', 'CSV', '/NH'],
+      const out = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${WX_PROC_NAME}`, '/FO', 'CSV', '/NH'],
         { encoding: 'utf8', windowsHide: true, timeout: 5000 })
       const pids = []
       for (const line of String(out).split(/\r?\n/)) {
@@ -165,251 +170,322 @@ export class WechatChannel {
       }
       return pids
     } catch (e) {
-      // ⚠️ 2026-09-22（第十一对话 · 隐患排查）：原来这里是 `catch { return [] }` ——
-      //    `[]` 的语义是"**WeFlow 没在跑**"，而 tasklist 本身失败（超时/被拦）也走这条路
-      //    ⇒ 界面会显示"未启动"，还可能触发一次**多余的拉起**。
-      //    ⇒ 语义不变（仍返回 `[]`、不让状态接口崩），但**出声**，好让人能区分这两种情况。
-      console.error(`[wechat] tasklist 查 WeFlow 进程失败（本次按"没在跑"处理）：${e?.message ?? e}`)
+      // ⚠️ 语义不变（仍返回 `[]`、不让状态接口崩），但**出声**：
+      //    `[]` 的语义是"微信没在跑"，而 tasklist 本身失败也走这条路 —— 必须能区分。
+      console.error(`[wechat] tasklist 查微信进程失败（本次按"没在跑"处理）：${e?.message ?? e}`)
       return []
     }
   }
 
   /**
-   * 探一次"WeFlow 到底读不读得到库"（带 token 打它的会话表），结论**缓存 60 秒**。
+   * 问一次"微信登录了没"（打进程内 hook 的 `POST /GetSelfProfile`），结论**缓存 10 秒**。
    *
-   * 🔴 为什么必须有这一探（2026-10-04 第四十对话 · 批 0，方案 §8.5）：**端口通 ≠ 能读库**。
-   *    实测它的数据组件挂掉时 `running=true`、`/api/v1/health` 还是 200，而读库接口
-   *    全 500 `{"error":"错误码: -101"}`。只看端口就会报"链路已连通"（**假绿**），
-   *    而那时的真相是：**微信消息收不到、发出去也确认不了**。
-   *
-   * 口径（与项目既有纪律一致：**有证据才拦、读不到就出声**）：
-   *    · 探到 200             ⇒ `dbOk=true`（**唯一**能说"①段好了"的证据）
-   *    · 探到非 200 / 抛异常  ⇒ `dbOk=false` + `dbError`（例如 `-101`）—— 异常也算"读不到"，
-   *      ⛔ 不留 `null` 蒙过去（本项目头号病就是"仪器坏了读数还很好看"）
-   *    · **没有 token**       ⇒ `dbOk=false` + `dbError='没配置 token（读不到库）'`
-   *      ⛔ **不许折成"通"**：没有 token 我们**就是**读不到库（我们那条中继同样读不到）
-   *    · WeFlow 没在跑       ⇒ `dbOk=null`（这一层不归我们判 —— `running=false` 已经把话说清了，
-   *      "没跑"与"跑了但坏了"是两句不同的话，处置也不同）
-   *
-   * @returns {Promise<{dbOk:boolean|null, dbError:string|null}>}
+   * 口径（三态，⛔ 别把"问不到"折成"没登录"）：
+   *    · hook 端口不通        ⇒ `{ loginOk: null, error: 'hook 没通' }`（这一层不归它判）
+   *    · 请求失败/非 200      ⇒ `{ loginOk: null, error: '问不到：…' }`
+   *    · 回话里 wxid 非空     ⇒ `loginOk: true` + 身份
+   *    · 回话里 wxid 为空串   ⇒ `loginOk: false`（**真的没登录**，这是唯一能说"没登录"的证据）
+   * @returns {Promise<{loginOk:boolean|null, selfWxid:string, selfName:string, error:string}>}
    */
-  async #probeWeFlowDb() {
+  async #probeLogin(hookOk) {
     const now = Date.now()
-    if (this.#dbCache && now - this.#dbCache.at < WEFLOW_DB_PROBE_TTL_MS) {
-      return { dbOk: this.#dbCache.dbOk, dbError: this.#dbCache.dbError }
+    if (this.#loginCache && now - this.#loginCache.at < WX_LOGIN_PROBE_TTL_MS) {
+      return { loginOk: this.#loginCache.loginOk, selfWxid: this.#loginCache.selfWxid, selfName: this.#loginCache.selfName, error: this.#loginCache.error }
     }
-    let token = ''
-    try { token = String(this.#tokenFn() || '').trim() } catch { token = '' }
-    let dbOk = false
-    let dbError = null
-    if (!token) {
-      // 连 token 都没有 ⇒ 一次请求都不发（那必然是 401），但**如实说读不到**。
-      dbError = '没配置 token（读不到库）'
-    } else {
-      try {
-        const r = await fetch(`${WEFLOW_DB_PROBE_URL}&access_token=${encodeURIComponent(token)}`,
-          { signal: AbortSignal.timeout(2500) })
-        if (r.status === 200) {
-          dbOk = true
-        } else {
-          // 错误体长这样：`{"error":"错误码: -101"}` ⇒ 只取那个码（界面要一句话说清）
-          let body = ''
-          try { body = String(await r.text()) } catch { /* 读不出响应体不影响判定：非 200 就是读不到 */ }
-          dbError = (/-?\d+/.exec(body) || [])[0] || `HTTP ${r.status}`
-        }
-      } catch (e) {
-        dbError = `请求失败：${String(e?.message ?? e).slice(0, 60)}`
+    const empty = { loginOk: null, selfWxid: '', selfName: '', error: '' }
+    if (!hookOk) {
+      const r = { ...empty, error: 'hook 没通，登录状态未知' }
+      this.#loginCache = { at: now, ...r }
+      return r
+    }
+    let out = { ...empty };
+    try {
+      const resp = await fetch(`http://127.0.0.1:${this.hookPort}/GetSelfProfile`,
+        { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(2500) })
+      if (!resp || resp.status !== 200) {
+        out = { ...empty, error: `问不到：HTTP ${resp ? resp.status : '无响应'}` }
+      } else {
+        const p = await resp.json().catch(() => ({}));
+        const wxid = String(p?.wxid || p?.Wxid || p?.profile_account_id || '').trim();
+        const name = String(p?.nickname || p?.profile_nickname || p?.NickName || '').trim();
+        // wxid 为空串是 hook 的"未登录"答复（源码 SendTextMsg.cpp 的口径），
+        // ⚠️ 但只有当请求本身成功时这句话才算数 —— 所以上面对非 200 单列了一档。
+        out = { loginOk: Boolean(wxid), selfWxid: wxid, selfName: name, error: '' };
       }
+    } catch (e) {
+      out = { ...empty, error: `问不到：${String(e?.message ?? e).slice(0, 60)}` };
     }
-    this.#dbCache = { at: now, dbOk, dbError }
-    return { dbOk, dbError }
+    this.#loginCache = { at: now, ...out }
+    return out;
   }
 
   /** 三段的实时状态。②段的细节从**中继自己**的状态口取（不猜）。 */
   async status() {
-    const weflowUp = await this.isPortOpen('127.0.0.1', 5031).catch(() => false)
-    const relayUp = await this.isPortOpen('127.0.0.1', 11230).catch(() => false)
-    let relay = null
+    const hookOk = await this.isPortOpen('127.0.0.1', this.hookPort).catch(() => false)
+    const relayUp = await this.isPortOpen('127.0.0.1', this.relayPort).catch(() => false)
+    let relay = null;
     if (relayUp) {
       try {
-        const r = await fetch(`${this.relayStatusUrl}/__status`, { signal: AbortSignal.timeout(1500) })
-        relay = await r.json()
+        const r = await fetch(`${this.relayStatusUrl}/__status`, { signal: AbortSignal.timeout(1500) });
+        relay = await r.json();
       } catch { relay = null }
     }
-    const exe = this.resolveWeFlowExe()
-    // WeFlow 有三种"在"（第三种是 2026-10-04 批 0 拆出来的），分开报是因为**处置完全不同**：
-    //   running=true           端口通
-    //   dbOk=true              而且**真的读得到库** —— 只有这一种能说"①段通了"
-    //   dbOk=false + dbError   端口通但读不到库（例如 -101）⇒ 收不到消息、发送也确认不了
-    //   （没在跑 ⇒ 不探，dbOk=null：`running=false` 已经把话说了）
-    // ⚠️ 旧的注释在这里写过"端口通了（真的能读库）"——那句话 2026-10-04 被实测证伪，别抄回来。
-    const db = weflowUp ? await this.#probeWeFlowDb() : { dbOk: null, dbError: null }
-    const pids = weflowUp ? [] : this.findWeFlowPids()
+    const exe = this.resolveWeixinExe();
+    const pids = hookOk ? [] : this.findWeixinPids();
+    const running = hookOk || pids.length > 0;
+    const login = await this.#probeLogin(hookOk);
     return {
-      weflow: {
-        running: weflowUp,
-        dbOk: db.dbOk,
-        dbError: db.dbError,
-        port: 5031,
+      // ① 微信：三种"在"分开报，因为**处置完全不同**
+      //   running=true                    进程在
+      //   hookOk=true                     注入通了（30001 在听）—— 只有这个才能收发
+      //   loginOk=true / false / null     登录了 / 确实没登录 / 问不到（不许猜）
+      wx: {
+        running,
+        hookOk,
+        loginOk: login.loginOk,
+        selfWxid: login.selfWxid,
+        selfName: login.selfName,
+        error: login.error || '',
+        port: this.hookPort,
         pids,
-        starting: !weflowUp && pids.length > 0,
+        starting: !hookOk && pids.length > 0,
         exe: exe.path,
         exeSource: exe.source,
         exeCandidates: exe.candidates
       },
-      // 中继起来了但 akasha 没连 = **Bridge 没跑**（这正是最容易"看着正常其实收不到"的状态）
+      // ② 中继：`bridgeConnected` = 中继说 hook 那头连着（它自己的 akasha.connected）。
+      //    中继在跑但这一位 false = **看着通了其实收不到**，正是最容易假绿的状态。
       channel: {
         running: relayUp,
         bridgeConnected: !!(relay && relay.akasha && relay.akasha.connected),
-        login: relay?.login?.user_id ? { userId: relay.login.user_id, nickname: relay.login.nickname || '' } : null,
-        eventsIn: relay?.stats?.eventsIn ?? null
+        login: relay?.login?.user_id ? { userId: relay.login.user_id, nickname: relay.login.nickname || '', wxid: relay.login.wxid || '' } : null,
+        eventsIn: relay?.stats?.eventsIn ?? null,
+        // 推送通不通：中继自己记的"收到过多少次微信推送"。0 = 一次都没收到过
+        //   ⇒ 光端口通不算（这正是旧链路"看着通了其实收不到"的同一个坑）。
+        pushOk: relay ? Number(relay.stats?.received || 0) > 0 : null,
+        received: relay?.stats?.received ?? null
       },
-      // 本模块自己拉起的那个进程（用户也可能在外面的窗口里自己跑 ⇒ 这里为 null 是正常的）
+      // 本模块自己拉起的中继进程（用户也可能在外面的窗口里自己跑 ⇒ 这里为 null 是正常的）
       managed: { pid: this.proc?.pid ?? null, startedAt: this.startedAt || null },
       script: { path: this.findScript(), candidates: this.candidates() }
-    }
+    };
   }
 
   /**
-   * 拉起通道（中继 + Bridge 的启动器）。
-   * 已经通了就直接返回 alreadyRunning —— **不重复起**（重复起会因为端口被占而报一堆错）。
+   * 拉起整条通道：① 微信（没跑/没注入就先注入启动）→ ② 中继。
    *
-   * @param {{launchWeFlowFirst?:boolean, waitMs?:number}} [o]
-   *   launchWeFlowFirst=true 时，若 WeFlow 没在跑就先替用户点一下火、并**等它的端口起来**
-   *   （最多 waitMs 毫秒，默认 45 秒）。这是「一条命令开起来」的关键：
-   *   少了这一步，用户会遇到"通道起来了但一直读不到消息"，而原因是 WeFlow 没开。
+   * ⚠️ 顺序是**刻意的**：中继必须先起来，因为注入时命令行里的 `CallBackURL` 指向它的 18999；
+   *    反过来（先注入微信）会让启动那几十秒里的新消息全部推不出去。
+   *
+   * @param {{launchWeixinFirst?:boolean, waitMs?:number}} [o]
+   *   launchWeixinFirst=true 时，微信没跑或 hook 没注入就先注入启动并**等 30001 起来**。
    */
-  async start({ launchWeFlowFirst = false, waitMs = 45000 } = {}) {
-    if (await this.isPortOpen('127.0.0.1', 11230).catch(() => false)) {
-      this.#push('中继已经在跑（11230 已就绪），不重复启动')
-      return { ok: true, alreadyRunning: true, pid: this.proc?.pid ?? null }
+  async start({ launchWeixinFirst = false, waitMs = 45000 } = {}) {
+    const relayUp = await this.isPortOpen('127.0.0.1', this.relayPort).catch(() => false);
+    let weixin = null;
+    // ① 先确认微信这一头（注入启动要花十几秒，先发起来，中继起来后再等它）
+    let wxPromise = null;
+    if (launchWeixinFirst && !(await this.isPortOpen('127.0.0.1', this.hookPort).catch(() => false))) {
+      wxPromise = this.ensureWeixin(waitMs);
     }
-    let weflow = null
-    if (launchWeFlowFirst) weflow = await this.ensureWeFlow(waitMs)
-    const script = this.findScript()
-    if (!script) {
-      return {
-        ok: false,
-        weflow,
-        error: '找不到通道启动脚本（跑微信通道.mjs）。开发布局下它应在「工具-中继」里；'
-          + '打包布局下应随 app 一起分发。可在设置里指定路径。',
-        candidates: this.candidates()   // ⚠️ 用 candidates() 现算的方法，别再用构造时的快照字段（它已经不存在了）
+    // ② 中继
+    let relayPart;
+    if (relayUp) {
+      this.#push(`中继已经在跑（${this.relayPort} 已就绪），不重复启动`);
+      relayPart = { ok: true, alreadyRunning: true, pid: this.proc?.pid ?? null };
+    } else {
+      const script = this.findScript();
+      if (!script) {
+        weixin = wxPromise ? await wxPromise : null;
+        return {
+          ok: false,
+          weixin,
+          error: '找不到中继启动脚本（relay-wechat/index.js）。开发布局下它应在工作区的「dsh qq\\relay-wechat」里；'
+            + '打包布局下应随 app 一起分发。可在设置里填 wechat.channelScript 指定路径。',
+          candidates: this.candidates()
+        };
+      }
+      try {
+        // 🔴 用 Electron 自带的 node 跑（`ELECTRON_RUN_AS_NODE=1`）：
+        //    这样**不需要额外装 node**，打包环境里也成立。
+        const child = spawn(this.nodeExe, [script], {
+          cwd: path.dirname(script),
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true
+        });
+        this.proc = child;
+        this.startedAt = Date.now();
+        this.#push(`中继启动中（pid=${child.pid}，脚本 ${path.basename(script)}）…`);
+        for (const [stream, tag] of [['stdout', ''], ['stderr', '!']]) {
+          child[stream].on('data', (d) => {
+            for (const line of String(d).split(/\r?\n/)) if (line.trim()) this.#push(tag + line);
+          });
+        }
+        child.on('exit', (code, sig) => {
+          this.#push(`中继进程结束（code=${code} signal=${sig ?? ''}）`);
+          if (this.proc === child) this.proc = null;
+        });
+        child.on('error', (e) => this.#push(`中继进程启动失败：${e?.message ?? e}`));
+        relayPart = { ok: true, pid: child.pid, script };
+      } catch (e) {
+        weixin = wxPromise ? await wxPromise : null;
+        return { ok: false, error: String(e?.message ?? e), weixin };
       }
     }
-    try {
-      // 🔴 用 Electron 自带的 node 跑（`ELECTRON_RUN_AS_NODE=1`）：
-      //    这样**不需要额外装 node**，打包环境里也成立（SnowLuma 是自带 node.exe，
-      //    我们没有那个条件，但 Electron 本身就是个 node 运行时）。
-      const child = spawn(this.nodeExe, [script], {
-        cwd: path.dirname(script),
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
-      })
-      this.proc = child
-      this.startedAt = Date.now()
-      this.#push(`通道启动中（pid=${child.pid}，脚本 ${path.basename(script)}）…`)
-      for (const [stream, tag] of [['stdout', ''], ['stderr', '!']]) {
-        child[stream].on('data', (d) => {
-          for (const line of String(d).split(/\r?\n/)) if (line.trim()) this.#push(tag + line)
-        })
-      }
-      child.on('exit', (code, sig) => {
-        this.#push(`通道进程结束（code=${code} signal=${sig ?? ''}）`)
-        if (this.proc === child) this.proc = null
-      })
-      child.on('error', (e) => this.#push(`通道进程启动失败：${e?.message ?? e}`))
-      return { ok: true, pid: child.pid, script, weflow }
-    } catch (e) {
-      return { ok: false, error: String(e?.message ?? e), weflow }
-    }
+    weixin = wxPromise ? await wxPromise : null;
+    return { ...relayPart, weixin };
   }
 
   /**
-   * 保证 WeFlow 在跑（不在就点一下火，然后等它的 5031 端口起来）。
-   * ⚠️ 只**启动**、不**停止** —— 见 stopWeFlow 的说明（它是第三方通用应用，用户可能同时在用它）。
+   * 保证微信在跑**且 hook 已注入**（不在就注入启动，然后等 30001 端口通）。
    * @returns {Promise<{ok:boolean, alreadyRunning?:boolean, launched?:boolean, waitedMs?:number, error?:string, exe?:string}>}
    */
-  async ensureWeFlow(waitMs = 45000) {
-    if (await this.weflowRunning()) return { ok: true, alreadyRunning: true, exe: this.resolveWeFlowExe().path }
-    const r = this.launchWeFlow()
-    if (!r.ok) return r
-    const step = 1000
+  async ensureWeixin(waitMs = 45000) {
+    if (await this.isPortOpen('127.0.0.1', this.hookPort).catch(() => false)) {
+      return { ok: true, alreadyRunning: true, exe: this.resolveWeixinExe().path };
+    }
+    const r = this.launchWeixin();
+    if (!r.ok) return r;
+    const step = 1000;
     for (let waited = 0; waited < Math.max(0, waitMs); waited += step) {
-      await new Promise((res) => setTimeout(res, step))
-      if (await this.weflowRunning()) {
-        this.#push(`WeFlow 已就绪（等了 ${waited + step}ms，端口 5031 通了）`)
-        return { ok: true, launched: true, waitedMs: waited + step, exe: r.exe }
+      await new Promise((res) => setTimeout(res, step));
+      if (await this.isPortOpen('127.0.0.1', this.hookPort).catch(() => false)) {
+        this.#push(`微信 hook 已就绪（等了 ${waited + step}ms，端口 ${this.hookPort} 通了）`);
+        return { ok: true, launched: true, waitedMs: waited + step, exe: r.exe };
       }
     }
-    this.#push(`⚠️ WeFlow 已拉起但 ${waitMs}ms 内端口 5031 还没通 —— 可能停在了登录/选择数据的界面`)
-    return { ok: false, launched: true, error: `WeFlow 已启动，但 ${Math.round(waitMs / 1000)} 秒内端口 5031 没通（请到它的窗口里看一眼）`, exe: r.exe }
+    this.#push(`⚠️ 微信已注入启动但 ${waitMs}ms 内 hook 端口 ${this.hookPort} 还没通 —— 可能注入失败，或停在了登录界面`);
+    return {
+      ok: false, launched: true, exe: r.exe,
+      error: `微信已注入启动，但 ${Math.round(waitMs / 1000)} 秒内 hook 端口 ${this.hookPort} 没通（先退出微信再点一次「启动微信」）`
+    };
   }
 
   /**
-   * 找到**正在跑的通道进程**（不管是谁拉起的）。
+   * 注入启动微信（先关掉现有进程，再带 hook 参数重开）。
+   *
+   * ── 为什么必须先关 ────────────────────────────────────────────────
+   *   同一端口不能被注入两次，而且老进程里跑的是**没有 hook** 的版本 ⇒ 不关就会
+   *   "点了启动、端口还是不通"，用户看到的就是"点了没反应"。
+   * ⚠️ 关进程前**要出声**：微信可能正在被用户自己用着，突然断掉得让他知道为什么。
+   *
+   * ── 注入命令行（实测唯一可用的形状，2026-10-22）─────────────────────
+   *   wxinject.exe <Weixin.exe> <version.dll> StartPort=<port> RecvType=1 CallBackURL=http://127.0.0.1:<hookCallbackPort>/hook
+   *   · 输出形如 `pid,<数字>`；DLL 起来后 1 秒内端口 LISTEN
+   *   · CallBackURL 必须写：wx.ini 里的 recv_url 只在命令行没给时才读
+   *     （源码 src/wx_ini_reader.cpp:9 GetWxRecvUrl）
+   */
+  launchWeixin() {
+    const already = this.findWeixinPids();
+    if (already.length > 0) {
+      this.#push(`微信已经在跑（pid ${already.join(',')}），但 hook 端口 ${this.hookPort} 没通 ⇒ 先把它关掉再注入启动`);
+      for (const pid of already) this.#killTree(pid);
+      // 给它两秒真的退出（紧接着启动会和残留进程抢文件锁）
+      try { execFileSync(process.env.comspec || 'cmd.exe', ['/c', 'timeout', '/t', '2', '/nobreak'], { windowsHide: true, timeout: 8000, stdio: 'ignore' }) } catch { /* ignore */ }
+    }
+    const wx = this.resolveWeixinExe();
+    const inj = this.resolveInjector();
+    if (!wx.path) {
+      return {
+        ok: false,
+        error: wx.candidates.length
+          ? `微信没在跑，而这几个路径都不存在：\n  ${wx.candidates.join('\n  ')}\n可在设置里填 wechat.weixinExe 指定。`
+          : '没配置微信主程序路径（设置里填 wechat.weixinExe），也没找到默认位置。',
+        candidates: wx.candidates
+      };
+    }
+    if (!inj.ok) {
+      return {
+        ok: false, exe: wx.path,
+        error: '找不到注入工具（需要 wxinject.exe 与 version.dll 两个文件都真实存在）。'
+          + `找过注入器：${inj.injectCandidates.join(' ｜ ') || '(无候选)'}；`
+          + `找过 DLL：${inj.dllCandidates.join(' ｜ ') || '(无候选)'}。`
+          + '开发布局下它们应在 relay-wechat\\tools 里；可在设置里填 wechat.injectExe / wechat.hookDll 指定。',
+        injectCandidates: inj.injectCandidates,
+        dllCandidates: inj.dllCandidates
+      };
+    }
+    const callback = `http://127.0.0.1:${this.hookCallbackPort}/hook`;
+    const args = [wx.path, inj.dll, `StartPort=${this.hookPort}`, 'RecvType=1', `CallBackURL=${callback}`];
+    try {
+      this.#push(`注入启动微信：${path.basename(inj.injectExe)} → ${wx.path}（hook 端口 ${this.hookPort}，回调 ${callback}）`);
+      const out = execFileSync(inj.injectExe, args, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+      const txt = String(out || '').trim();
+      // 注入器输出 `pid,<数字>`；失败时是别的形状（或空）⇒ 原样带回去，别自己编成功。
+      const m = txt.match(/^\s*(\d+)\s*,\s*(\d+)\s*$/);
+      const pid = m ? Number(m[2]) : null;
+      this.#push(`注入器输出：${txt || '(空)'}${pid ? ` ⇒ 微信 pid=${pid}` : ''}`);
+      if (!pid) {
+        return { ok: false, exe: wx.path, error: `注入器没有回报 pid（原始输出：${txt || '(空)'}）—— 微信可能没起来`, raw: txt };
+      }
+      return { ok: true, launched: true, exe: wx.path, pid, raw: txt };
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      this.#push(`注入启动微信失败：${msg.slice(0, 160)}`);
+      // ⚠️ execFileSync 抛错时 stdout 在 e.stdout 里，常含注入器自己的报错原话 ⇒ 带出去
+      const raw = String(e?.stdout || '').trim();
+      return { ok: false, exe: wx.path, error: raw || msg, raw };
+    }
+  }
+
+  /**
+   * 找到**正在跑的中继进程**（不管是谁拉起的）。
    *
    * ── 为什么必须有它（2026-09-20 补，这是"启停通道"缺的那一半）─────────────
-   * `stop()` 原来只看 `this.proc`（本模块 spawn 出来的那个），而本机真实的通道
-   * （pid 28740，`D:\node\node.exe …\跑微信通道.mjs`）是**在外面窗口里跑的**
-   * ⇒ 用户点「停止通道」什么也没发生，界面还说"当前没有由本应用拉起的通道进程"。
+   * `stop()` 原来只看 `this.proc`（本模块 spawn 出来的那个），而本机真实的中继
+   * 常是**在外面窗口里跑的** ⇒ 用户点「停止通道」什么也没发生，界面还说"没有由本应用拉起的进程"。
    * 那句话不算撒谎，但**按钮没干它写着的事** —— 与静默失败是同一类毛病。
    *
    * ⚠️ 用 `Get-CimInstance`（要 CommandLine）而不是 `tasklist`：tasklist 不给命令行，
-   *    而"哪个 node 进程是通道"只能靠命令行认。**贵**（PowerShell 启动几百毫秒），
+   *    而"哪个 node 进程是中继"只能靠命令行认。**贵**（PowerShell 启动几百毫秒），
    *    所以**只在真正要停的时候调**，绝不放进会被轮询的 status()。
    */
   findChannelProcesses() {
     try {
-      const raw = this.#findChannels() || []
+      const raw = this.#findChannels() || [];
       return (Array.isArray(raw) ? raw : [])
         .map((r) => ({ pid: Number(r?.pid ?? r?.ProcessId), parentPid: Number(r?.parentPid ?? r?.ParentProcessId), name: String(r?.name ?? r?.Name ?? '') }))
-        // 排除自己：本进程的命令行里也可能出现同一个脚本名（比如测试里）
         .filter((r) => Number.isInteger(r.pid) && r.pid > 0 && r.pid !== process.pid)
-        // 再挡一道外壳进程（见 #scanChannelProcesses 的注释：我们自己那条查询就会匹配到自己）。
-        // 注入的探测函数也走这里 ⇒ 两道防线对注入实现同样生效。
-        .filter((r) => !/^(powershell|pwsh|cmd|conhost)\.exe$/i.test(r.name))
+        .filter((r) => !/^(powershell|pwsh|cmd|conhost)\.exe$/i.test(r.name));
     } catch (e) {
-      this.#push(`查通道进程失败：${e?.message ?? e}`)
-      return []
+      this.#push(`查通道进程失败：${e?.message ?? e}`);
+      return [];
     }
   }
 
   /** 默认实现：问一次 WMI 拿命令行。**贵**，只在真要停的时候调。 */
   #scanChannelProcesses() {
-    const script = this.findScript()
-    const needle = script ? path.basename(script) : '跑微信通道.mjs'
+    const script = this.findScript();
+    const needle = script ? path.basename(path.dirname(script)) : 'relay-wechat';
     const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
       // 🔴 `-notin` 那一条不是保险，是**必需**：这条查询自己的命令行里就含 `needle`
-      //    （`-like '*跑微信通道.mjs*'` 这串字面量本身），所以 PowerShell **会匹配到自己**。
-      //    实测（2026-09-20）第一次真停通道时，返回的 external 里就混进了一个
-      //    `powershell.exe`（pid 27196）—— 它正是那次查询自己。若时序不同，
-      //    taskkill 就会去杀一个无关的 PowerShell。
-      //    这与本项目"进程残留检测器匹配到自己"是同一个病，第二次犯了。
+      //    （`-like '*relay-wechat*'` 这串字面量本身），所以 PowerShell **会匹配到自己**。
+      //    本项目"进程残留检测器匹配到自己"这个病犯过一次，这是第二处。
       `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${needle}*' -and `
       + `$_.Name -notin @('powershell.exe','pwsh.exe','cmd.exe','conhost.exe') } | `
       + `Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress`
-    ], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
-    const txt = String(out || '').trim()
-    if (!txt) return []
-    const arr = JSON.parse(txt)
-    return Array.isArray(arr) ? arr : [arr]
+    ], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    const txt = String(out || '').trim();
+    if (!txt) return [];
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [arr];
   }
 
-  /** 结束一个进程**连同它的子进程**。通道是"启动器 + 中继 + Bridge"三层，只杀头会留下占端口的孤儿。 */
+  /** 结束一个进程**连同它的子进程**。只杀头会留下占端口的孤儿。 */
   #killTree(pid) {
     try {
-      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10000, stdio: 'ignore' })
-      return true
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10000, stdio: 'ignore' });
+      return true;
     } catch (e) {
       // taskkill 有时在"进程已经没了"时也返回非 0；不把它当成失败理由，交给调用方核对
-      this.#push(`taskkill ${pid} 返回非 0（可能已经退出）：${String(e?.message ?? e).slice(0, 80)}`)
-      return false
+      this.#push(`taskkill ${pid} 返回非 0（可能已经退出）：${String(e?.message ?? e).slice(0, 80)}`);
+      return false;
     }
   }
 
   /**
-   * 停掉通道。
+   * 停掉中继。
    * @param {{force?:boolean}} [o] force=true 时**连外面窗口跑的那个也停**
    *   （先关本模块拉起的；没有则找外面的）。默认 false = 只关自己拉起的那个。
    *
@@ -417,92 +493,52 @@ export class WechatChannel {
    *    —— 因为那个按钮**写的就是停止通道**，点了却不动才是不对。
    */
   stop({ force = false } = {}) {
-    const proc = this.proc
+    const proc = this.proc;
     if (proc) {
       try {
-        const pid = proc.pid
-        proc.kill()
-        this.#push(`已请求停止通道（本应用拉起的 pid=${pid}）`)
-        this.proc = null
-        return { ok: true, stopped: true, killed: [pid], ours: true }
+        const pid = proc.pid;
+        proc.kill();
+        this.#push(`已请求停止中继（本应用拉起的 pid=${pid}）`);
+        this.proc = null;
+        return { ok: true, stopped: true, killed: [pid], ours: true };
       } catch (e) {
-        this.#push(`停止通道失败：${e?.message ?? e}`)
-        return { ok: false, error: String(e?.message ?? e) }
+        this.#push(`停止中继失败：${e?.message ?? e}`);
+        return { ok: false, error: String(e?.message ?? e) };
       }
     }
-    const external = this.findChannelProcesses()
+    const external = this.findChannelProcesses();
     if (!external.length) {
-      return { ok: true, stopped: false, note: '没找到正在跑的通道进程（11230 可能是别的程序占着，或者已经停了）' }
+      return { ok: true, stopped: false, note: `没找到正在跑的中继进程（${this.relayPort} 可能是别的程序占着，或者已经停了）` };
     }
     if (!force) {
       return {
         ok: true, stopped: false, external,
-        note: `通道不是本应用拉起的（pid ${external.map((p) => p.pid).join(',')}，外面窗口里跑的）。`
+        note: `中继不是本应用拉起的（pid ${external.map((x) => x.pid).join(',')}，外面窗口里跑的)。`
           + '要停就再点一次「停止通道」。'
-      }
+      };
     }
-    const killed = []
-    for (const p of external) if (this.#killTree(p.pid)) killed.push(p.pid)
-    this.#push(`已结束外面窗口跑的通道：pid ${external.map((p) => p.pid).join(', ')}`)
+    const killed = [];
+    for (const x of external) if (this.#killTree(x.pid)) killed.push(x.pid);
+    this.#push(`已结束外面窗口跑的中继：pid ${external.map((x) => x.pid).join(', ')}`);
     return {
-      ok: true, stopped: true, killed, ours: false,
-      external,
-      note: `通道原本是在外面的窗口里跑的（pid ${external.map((p) => p.pid).join(',')}），已连同子进程一起结束。`
+      ok: true, stopped: true, killed, ours: false, external,
+      note: `中继原本是在外面的窗口里跑的（pid ${external.map((x) => x.pid).join(',')}），已连同子进程一起结束。`
         + '（那个窗口本身不会自己关，会停在报错/退出的画面上，属正常。）'
-    }
+    };
   }
 
   /** 最近的日志（给页签那个日志框）。 */
   tail(limit = 120) {
-    return this.logs.slice(-Math.max(1, Math.min(LOG_LIMIT, limit)))
+    return this.logs.slice(-Math.max(1, Math.min(LOG_LIMIT, limit)));
   }
 
-  /** WeFlow 在不在跑（它不归我们管，只能看端口）。 */
-  async weflowRunning() {
-    return await this.isPortOpen('127.0.0.1', 5031).catch(() => false)
+  /** 中继在不在跑（只看端口，不看其它）。 */
+  async relayRunning() {
+    return await this.isPortOpen('127.0.0.1', this.relayPort).catch(() => false);
   }
 
-  /**
-   * 替用户把 WeFlow 拉起来。
-   * ⚠️ 它是**第三方 GUI 应用**：我们只负责"没跑就点一下火"，它的窗口会自己弹出来，
-   *    我们既改不了它的界面，也不该把它的二进制打进我们的安装包。
-   * ⚠️ 找不到 exe 时**必须把找过哪些路径报出来** —— "点了没反应"是本项目的头号病。
-   */
-  launchWeFlow() {
-    if (this.findWeFlowPids().length > 0) {
-      this.#push('WeFlow 进程已经在跑（端口还没通，可能还在加载）')
-      return { ok: true, alreadyRunning: true }
-    }
-    const exe = this.resolveWeFlowExe()
-    if (!exe.path) {
-      return {
-        ok: false,
-        error: exe.candidates.length
-          ? `WeFlow 没在跑，而这几个路径都不存在：\n  ${exe.candidates.join('\n  ')}\n可在设置里填 wechat.weflowExe 指定。`
-          : '没配置 WeFlow 的路径（设置里填 wechat.weflowExe），也没找到默认位置。',
-        candidates: exe.candidates
-      }
-    }
-    try {
-      const child = spawn(exe.path, [], { detached: true, stdio: 'ignore', windowsHide: false })
-      child.unref()
-      this.#push(`已请求启动 WeFlow（${exe.path}）—— 它自己的窗口会弹出来`)
-      return { ok: true, launched: true, exe: exe.path, pid: child.pid ?? null }
-    } catch (e) {
-      this.#push(`启动 WeFlow 失败：${e?.message ?? e}`)
-      return { ok: false, error: String(e?.message ?? e), exe: exe.path }
-    }
-  }
-
-  /**
-   * ⚠️ **刻意不做**「停止 WeFlow」。
-   *
-   * 理由：SnowLuma 是我们通道的专用组件，停掉它只影响我们；而 WeFlow 是**通用的微信数据应用**，
-   * 用户可能同时在用它看别的东西 —— 我们在界面上放一个"停止"，等于给了用户一个
-   * "顺手把别人正在用的程序关掉"的按钮。
-   * ⇒ 界面上的按钮只有「启动 WeFlow」，**没有停止**。要停请用户自己关它的窗口。
-   */
-  stopWeFlow() {
-    return { ok: false, error: '本应用不提供停止 WeFlow（它是通用第三方应用，用户可能正在用它；请直接关它的窗口）' }
+  /** 微信 hook 端口在不在听（= version.dll 注入成功的最直接证据）。 */
+  async hookRunning() {
+    return await this.isPortOpen('127.0.0.1', this.hookPort).catch(() => false);
   }
 }

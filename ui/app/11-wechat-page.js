@@ -83,7 +83,7 @@ async function loadWechatContacts() {
       否则又会出现"界面说通了、实际收不到"的两套口径（本项目栽过，见 §12.15）。
    2. **日志框放在常驻容器里**，轮询只重建状态区 —— 整页重建会把用户正在看的位置
       冲掉，这正是 §29「群发打字打一半被打断」的同一个病。
-   3. **三段分开显示**（WeFlow / 通道 / 我的链路），断在哪一段要一眼看出来 ——
+   3. **三段分开显示**（微信 / 中继 / 我的链路），断在哪一段要一眼看出来 ——
       "微信没反应"最常见的原因就是中间那段断了而界面不说。
    ══════════════════════════════════════════════════════════════════════ */
 
@@ -93,7 +93,7 @@ async function loadWechatContacts() {
  *   · 「三段状态是纯文字编号行」→ StatusBadge + 三段流水线分步器（启停为段内两态开关）
  *   · 「启动/停止是两个按钮；五个按钮平铺无主次，一键自检被埋没」
  *     → 页级只留「一键自检」（主）+「微信联系人（放行）」（次，且门控）；
- *       启停下沉到各自段内；「启动 WeFlow」也沉降到第 1 段内
+ *       启停下沉到各自段内；「启动微信」也沉降到第 1 段内
  *   · 「自动拉起复选框与操作混排」→ 收进底部「偏好」折叠区
  *   · 「顶部说明文字冗余（状态即说明）」→ 压成一行 + ⓘ
  *   · 「pid/路径裸排」→ 元信息行（带复制）
@@ -175,7 +175,7 @@ function channelStatusPageHtml(cfg) {
  *   · 「聚合徽标」→ 三段全通才绿；断开则红**并指出哪段**
  *   · 「启动/停止是两个按钮；五个按钮平铺无主次，一键自检被埋没」
  *     → 页级只留「一键自检」(主) +「微信联系人（放行）」(次，门控)；
- *       启停下沉到段内；「启动 WeFlow」也沉到第 1 段
+ *       启停下沉到段内；「启动微信」也沉到第 1 段（2026-10-22 WeFlow 下线后）
  *   · 「pid/路径裸排」→ 元信息行（带复制）
  *   · 「顶部说明文字冗余（状态即说明）」→ 一行 + ⓘ
  */
@@ -186,86 +186,94 @@ function renderWechatStatus(st) {
       hintHtml: hintLine('后端没响应，稍后自动重试。', '这是 /api/wechat/channel/status 没返回 —— 通常是应用刚启动，或后端进程出了问题。'),
     });
   }
-  const w = st.weflow || {}, c = st.channel || {}, a = st.agent || {};
+  const w = st.wx || {}, c = st.channel || {}, a = st.agent || {};
 
   // ── 三段的"通没通"判据（**只在这里定义一次**）──────────────────────────
-  // 🔴 2026-10-04（第四十对话 · 批 0，方案 §8.5）：这里原来写着"端口通 = 真能读库"——
-  //    **那句话被实测证伪了**：WeFlow 的数据组件挂掉时端口照样通、`/api/v1/health` 还是 200，
-  //    而读库接口全 500 `{"error":"错误码: -101"}`（复测：`_临时产物-第三十六对话\探-WeFlow读库通不通.mjs`
-  //    读数 0/3）。旧判据只看 `running` ⇒ 三个圆点全绿（**假绿**），真相是"消息收不到、发送也确认不了"。
-  // ⇒ 第①段现在要**两个都成立**：端口通（running）**且**后端没探到"读不到库"（dbOk !== false）。
-  //    ⚠️ 写成 `!== false`（不是 `=== true`）是刻意的、也是后端契约：`dbOk` 只有三种值 ——
-  //      `true`（探到 200）/`false`（探到非 200 或没 token）/`null`（WeFlow 没在跑，不探）。
-  //      项目口径是"**有证据才拦**"：字段缺失/未知时不许自己把红点亮起来（那种"宁可错杀"会变成新的假红）。
-  const s1 = !!w.running && w.dbOk !== false;
+  // 🔴 2026-10-22（第五十三对话 · WeFlow 下线）：第①段从"WeFlow 读微信本地库"换成
+  //    **微信 hook 注入**，旧的 `running && dbOk !== false` 连字段带语义一起作废。
+  //    新判据要三样都成立才叫通：
+  //      running  Weixin.exe 进程在（只看这个会假绿：进程在、没注入照样收不到）
+  //      hookOk   version.dll 注入通了（端口 30001 在听）—— 收发全靠它
+  //      loginOk  登录了。⚠️ 三态：true=登录 / false=确实没登录 / null=**问不到**
+  //               ⇒ 用 `=== true`（有证据才打绿），不用 `!== false`（那会把"问不到"当绿）。
+  const s1 = !!w.running && w.hookOk === true && w.loginOk === true;
   const s2 = !!(c.running && c.bridgeConnected);
   const s3 = !!(a.enabled && a.connected && a.bridgeConnected !== false);
   const allOk = s1 && s2 && s3;
 
-  // ── 聚合徽标：三段全通才绿，断开则**指出哪段**（方案要求）───────────────
-  // ⚠️ "地址对但不通"要说清是**哪一种**不通：WeFlow 那段故障时端口是通的，
-  //    只写个"未连通：WeFlow"会让人去查端口/查进程（那儿没事），实际坏在它读不到库。
-  const broken = [s1 ? null : (w.running ? 'WeFlow（读不到库）' : 'WeFlow'), s2 ? null : '通道', s3 ? null : '我的链路'].filter(Boolean);
+  // ── 聚合徽标：三段全通才绿，断开则**直接点名哪段**（方案要求）──────────
+  // ⚠️ 第①段有**两种**不通：进程没跑 vs 进程在但 hook 没注入。只写"未连通：微信"
+  //    会让人去查进程（那儿没事），而实际坏在注入 —— 所以要分开说。
+  const broken = [
+    s1 ? null : (w.running ? '微信（hook 没通）' : '微信'),
+    s2 ? null : '通道',
+    s3 ? null : '我的链路',
+  ].filter(Boolean);
   const aggBadge = allOk
     ? statusBadge('ok', '链路已连通')
     : statusBadge('err', `未连通：${broken.join(' / ')}`);
 
   // ── 元信息行（方案："pid/路径裸排" → 带复制）────────────────────────────
+  // ⚠️ 这一句要**提前说清"停止按钮会动它"**：用户看到"外面的窗口里跑的，正常"，
+  //    会以为那个按钮碰不到它 —— 于是要么不敢点，要么点了被吓一跳。
+  // ⚠️ 措辞必须保留「停止通道」这四个字：那是加这道防线时留下的 UI 锚点，别改成「停止」。
   const managed = st.managed?.pid
-    ? `本应用拉起的通道进程 pid=${st.managed.pid}`
-    // ⚠️ 这一句要**提前说清"停止按钮会动它"**：用户看到"外面的窗口里跑的，正常"，
-    //    会以为那个按钮碰不到它 —— 于是要么不敢点，要么点了被吓一跳。
-    //    ⚠️ 措辞必须保留「停止通道」这四个字：`test-微信WeFlow生命周期.mjs` 有一道
-    //       断言专门钉这条文案（那是加这道防线时留下的锚点，别改成「停止」）。
+    ? `中继是本应用拉起的 pid=${st.managed.pid}`
     : (c.running
-      ? '通道进程不是本应用拉起的（可能在外面窗口里跑）—— 点「停止通道」会把它一起停掉'
-      : '通道进程不是本应用拉起的（可能在外面窗口里跑，正常）');
+      ? '中继进程不是本应用拉起的（可能在外面窗口里跑）—— 点「停止通道」会把它一起停掉'
+      : '中继进程不是本应用拉起的（可能在外面窗口里跑，正常）');
+  const exeName = st.script?.path ? String(st.script.path).split(/[\\/]/).pop() : '';
   const meta = [
-    `<span>WeFlow 端口 ${esc(String(w.port || 5031))}</span>`,
-    st.managed?.pid ? `<span>pid ${esc(String(st.managed.pid))}</span>` : '',
-    `<span class="ihint" role="note" tabindex="0" title="${esc(managed + '；脚本：' + (st.script?.path || '（没找到）'))}" aria-label="运行位置说明">i</span>`,
+    `<span title="微信客户端本体；hook 注入就是往它身上挂 version.dll">微信 ${esc(w.exe || '（未解析到路径）')}</span>`,
+    `<span>hook 端口 ${esc(String(w.port || 30001))}</span>`,
+    st.managed?.pid ? `<span>中继 pid ${esc(String(st.managed.pid))}</span>` : '',
+    exeName ? `<span>脚本 ${esc(exeName)}</span>` : '',
+    `<span class="ihint" role="note" tabindex="0" title="${esc(managed + '；通道脚本：' + (st.script?.path || '（没找到）'))}" aria-label="运行位置说明">i</span>`,
     `<span class="snowluma-actions" style="margin:0;gap:6px">
-       <button class="btn btn-small" id="wx-copy-meta" title="复制端口 / pid / 脚本路径 / WeFlow 程序路径，便于排查时贴给别人">复制</button>
+       <button class="btn btn-small" id="wx-copy-meta" title="复制微信 / hook / 中继 / 脚本信息，便于排查时贴给别人">复制</button>
      </span>`,
   ];
 
   // ── 三段分步器：启停是**段内两态开关**（方案要求）────────────────────────
-  // 🔴 第①段的话分**三种**（2026-10-04 批 0，方案 §8.5）：没在跑 / 端口通但读不到库 / 都好。
-  //    中间那种是本次要治的"假绿"：必须把"端口通、但读不到库（-101）"**原样说出来**，
-  //    并说明后果（收不到、确认不了），否则用户会一直在端口/进程上找原因。
+  // 🔴 第①段的话分**六种**（契约 §四），每种都要把"到底卡在哪"说出来：
+  //    ⛔ 尤其 `loginOk === null`：那是**问不到**（hook 接口没回话），不是"没登录"。
+  //       说成"没登录"会把人往扫码那儿赶，而真正的问题在注入。
   const step1Desc = !w.running
-    ? (w.starting
-      ? `进程在（pid ${(w.pids || []).join(',')}），但端口 ${w.port || 5031} 还没通 —— 它可能还在加载，或停在登录/选数据的界面`
-      : '没在跑。WeFlow 是第三方应用，我们只能替你点一下火。')
-    : (w.dbOk === false
-      ? `端口通、但读不到库（${w.dbError || '未知原因'}）—— 微信消息收不到，发出去也无法确认。`
-        + '坏的是它自己的数据组件（不归我们管，重启通常也没用）；这一层没修好之前，这一页下面两段再绿也不算通。'
-      : `在跑（端口 ${w.port || 5031} 已通${w.dbOk === true ? '，读库正常' : ''}）`);
+    ? '微信没在跑（Weixin.exe 进程不在）。点「启动通道」会先把它拉起来并注入 hook。'
+    : (!w.hookOk
+      ? (w.starting
+        ? `微信起来了，但 hook 端口 ${w.port || 30001} 还没通（可能还在加载，等几秒）。`
+        : `微信在跑，但 **hook 没注入成功**（端口 ${w.port || 30001} 不通）⇒ 收不到也发不出。先退出微信，再点「启动通道」重来一次。`)
+      : (w.loginOk === false
+        ? 'hook 已通，但微信**没登录**（扫码还没完成）⇒ 收不到也发不出。'
+        : (w.loginOk === null
+          ? `hook 已通，但登录状态问不到（${w.error || '接口没回话'}）—— 这不等于没登录，先看下面那段通没通。`
+          : `微信在跑、hook 已注入、已登录：${w.selfName || w.selfWxid || '(未知)'}`)));
   const step2Desc = !c.running
-    ? '中继没在跑。'
+    ? '中继没在跑（11230 没人听）。'
     : (!c.bridgeConnected
-      ? '中继在跑，但 Bridge 没连上来 ⇒ 消息进不来也发不出。'
-      : `通（Bridge 已连入${c.login ? `，微信侧登录 ${c.login.nickname || c.login.userId}` : ''}${c.eventsIn !== null && c.eventsIn !== undefined ? `，累计收到事件 ${c.eventsIn}` : ''}）`);
+      ? '中继在跑，但它没连上微信 hook（推送口 18999 没收到过东西）⇒ 消息进不来也发不出。'
+      : `通（已连上微信 hook${c.login ? `，微信侧登录 ${c.login.nickname || c.login.userId}` : ''}${c.eventsIn !== null && c.eventsIn !== undefined ? `，累计收到消息 ${c.eventsIn}` : ''}）`);
   const step3Desc = !a.enabled
     ? '本应用的微信通道没启用（config.wechat.enabled=false）。'
     : (!a.connected ? '本应用没连上中继（会自己重试）。' : (a.bridgeConnected === false ? '连上中继了，但上游（②）不通。' : '通。'));
 
   const steps = [
     {
-      title: 'WeFlow', note: '（读微信本地库、推新消息）',
+      title: '微信', note: '（hook 注入：只读消息 + 发消息都靠它）',
       desc: step1Desc, state: s1 ? 'done' : 'active',
-      // ⚠️ 按钮看的是 `w.running`（**不是** s1）：它已经在跑的时候不该给一个写着「启动 WeFlow」的按钮
-      //    —— 那正是"按钮没干它写着的事"。读不到库时按钮仍是「重启」（点它通常也没用，
-      //    所以 desc 已经把"不归我们管"说了）。
-      actionHtml: w.running
-        ? `<button class="btn btn-small" id="wx-weflow-btn" title="已经在跑；再点一次会尝试重新拉起（它读不到库时，重启通常也没用）">重启</button>`
-        : `<button class="btn btn-small btn-primary" id="wx-weflow-btn" title="WeFlow 是第三方应用，我们只能替你点一下火">启动 WeFlow</button>`,
+      // ⚠️ 按钮看的是 `w.hookOk`（**不是** running）：进程在、hook 没通时，给一个写着
+      //    「启动微信」但点了也不重启的按钮 = "按钮没干它写着的事"。反之 hook 通了
+      //    就没什么可点的 —— 空串，别摆一个装饰性按钮。
+      actionHtml: w.hookOk === true
+        ? ''
+        : `<button class="btn btn-small btn-primary" id="wx-hook-btn" title="会先关掉现在开着的微信，再注入 hook 启动（同一个端口不能注入两次）">启动微信</button>`,
     },
     {
-      title: '中继 + Bridge', note: '（我们的通道）',
+      title: '中继', note: '（本机 Node 进程：18999 收微信推送，11230 给本应用）',
       desc: step2Desc, state: s2 ? 'done' : (s1 ? 'active' : 'todo'),
       actionHtml: c.running
-        ? `${quietBtnHtml('wx-stop-btn', '停止通道', '会连 Bridge 一起停；执行前会二次确认')}`
+        ? `${quietBtnHtml('wx-stop-btn', '停止通道', '会停掉中继进程；执行前会二次确认')}`
         : `<button class="btn btn-small" id="wx-start-btn">启动通道</button>`,
     },
     {
@@ -291,22 +299,22 @@ function renderWechatStatus(st) {
     // ⚠️ 自检按钮**不加门控**：它的用途恰恰是"不通的时候诊断为什么不通"，
     //    锁住它等于把唯一的诊断入口关掉（方案里的门控是给"依赖连通才能成功"的操作用的）。
     hintHtml: hintLine('三段各管一件事，三段都得通才收得到微信消息。',
-      '① WeFlow：第三方应用，读微信本地库并把新消息推出来。'
-      + '② 中继 + Bridge：我们的通道，负责把 WeFlow 的消息转成 OneBot 事件。'
+      '① 微信：真微信客户端 + 注入的 version.dll，负责收发消息（不看界面，只看端口 30001 与登录态）。'
+      + '② 中继：本机 Node 进程，把微信的推送（18999）翻成 OneBot 事件给本应用（11230）。'
       + '③ 我的链路：本应用连上中继 —— 它会自己重试，不需要手动操作。'
       + '断了哪一段，上面的徽章会直接点名。'),
     steps,
   });
 }
 
-/** 开机自动启动的两个开关（值来自 /api/config，不是 status）。 */
+/** 开机自动启动的开关（值来自 /api/config，不是 status）。 */
 function renderWechatAuto(cfg) {
   const w = cfg?.wechat || {}
+  // 🔴 2026-10-22：`wx-autoweflow`（"顺手把 WeFlow 也点着"）整块删除 —— WeFlow 已下线。
+  //    微信那一侧现在由「启动通道」自己按需注入拉起（launchWeixinFirst），不需要第二个勾。
   return `
-    <div class="checkbox-row" style="margin:2px 0"><input type="checkbox" id="wx-autorelay" ${w.autoLaunchRelay ? 'checked' : ''} />
-      <label for="wx-autorelay">应用启动时自动拉起微信通道（中继 + Bridge）</label></div>
-    <div class="checkbox-row" style="margin:2px 0 10px"><input type="checkbox" id="wx-autoweflow" ${w.autoLaunchWeFlow !== false ? 'checked' : ''} />
-      <label for="wx-autoweflow">自动拉起通道时，顺手把 WeFlow 也点着（不点着的话：通道看着全通，却收不到消息）</label></div>`
+    <div class="checkbox-row" style="margin:2px 0 10px"><input type="checkbox" id="wx-autorelay" ${w.autoLaunchRelay ? 'checked' : ''} />
+      <label for="wx-autorelay">应用启动时自动拉起通道（中继；需要的话会顺手把微信注入了再起来）</label></div>`
 }
 
 /** ⚠️ 2026-09-22（条目 3）：`wechatVerdict()` 已删除。
@@ -325,12 +333,12 @@ function bindWechatPageEvents() {
     const id = e.target && e.target.id
     if (!id || !id.startsWith('wx-')) return
     const map = {
-      // 启动通道时**顺带把 WeFlow 点着**（后端默认这么做）：少了这一步，用户会遇到
-      // "通道起来了、日志也正常，就是收不到消息"，原因是 WeFlow 没开。
-      'wx-start-btn': ['/api/wechat/channel/start', '启动通道', { launchWeFlowFirst: true }],
+      // 启动通道时**顺带把微信注入了拉起来**（后端默认这么做）：少了这一步，用户会遇到
+      // "中继起来了、日志也正常，就是收不到消息"，原因是微信没被注入 hook。
+      'wx-start-btn': ['/api/wechat/channel/start', '启动通道', { launchWeixinFirst: true }],
       'wx-stop-btn': ['/api/wechat/channel/stop', '停止通道', { force: true }],
-      // 拉起后等端口通（最多 45 秒）—— 否则用户点完立刻看到的还是"没在跑"，会以为失败了
-      'wx-weflow-btn': ['/api/wechat/channel/weflow/launch', '启动 WeFlow', { wait: true }]
+      // 拉起后等 hook 端口通（最多 45 秒）—— 否则用户点完立刻看到的还是"没在跑"，会以为失败了
+      'wx-hook-btn': ['/api/wechat/channel/wx/launch', '启动微信', { wait: true }]
     }
     if (id === 'wx-check-btn') {
       // 🔴 真的去查（POST /api/wechat/channel/selfcheck），**不是**把页面重拉一遍。
@@ -355,9 +363,10 @@ function bindWechatPageEvents() {
       }
       return
     }
-    // 两个开机自启动开关：`change` 也会走 click 分支，e.target.checked 此时已是新值。
-    if (id === 'wx-autorelay' || id === 'wx-autoweflow') {
-      const key = id === 'wx-autorelay' ? 'autoLaunchRelay' : 'autoLaunchWeFlow'
+    // 开机自启动开关：`change` 也会走 click 分支，e.target.checked 此时已是新值。
+    // 🔴 2026-10-22：`wx-autoweflow` 随 WeFlow 一起下线，只剩 autoLaunchRelay 一个。
+    if (id === 'wx-autorelay') {
+      const key = 'autoLaunchRelay'
       const val = !!e.target.checked
       // ⚠️ 反馈不写进日志面板、也不写进每轮重建的 #wx-status（会被冲掉）——
       //    写进不参与轮询的 #wx-check 区，并让它自己消失（存/失败都是瞬时的）。
@@ -384,19 +393,19 @@ function bindWechatPageEvents() {
       switchTab('settings');    // 内部会 loadSettings()，按 state.settingsSection 渲染
       return
     }
-    // 复制元信息（端口 / pid / 脚本 / WeFlow 程序）—— 条目 3 的"带复制"
+    // 复制元信息（微信 / hook 端口 / 中继 / 脚本）—— 条目 3 的"带复制"
     if (id === 'wx-copy-meta') {
       const st2 = state.wechatStatus || {}
-      const w2 = st2.weflow || {}, c2 = st2.channel || {}
+      const w2 = st2.wx || {}, c2 = st2.channel || {}
       const txt = [
-        // ⚠️ 这一行是"贴给别人看"的排查文本，**最容易假绿**：端口通就写"通"，而对方据此
-        //    以为读库也没问题（正是本次治的病）。⇒ 读不到库时把状态与错误码一起写出来。
-        `WeFlow 端口：${w2.port || 5031}（${w2.running
-          ? (w2.dbOk === false ? `通，但读不到库（${w2.dbError || '未知原因'}）` : (w2.dbOk === true ? '通，读库正常' : '通'))
-          : (w2.starting ? '进程在但端口未通' : '未运行')}）`,
-        `WeFlow 程序：${w2.exe || '（没找到）'}`,
-        `中继 + Bridge：${c2.running ? '中继在跑' : '未运行'}${c2.bridgeConnected ? '，Bridge 已连入' : '，Bridge 未连入'}`,
-        `通道进程 pid：${st2.managed?.pid ?? '（不是本应用拉起的）'}`,
+        // ⚠️ 这一行是"贴给别人看"的排查文本，**最容易假绿**：进程在就写"在跑"，而对方据此
+        //    以为 hook 也没问题（正是本次治的病）⇒ 把 hook 端口与登录态一起写出来。
+        `微信：${w2.running ? '进程在跑' : '未运行'}；hook ${w2.hookOk === true ? '已注入' : (w2.running ? '没注入（端口不通）' : '无')}`
+          + `；登录 ${w2.loginOk === true ? `是（${w2.selfName || w2.selfWxid || '未知'}）` : (w2.loginOk === false ? '否（扫码未完成）' : '问不到')}`,
+        `微信程序：${w2.exe || '（没找到）'}`,
+        `中继：${c2.running ? `在跑（11230；推送口 ${w2.port || 30001} 的上游是 18999）` : '未运行'}`
+          + `${c2.bridgeConnected ? '，已连上微信 hook' : '，没连上微信 hook'}`,
+        `中继 pid：${st2.managed?.pid ?? '（不是本应用拉起的）'}`,
         `通道脚本：${st2.script?.path || '（没找到）'}`,
       ].join('\n')
       try { await navigator.clipboard.writeText(txt); e.target.textContent = '已复制' }
@@ -418,7 +427,7 @@ function bindWechatPageEvents() {
     // 「停止通道」是**破坏性操作** ⇒ 二次确认（条目 3 原则 3）。
     // 确认文案说清后果：停的是"微信消息进不来"这件事，不只是关一个进程。
     const runAction = async () => {
-      say(`${label}中…${id === 'wx-weflow-btn' ? '（要等它的端口起来，最多 45 秒）' : ''}`, true)
+      say(`${label}中…${id === 'wx-hook-btn' ? '（会先关掉现开的微信再注入，要等 hook 端口起来，最多 45 秒）' : ''}`, true)
       try {
         const r = await api(path, { method: 'POST', body: JSON.stringify(body || {}) })
         if (!r?.ok) {
@@ -442,10 +451,11 @@ function bindWechatPageEvents() {
         head: '停止微信通道？',
         okText: '停止',
         text: `停掉之后<b>微信消息进不来，她也发不出去</b>。<br><br>
-          通道是「中继 + Bridge」两个进程${state.status?.wechat?.managedPid ? '（其中一个由本应用拉起）' : ''}，
+          停的是<b>中继进程</b>（本机 Node，18999 收微信推送、11230 给本应用）${state.status?.wechat?.managedPid ? '，它由本应用拉起' : ''}，
           停止会一起停掉。<br><br>
           要恢复得重新点「启动通道」。<br><br>
-          ⚠️ 如果通道进程不是本应用拉起的（在你自己开的窗口里跑），这一步也会把它一起停掉。`,
+          ⚠️ 如果中继进程不是本应用拉起的（在你自己开的窗口里跑），这一步也会把它一起停掉。
+          微信本体<b>不会</b>被关掉 —— 它继续开着，只是没人转消息了。`,
         onOk: runAction,
       })
       return
@@ -493,7 +503,8 @@ async function loadWechatPage({ force = false } = {}) {
   //    每轮重写勾选框会和"用户正在点它"打架（点下去又被旧值刷回去）。
   const aBox = document.getElementById('wx-autostart')
   if (aBox && cfg?.wechat) {
-    const key = `${!!cfg.wechat.autoLaunchRelay}|${cfg.wechat.autoLaunchWeFlow !== false}`
+    // 🔴 2026-10-22：渲染 key 里原来有 autoLaunchWeFlow 这一位 —— 它已下线，只剩一位。
+    const key = `${!!cfg.wechat.autoLaunchRelay}`
     if (aBox.dataset.renderKey !== key) {
       aBox.dataset.renderKey = key
       aBox.innerHTML = renderWechatAuto(cfg)
@@ -551,9 +562,12 @@ function logRowsHtml(logs) {
  */
 function renderSelfcheck(r) {
   const items = r?.items || []
+  // 🔴 2026-10-22（WeFlow 下线）：分组正则同步换成新链路的关键词。
+  //    ⚠️ 关键词是**兜底归组**用的（后端 item 的 title 里有这些词），不是判据本身 ——"
+  //    所以宁可宽一点，别让某一项落进"其它检查"里让人看不见。
   const groups = [
-    { name: '① WeFlow', re: /weflow|端口\s*5031|读库/i },
-    { name: '② 中继 + Bridge', re: /中继|bridge|relay|akasha|11230|11229/i },
+    { name: '① 微信（hook 注入）', re: /微信|weixin|hook|30001|注入/i },
+    { name: '② 中继', re: /中继|relay|akasha|11230|18999|bridge/i },
     { name: '③ 我的链路', re: /本应用|agent|启用|连接|配置|config/i },
   ]
   const used = new Set()
