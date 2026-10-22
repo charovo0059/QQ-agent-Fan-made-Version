@@ -1353,14 +1353,30 @@ function renderWechatContactsSection(c) {
           </div>
         </details>`;
     }
-    return list.map((x) => `
+    // 🆕 2026-10-22（第五十四对话 · 用户要求）：把「微信群」与「微信联系人」**分成两组**列出来，
+    //    与「聊天白名单」页的「群 / 好友」两个芯片框同构。
+    //    为什么必须分：群的数字 id 走的是**另一条派生规则**（`_group_to_int`），
+    //    原来平铺在一个列表里，用户根本看不出哪一条是群、哪一条是人（而放行错类型就是"配了没用"）。
+    //    ⚠️ 只改**呈现**：`data-id` / `data-kind` / 勾选 → `/api/wechat-contacts/allow` 那条链路
+    //       一个字没动（那是"勾选 = 放行"的唯一入口，`test-微信联系人设置页.mjs` 逐字钉着 body）。
+    //    ⚠️ 排序沿用后端给的顺序（`listContacts` 已按 lastSeen 倒序）—— 组内不再重排。
+    const one = (x) => `
       <div class="checkbox-row" style="align-items:center">
         <input type="checkbox" class="wx-contact-cb" data-id="${esc(x.id)}" data-kind="${esc(x.kind)}" ${x.allowed ? 'checked' : ''} />
         <label style="flex:1">
           <b>${esc(x.name || '(没拿到昵称)')}（${esc(x.id)}）（微信）</b>
           <span class="muted">· ${x.kind === 'group' ? '群' : '私聊'}${x.count ? ` · 收到过 ${x.count} 条` : ''}</span>
         </label>
-      </div>`).join('');
+      </div>`;
+    // 组头只用内联最小样式（项目纪律：⛔ 不为这一处新增 CSS 规则/变量）。
+    // 空组**也留着组头**（写「（暂无）」）—— 组整个消失的话，用户不知道这里本来还有这一类。
+    const block = (title, arr) => `<div style="margin:2px 0 6px">
+        <div style="font-size:12px;font-weight:600;margin:2px 0 4px">${title}（${arr.length}）</div>
+        ${arr.length ? arr.map(one).join('') : '<div class="hint" style="margin:0">（暂无）</div>'}
+      </div>`;
+    const groups = list.filter((x) => x.kind === 'group');
+    const privates = list.filter((x) => x.kind !== 'group');
+    return block('微信群', groups) + block('微信联系人', privates);
   })();
   // ── 说明小字分层（2026-10-01 UI 改造第三阶段 条目 2，位置 A/B1/B2）────────────
   // 载体按原型已定稿的四级规范（`index.prototype.html:1180-1185`）摊：**结论留外层 1 行、细节进二级折叠**。
@@ -1386,7 +1402,7 @@ function renderWechatContactsSection(c) {
       </div>
     </details>
     ${blockedHint}
-    <div class="field"><label>已知的微信联系人 / 群（勾选即放行）</label>
+    <div class="field"><label>已知的微信群 / 联系人</label>
       <div id="wx-contact-list" style="max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px">
         ${rows}
       </div></div>
