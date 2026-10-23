@@ -34,6 +34,66 @@ const WX_PROC_NAME = 'Weixin.exe'
 /** hook 登录态探测的缓存时长：`/api/status` 每 15 秒轮询一次，不必每次都问微信。 */
 const WX_LOGIN_PROBE_TTL_MS = 10 * 1000
 
+/**
+ * 「这个中继是我拉起来的」的归属标记（环境变量名）。
+ *
+ * 🔴 为什么需要它（2026-10-23 第五十六对话，线上事故）：
+ *   app 退出时 stop({force:true}) 按**命令行**扫 relay-wechat 进程并 taskkill。
+ *   而回归测试的 bootApp 在进程内 createApp()，teardown 照样走这条路 ⇒
+ *   它扫到的是**线上那个真中继**，把生产通道杀了。实测：跑一次
+ *   test-端口预检.mjs ⇒ 生产中继 pid 当场消失；跑纯磁盘判据 ⇒ 纹丝不动。
+ *   每次全量回归都在偷偷杀线上通道，然后自动重启 3 次用满就永久停手。
+ * ⇒ 现在每一代中继都带这个环境变量（值是拉它的那个进程 pid），
+ *   扫描时用它判归属：**标记是自己 pid 的才是"我的"**。
+ *   没有标记 / 标记是别人 pid 的一律算"外面的"（默认不碰）。
+ */
+const OWNER_ENV = 'DSH_WXCHANNEL_OWNER'
+
+/**
+ * 同一个归属标记的**命令行**形式（`--wxchannel-owner=<pid>`）。
+ * 为什么两处都要：WMI 的 `Win32_Process` 能读 CommandLine 但读不到环境变量，
+ * 而"这进程是不是我拉的那一代"必须在扫描时判得出来。
+ */
+const OWNER_ARG = '--wxchannel-owner='
+
+/**
+ * 从命令行里解出归属 pid（解析不出来回 **0**，表示"不是我拉的那一代"）。
+ * 单独抽成函数是为了能被判据直接调：脏输入（null / 空串 / 乱码 / 多个标记）
+ * 必须一律当"不是我的"，⛔ 绝不因为解析失败就当成自己的然后去杀它。
+ */
+function parseOwnerPid(cmd) {
+  const m = String(cmd || '').match(/--wxchannel-owner=(\d{1,12})\b/)
+  if (!m) return 0
+  const n = Number(m[1])
+  return Number.isSafeInteger(n) && n > 0 ? n : 0
+}
+
+/**
+ * 这个 pid 还活着吗（只读探测，绝不抛）。
+ * 用途见 `#ownedByOther()`：判断"这个中继是不是另一个**还活着**的进程拉起的"。
+ */
+function isAliveSync(pid) {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 0) return false
+  if (n === process.pid) return true
+  try { process.kill(n, 0); return true } catch (e) { return e?.code === 'EPERM' }
+}
+
+/**
+ * 这个进程名像不像**另一个应用实例**（桌面版 QQ Agent / Electron 宿主）。
+ *
+ * 🔴 为什么要认名字（2026-10-23 第五十六对话补）：
+ *   光看归属标记只能保护**打了标记之后**才拉起来的中继。事故发生时线上那个中继是
+ *   **旧代码拉起的、命令行上没有标记**（ownerPid=0）⇒ 单靠标记它会继续被回归测试杀掉。
+ *   而它的父进程是**另一个还活着的 QQ Agent.exe**（真身那份应用）—— 这就是"不是我拉的那一代"
+ *   的第二个、也是**当下就能用**的判据。
+ *   ⚠️ 只在"父进程是应用宿主"时才算别人的：中继在**外部 cmd/终端窗口**里自己跑时父进程是
+ *      cmd.exe / node.exe，那种情况仍然要让 UI 的「停止通道」能停掉它（用户的按钮语义）。
+ */
+function isAppHostName(name) {
+  return /^(QQ Agent|electron)(\.exe)?$/i.test(String(name || '').trim())
+}
+
 export class WechatChannel {
   /**
    * @param {object} o
@@ -366,9 +426,26 @@ export class WechatChannel {
     if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null }
     this.stopping = false;
     const gen = (this.procGen = (this.procGen || 0) + 1);
-    const child = spawn(this.nodeExe, [script], {
+    // 🔴 2026-10-23 第五十六对话：给每一代中继打上**归属标记**（环境变量）。
+    //    为什么必须打（这是本文件第三次犯「探测器匹配到自己」的病）：
+    //    app 退出时 stop({force:true}) 会去扫「命令行里含 relay-wechat 的进程」并
+    //    taskkill /T /F。而**回归测试**里的 bootApp 会在进程内 createApp()，
+    //    teardown 时照样调 stop({force:true}) ⇒ 它扫到的是**线上那个真中继**
+    //    （命令行确实是 relay-wechat/index.js）并把它杀掉。实测：跑一次
+    //    test-端口预检.mjs，生产中继 pid 当场消失；跑纯磁盘判据则纹丝不动。
+    //    ⇒ 每次全量回归都在偷偷杀线上通道，然后自动重启 3 次用满就停手，
+    //      日志里只剩「code=1、无 signal、relay 自己一行都没留」。
+    //    解法：本进程 spawn 出来的中继一律带 DSH_WXCHANNEL_OWNER=<本进程 pid>，
+    //    扫描时**只认标记等于自己 pid 的**才当成"我的"；没标记的一律算"外面的"，
+    //    默认不碰（force 时也只在真的点了停止按钮那条路上才碰，见 stop 的分支）。
+    const ownerTag = String(process.pid);
+    // ⚠️ 标记**同时**放进命令行（`--wxchannel-owner=<pid>`）与环境变量：
+    //    · 命令行那份是给 WMI 扫描用的（Get-CimInstance 能拿到 CommandLine，拿不到环境变量）；
+    //    · 环境变量那份是给万一要自查的子进程用的。
+    //    relay-wechat/index.js 不读 process.argv（全仓 grep 无命中）⇒ 多一个参数无害。
+    const child = spawn(this.nodeExe, [script, OWNER_ARG + ownerTag], {
       cwd: path.dirname(script),
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', [OWNER_ENV]: ownerTag },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true
     });
@@ -435,9 +512,24 @@ export class WechatChannel {
       this.restartTimer = null;
       if (this.stopping) return;
       // 端口还开着 ⇒ 已经有别的东西在上面跑了，不要再抢（⛔ 不许出现两个中继）
-      this.isPortOpen('127.0.0.1', this.relayPort).then((up) => {
-        if (up) {
-          this.#push(`自动重启跳过：${this.relayPort} 已经有东西在监听（可能别人已经把它拉起来了）`);
+      //
+      // 🔴 2026-10-23 第五十六对话：**必须查两个端口**，不能只查 11230。
+      //    事故原文（relay.log 16:32:30）：
+      //      [ERROR] [relay:hook] 监听 127.0.0.1:18999 失败：listen EADDRINUSE
+      //      → 启动步骤「起推送端口 18999」第 1/3 次失败
+      //      → 第 2 次「监听 18999 超时（可能被占用）」→ 启动失败退出
+      //    成因：上一代中继只死了 11230、18999 还被别的东西（或上一代的子进程）占着，
+      //    于是新起的这一代能过 11230 这道闸，却在 18999 撞车**当场死掉** ——
+      //    然后又被自动重启，形成「起来就死」的循环，日志里只剩一串 code=1。
+      //    ⇒ 两个端口都得空着才准起（缺一个就不起，并说清是哪个）。
+      Promise.all([
+        this.isPortOpen('127.0.0.1', this.relayPort).catch(() => false),
+        this.isPortOpen('127.0.0.1', this.hookCallbackPort).catch(() => false)
+      ]).then(([relayUp, callbackUp]) => {
+        if (relayUp || callbackUp) {
+          const who = relayUp ? `${this.relayPort}（对外 OneBot 口）` : `${this.hookCallbackPort}（收推送的口）`;
+          this.#push(`自动重启跳过：${who} 已经有东西在监听（可能别人已经把它拉起来了，或上一代没退干净）`
+            + `；两个端口都得空着才敢起，否则新的一代会当场 EADDRINUSE 死掉`);
           return;
         }
         try {
@@ -562,7 +654,19 @@ export class WechatChannel {
     try {
       const raw = this.#findChannels() || [];
       return (Array.isArray(raw) ? raw : [])
-        .map((r) => ({ pid: Number(r?.pid ?? r?.ProcessId), parentPid: Number(r?.parentPid ?? r?.ParentProcessId), name: String(r?.name ?? r?.Name ?? '') }))
+        .map((r) => {
+          const cmd = String(r?.commandLine ?? r?.CommandLine ?? '');
+          return {
+            pid: Number(r?.pid ?? r?.ProcessId),
+            parentPid: Number(r?.parentPid ?? r?.ParentProcessId),
+            name: String(r?.name ?? r?.Name ?? ''),
+            commandLine: cmd,
+            // 归属：谁是拉起这一代中继的宿主进程（见 OWNER_ENV 的长注释）
+            ownerPid: parseOwnerPid(cmd),
+            // 父进程名：认"这一代是别的应用实例拉的吗"的第二个判据（见 isAppHostName 的注释）
+            parentName: String(r?.parentName ?? r?.ParentName ?? '')
+          };
+        })
         .filter((r) => Number.isInteger(r.pid) && r.pid > 0 && r.pid !== process.pid)
         .filter((r) => !/^(powershell|pwsh|cmd|conhost)\.exe$/i.test(r.name));
     } catch (e) {
@@ -581,8 +685,16 @@ export class WechatChannel {
       //    本项目"进程残留检测器匹配到自己"这个病犯过一次，这是第二处。
       `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${needle}*' -and `
       + `$_.Name -notin @('powershell.exe','pwsh.exe','cmd.exe','conhost.exe') } | `
-      + `Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress`
-    ], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+      // ⚠️ CommandLine **必须一起选**：现在要靠它上面的 `--wxchannel-owner=<pid>`
+      //    判"这一代是我拉的吗"（见 OWNER_ENV 的长注释）。少选它 = 归属判不出来 =
+      //    退化成"所有 relay-wechat 进程都算外面的"，那就又回到误杀那条老路。
+      // ⚠️ ParentName 也是必需的：事故当时那一代中继是**旧代码**拉的、命令行上没有归属标记，
+      //    只认标记救不了它；它的父进程是**另一个还活着的 QQ Agent.exe**，
+      //    这才是当下就能用的归属判据（见 stop() 里 foreign 的两条判法）。
+      + `ForEach-Object { $pp = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.ParentProcessId)" `
+      + `-ErrorAction SilentlyContinue; [pscustomobject]@{ ProcessId=$_.ProcessId; ParentProcessId=$_.ParentProcessId; `
+      + `Name=$_.Name; CommandLine=$_.CommandLine; ParentName=$pp.Name } } | ConvertTo-Json -Compress`
+    ], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
     const txt = String(out || '').trim();
     if (!txt) return [];
     const arr = JSON.parse(txt);
@@ -629,8 +741,32 @@ export class WechatChannel {
         return { ok: false, error: String(e?.message ?? e) };
       }
     }
-    const external = this.findChannelProcesses();
+    const found = this.findChannelProcesses();
+    // 🔴 2026-10-23 第五十六对话：**别的应用实例拉起来的中继，一律不碰**（线上事故的根治）。
+    //    事故长这样：回归测试的 bootApp 在进程内 createApp()，teardown 调 app.stop()
+    //    ⇒ stop({force:true}) ⇒ 按命令行扫 relay-wechat ⇒ **扫到线上那个真中继**
+    //    ⇒ taskkill /T /F。跑一次带 bootApp 的判据，生产中继当场消失；
+    //    跑纯磁盘判据则纹丝不动（A/B 对照过）。每次全量回归都在偷偷杀线上通道，
+    //    然后自动重启 3 次用满就永久停手 —— 日志里只剩「code=1、无 signal」。
+    //    判据有两条（**任一条命中就算别人的**，两条互补）：
+    //      ① 命令行上的归属标记指向**另一个还活着的进程**（标记只对新拉起的代有效）；
+    //      ② 父进程是**另一个还在跑的 QQ Agent.exe / electron**（事故当时那一代是旧代码
+    //         拉起的、没有标记，靠这条才救得回来 —— 见 isAppHostName 的注释）。
+    //    ⇒ 命中任一条就不是我拉的那一代，跟我没关系，⛔ 不杀（连 force 也不杀）。
+    const foreign = found.filter((x) => (x.ownerPid > 0 && x.ownerPid !== process.pid && isAliveSync(x.ownerPid))
+      || (x.ownerPid === 0 && isAppHostName(x.parentName) && x.parentPid > 0
+        && x.parentPid !== process.pid && isAliveSync(x.parentPid)));
+    const external = found.filter((x) => !foreign.includes(x));
     if (!external.length) {
+      if (foreign.length) {
+        const who = foreign.map((x) => `pid ${x.pid}（宿主 pid ${x.ownerPid}）`).join('、');
+        this.#push(`停止时跳过了 ${who}：那是**另一个还在运行的应用实例**拉起的中继，不归我管`);
+        return {
+          ok: true, stopped: false, foreign,
+          note: `找到的中继 ${who} 不是本进程拉起的，是另一个还在运行的应用实例在管 ⇒ 没有动它。`
+            + '要停它，请在那个实例的「微信通道」页签上点「停止通道」。'
+        };
+      }
       return { ok: true, stopped: false, note: `没找到正在跑的中继进程（${this.relayPort} 可能是别的程序占着，或者已经停了）` };
     }
     if (!force) {
