@@ -22,7 +22,9 @@ import { validateImageUrl, safeFetchBinary } from './safe-fetch.js';
 //   ⛔ 别在这儿拼 URL、加头，也别在这里做「有没有代理」的判定（那个判定只能有一份）。
 import { webSearch, webFetch, searchImages, illustrationSearchAnySource, normalizePixivHeat, illustrationR18Hint, illustrationGroupR18Hint, illustrationCapabilityHint, fetchPixivPages, normalizePixivPid } from './web-search.js';
 import { searchImageSource, SELECTABLE_ENGINES, fmtMs, kindText } from './image-search.js';
-import { expandForwardNodes, fetchForward, resolveFreshImageUrl, extractFileSegments, hasUnexpandedForward } from './onebot.js';
+// 🆕 2026-10-23（第五十五对话）：forwardLimits 让 read_forward 的层数/预算**现读配置**
+//   （用户点名「合并转发阅读层数」要能在管理端改；⛔ 入站钩子仍钉死 maxDepth: 1）。
+import { expandForwardNodes, fetchForward, resolveFreshImageUrl, extractFileSegments, hasUnexpandedForward, forwardLimits } from './onebot.js';
 // 🆕 2026-10-22 第五十二对话（提案 0f6288a1 落地 · 方案 §5）：种子/磁力**只读清单**。
 //   ⚠️ 这个模块只做「字节 → 清单」，不联网、不写盘、不做种；取字节的活在这里（工具层）由
 //      safeFetchBinary 干（SSRF 校验 + 代理判定只能有一份，⛔ 不许在 torrent-meta.js 里再写一份）。
@@ -1467,7 +1469,12 @@ export function buildToolDefs() {
     },
     {
       name: 'read_forward',
-      description: '展开查看合并转发的聊天记录。消息文本出现 [合并转发聊天记录]、[转发消息 …]、[转发的聊天记录·未展开 …] 时用。参数填那条转发消息前的 #数字（别用方括号里那串长 id）。**转发里套的转发会一起展开**（最多 3 层，每深一层缩进加 ↳）；真的展不开时会写明原因（循环引用/层级到顶/服务端已丢弃），不会假装里面没东西。展开结果会写回存档，以后再看就是展开的文本，不用重复调。',
+      // 🆕 2026-10-23（第五十五对话）：层数不再是写死的 3 —— 现读 config.forward.maxDepth
+      //   （管理端可改）。模型要能看到真实层数，否则界面调成 4 它还以为只能 3 层。
+      get description() {
+        const fl = forwardLimits();
+        return '展开查看合并转发的聊天记录。消息文本出现 [合并转发聊天记录]、[转发消息 …]、[转发的聊天记录·未展开 …] 时用。参数填那条转发消息前的 #数字（别用方括号里那串长 id）。**转发里套的转发会一起展开**（最多 ' + fl.maxDepth + ' 层，每深一层缩进加 ↳）；真的展不开时会写明原因（循环引用/层级到顶/服务端已丢弃），不会假装里面没东西。展开结果会写回存档，以后再看就是展开的文本，不用重复调。';
+      },
       parameters: {
         type: 'object',
         properties: {
@@ -1492,7 +1499,7 @@ export function buildToolDefs() {
           // 先试 res_id、再试 message_id（message_id 可能为负 → 取不到 payload；
           // 详见 onebot.js 的 fetchForward）。fwdId 是收消息时存下来的。
           // maxDepth:3 —— 工具是"用户/模型点名要看"，下钻的代价值得付（入站那边是 1）。
-          const ex = await fetchForward(ctx.onebot, { messageId: entry.mid, resId: entry.fwdId, maxDepth: 3 });
+          const ex = await fetchForward(ctx.onebot, { messageId: entry.mid, resId: entry.fwdId });
           if (!ex.text) {
             // 外层在存档里已经有内容（只是里面那层没展开）→ 别把已有内容弄丢，
             // 如实说"里面那层这次取不到"，把存档那份原样交回去。
@@ -1643,7 +1650,20 @@ export function buildToolDefs() {
         //   都没提过它（只有可选引擎列表里一个光秃秃的 `lens`），于是"帮我谷歌一下"只能瞎试。
         + '**谷歌以图搜图→lens（lens 就是谷歌搜图，最全但最慢，一次 3~7 秒）**；拿不准→auto（插画类引擎自动串联；auto 只串快引擎，**不含** tracemoe/soutubot/lens，要用它们必须显式选）。'
         + '⚠️ tracemoe 对**任何**图都会返回最像的 3 条，而且它的相似度**不能当可信度**（实测纯色图也能得 100%）—— 只有你确认这张图**确实是动画截图**时才采信它，否则当它没搜到；报出处也要带不确定语气。'
-        + '真人照片 / 游戏截图这类**三次元图目前没有可用引擎**（原来那两条实测不可靠、已移除）：直接如实说"这类图我搜不了"，不要硬试。'
+        // 🆕 2026-10-23（第五十五对话 · 用户原话「谷歌搜图不止用于搜本子插画等二次元相关，
+        //   他强大的搜索能力也可以搜现实的东西，有时候一些推特成人博主的图片或者别的什么图片
+        //   也会让她用谷歌搜」）：这里原来写的是「三次元图目前没有可用引擎 ⇒ 如实说搜不了」，
+        //   ⛔ 那是**假话**了 —— 谷歌 Lens 就是现实图最该用的那条路。改成明确指路。
+        + '真人照片 / 现实物件 / 游戏截图 / 推特博主的图这类**三次元图 → 用 lens（就是谷歌搜图）**，它最全也最慢，但这类图只有它搜得动（不要因为"看起来像现实照片"就说搜不了）。'
+        // 🔴 谷歌结果页的链接要分**三类**看（用户原话：「他很多时候不会直接给出 p站eh等直接的
+        //   链接，而是一些求图片来源的论坛链接或者贴吧…里面可能有 pid 或者出处」，另外
+        //   「有的也可能是 x 上的转发画师帖子的链接，非常鱼龙混杂」）：
+        //   · kind="work"       已知作品站直链 ⇒ 基本就是出处；
+        //   · kind="social"     X/微博/bilibili/YouTube 这类通用平台 ⇒ **可能是原帖也可能是转发**，
+        //                       代码不替模型下结论，要靠作者名/画风去对；
+        //   · kind="thirdparty" 论坛/贴吧/博客 ⇒ **可能**写着 pid 或作者，
+        //     但没有完全匹配时谷歌给的多半只是相似图 ⇒ 必须自己判断，别一口咬定。
+        + 'lens 返回三类线索：kind="work" 是已知作品站直链（优先用，基本就是出处）；kind="social" 是 X/微博/bilibili/YouTube 这类通用平台页，**可能是原画师自己发的、也可能是别人的转发或搬运** —— 先用正文里的作者名/画风去对，对上了才当出处，对不上就只当线索；kind="thirdparty" 是论坛求图帖/贴吧/博客，里面**可能**有 pid 或原作者，但**不是权威**——能从标题正文里认出 pid/画师就用，认不出就只说"看着像"，别拼链接也别咬定。'
         // 🆕 2026-10-17（第四十九对话 · 她提案 f3bebcf7 的收尾）：这里原来**写死**「最多搜 2 次」，
         //   而真正的上限是 `imageSearch.maxPerRun`（管理端可改）⇒ 描述与代码能说两套话。
         //   ⚠️ 描述是**模块加载时**一次性注册的（工具定义是常量）⇒ 这里算的是**启动那一刻**的配置值；
@@ -1727,7 +1747,7 @@ export function buildToolDefs() {
               //   就是"怎么这么慢"，而改造前这里一个字都没有。
               ...(out.totalMs != null ? { engineMs: out.totalMs } : {}),
               ...(Array.isArray(out.trace) ? { trace: out.trace } : {}),
-              tip: `这个引擎没搜到${out.totalMs != null ? `（花了 ${fmtMs(out.totalMs)}）` : ''}。可以换引擎重试：动画截图 tracemoe / 插画 saucenao·iqdb / 本子 soutubot（三次元图没有可用引擎，别硬试）。${out.note || ''}`
+              tip: `这个引擎没搜到${out.totalMs != null ? `（花了 ${fmtMs(out.totalMs)}）` : ''}。可以换引擎重试：动画截图 tracemoe / 插画 saucenao·iqdb / 本子 soutubot / **真人或现实图 lens（谷歌）**。${out.note || ''}`
             });
           }
           return ok(out);

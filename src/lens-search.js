@@ -31,20 +31,46 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 //   「谷歌搜图通道希望返回直连的作品页链接，而不是只给结果页」）。
 //   现在同时交回 `{ text, links }`：正文不变（既有判据与模型口径都还认它），links 另跑一遍解析。
 //   ⚠️ 老版本只会返回**字符串**；`pollPage` 里对两种形状都兼容（假的 browserApi 回字符串）。
+// 🆕 2026-10-23（第五十五对话）：**加分区与纵坐标**。
+//   🔴 为什么要动它：这一版实测发现 Lens 结果页的链接**全部**是
+//      `https://www.google.com/goto?url=<加密串>` —— DOM 里**一个真实网址都没有**
+//      （page 里 111 个锚点、82 个 goto，其它全是谷歌自家）。所以：
+//        ① 光靠 `a.href` 永远拿不到作品页/论坛帖的真地址（上一版"直连作品页"实际一直为空）；
+//        ② 真地址只能靠**让它真的跳一次**、在重定向里截（见下面 resolveGotoLinks）。
+//   `y` 是相对文档顶部的纵坐标，用来把链接归到它所在的那个 h1/h2 分区
+//   （"Visual matches" / "Web results" / AI Overview 那一段）—— 分区归属在 Node 侧算，
+//   页面里只负责把数据取回来，方便离线判据。
 const EXTRACT = `(() => {
-  const text = document.body ? document.body.innerText : '';
-  const links = [];
+  const out = { text: '', sections: [], links: [] };
+  try { out.text = document.body ? document.body.innerText : ''; } catch (e) {}
+  // ① 分区标题（h1/h2）：Lens 用它们分段，实测有 "Visual matches"、"Web results"、页脚等
+  try {
+    const hs = document.querySelectorAll('h1,h2');
+    for (let i = 0; i < hs.length; i++) {
+      const h = hs[i];
+      out.sections.push({
+        tag: String(h.tagName || ''),
+        text: String(h.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60),
+        y: Math.round(h.getBoundingClientRect().top + window.scrollY)
+      });
+    }
+  } catch (e) { /* 拿不到分区就当没有分区，链接照旧返回 */ }
+  // ② 所有锚点 + 纵坐标（上层用它算分区归属）
   try {
     const nodes = document.querySelectorAll('a[href]');
     for (let i = 0; i < nodes.length; i++) {
       const a = nodes[i];
       const href = a.href || a.getAttribute('href') || '';
       if (!href) continue;
-      links.push({ url: String(href), title: String(a.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80) });
-      if (links.length >= 400) break;
+      out.links.push({
+        url: String(href),
+        title: String(a.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 90),
+        y: Math.round(a.getBoundingClientRect().top + window.scrollY)
+      });
+      if (out.links.length >= 500) break;
     }
-  } catch (e) { /* 拿不到锚点就当没有，正文照旧返回 */ }
-  return { text: text, links: links };
+  } catch (e) { /* 拿不到锚点就当没有 */ }
+  return out;
 })()`;
 // ── 直连作品页的解析（提案 a0009a16）──────────────────────────────────────
 //   🔴 硬纪律：**取不到就诚实给 null，绝不拿结果页冒充作品页**。
@@ -54,6 +80,15 @@ const EXTRACT = `(() => {
 //   谷歌外链有两种形态，都要处理：
 //     ① 直链：https://www.pixiv.net/artworks/123
 //     ② 壳链：/url?q=<encodeURIComponent(真地址)>&sa=…  → 必须 decode 后再判域名
+//   🔴 2026-10-23（第五十五对话 · 用户 ③ 问「按 pixiv/DLsite/E-Hentai 优先级排序会不会对
+//      除二次元外的搜图有影响」）：**会，只要那张表里混着通用平台就会**。
+//      原来 X/Twitter、bilibili、YouTube、微博、LOFTER、花瓣/堆糖 全在这张表里 ⇒ 一张现实照片
+//      搜出来的推特帖会被当成"已知作品站直链"排到 pixiv 后面、还被说成"点开基本就是出处"，
+//      而用户的原话正好相反：「有的也可能是 x 上的转发画师帖子的链接，非常鱼龙混杂」。
+//      ⇒ 拆成两张表：
+//        · WORK_HOSTS   = **真·作品站/图站**：页面上的 id 就是这个作品的编号（pixiv/artworks/123）
+//        · PLATFORM_HOSTS = **通用平台**：同一条链接可能是原帖、也可能是别人的转发/搬运
+//      排序只在 WORK_HOSTS 内部生效；平台页与论坛页按页面顺序原样给出，**不参与优先级竞争**。
 const WORK_HOSTS = [
   // 优先级 = 数组顺序（用户点名要的那四类排最前）
   { re: /(^|\.)(pixiv\.net)$/i, site: "pixiv" },
@@ -62,16 +97,22 @@ const WORK_HOSTS = [
   { re: /(^|\.)(dmm\.co\.jp|dmm\.com)$/i, site: "FANZA/DMM" },
   { re: /(^|\.)(e-hentai\.org|exhentai\.org)$/i, site: "E-Hentai" },
   { re: /(^|\.)(fanaza\.jp|fanza\.co\.jp)$/i, site: "FANZA" },
-  { re: /(^|\.)(twitter\.com|x\.com)$/i, site: "X/Twitter" },
   { re: /(^|\.)(danbooru\.donmai\.us)$/i, site: "Danbooru" },
   { re: /(^|\.)(gelbooru\.com|safebooru\.org|konachan\.com|yande\.re)$/i, site: "图站" },
-  { re: /(^|\.)(sankakucomplex\.com)$/i, site: "Sankaku" },
+  { re: /(^|\.)(sankakucomplex\.com)$/i, site: "Sankaku" }
+];
+// 通用平台：**不**算作品站。同一条链接可能是原画师本人的帖（那就是出处），
+// 也可能是别人的转发/搬运（那就只是线索）—— 这一层判断留给模型，代码不替它下结论。
+const PLATFORM_HOSTS = [
+  { re: /(^|\.)(twitter\.com|x\.com)$/i, site: "X/Twitter" },
+  { re: /(^|\.)(weibo\.com)$/i, site: "微博" },
+  { re: /(^|\.)(lofter\.com)$/i, site: "LOFTER" },
   { re: /(^|\.)(bilibili\.com)$/i, site: "bilibili" },
   { re: /(^|\.)(nicovideo\.jp)$/i, site: "niconico" },
   { re: /(^|\.)(youtube\.com|youtu\.be)$/i, site: "YouTube" },
-  { re: /(^|\.)(weibo\.com)$/i, site: "微博" },
-  { re: /(^|\.)(lofter\.com)$/i, site: "LOFTER" },
-  { re: /(^|\.)(huaban\.com|duitang\.com)$/i, site: "图站" }
+  { re: /(^|\.)(huaban\.com|duitang\.com)$/i, site: "图片收藏站" },
+  { re: /(^|\.)(reddit\.com)$/i, site: "Reddit" },
+  { re: /(^|\.)(deviantart\.com)$/i, site: "DeviantArt" }
 ];
 // 谷歌自家的域名一律不算"出处"（结果页、图片代理、静态资源、协议文档…）
 const SELF_HOST_RE = /(^|\.)(google\.[a-z.]{2,10}|googleusercontent\.com|gstatic\.com|googleapis\.com|ggpht\.com|schema\.org|w3\.org)$/i;
@@ -94,15 +135,155 @@ export function unwrapGoogleUrl(href) {
   }
 }
 
+/** 谷歌自家的 /goto?url=<加密串> 壳链：DOM 里**只**有这一种形态，真地址必须真跳一次才看得到。 */
+export function isGotoUrl(href) {
+  const raw = String(href || "").trim();
+  if (!raw) return false;
+  try {
+    const u = new URL(raw, "https://www.google.com");
+    if (!/(^|\.)google\./i.test(u.hostname)) return false;
+    return u.pathname === "/goto";
+  } catch {
+    return false;
+  }
+}
+
+function safeHost(href) {
+  try { return new URL(String(href)).hostname; } catch { return ""; }
+}
+
+// ── 分区归属（实测：Lens 结果页用 h1/h2 分段，"Visual matches" 北方是 AI 概览，南方是 Web results）──
+//   🔴 只认**实测见过**的那几个标题。认不出来就不标（宁可没有 section，也不要瞎归）。
+//   ⚠️ 特别注意「Exact matches」：它是顶部的一排 tab，**不是** h1/h2 分区标题
+//      （页面 111 个锚点里它是个 <a>，href 带 lns_surface=26）。所以它永远不会出现在这里；
+//      想看那一页得**点进去**（见 lensSearch 里的 exactPass）。
+const SECTION_MARKS = [
+  { re: /visual\s*match|视觉匹配|相似图片/i, key: "visual", label: "视觉匹配" },
+  { re: /exact\s*match|完全匹配/i, key: "exact", label: "完全匹配" },
+  { re: /web\s*result|网页结果|搜索结果/i, key: "web", label: "网页结果" },
+  { re: /ai\s*overview|ai\s*概览/i, key: "ai", label: "AI 概览" }
+];
+
+/**
+ * 从页面取回的 h1/h2 里挑出能当"分区边界"的那几个，按 y 升序。
+ * @param {Array<{tag?:string,text?:string,y?:number}>} sections EXTRACT 交回的 headings
+ * @returns {Array<{key:string,label:string,y:number}>}
+ */
+export function sectionMarks(sections) {
+  const list = Array.isArray(sections) ? sections : [];
+  const out = [];
+  for (const s of list) {
+    const text = String(s?.text || "").replace(/\s+/g, " ").trim();
+    const y = Number(s?.y);
+    // y <= 0 的是隐藏对话框标题（实测 "Shared"/"Share" 都是 y=0），不是正文分区
+    if (!text || !Number.isFinite(y) || y <= 0) continue;
+    const hit = SECTION_MARKS.find((m) => m.re.test(text));
+    if (!hit) continue;
+    if (out.some((o) => o.key === hit.key && o.y === y)) continue;
+    out.push({ key: hit.key, label: hit.label, y });
+  }
+  out.sort((a, b) => a.y - b.y);
+  return out;
+}
+
+/** 一个链接落在哪个分区：取它上面最近的那个分区边界；在第一个边界之前就返回 null。 */
+export function pickSectionFor(y, marks) {
+  const yy = Number(y);
+  if (!Number.isFinite(yy) || !Array.isArray(marks) || !marks.length) return null;
+  let found = null;
+  for (const m of marks) { if (m.y <= yy) found = m; else break; }
+  return found ? found.key : null;
+}
+
+// ── 解壳：把 /goto?url=<加密串> 换成真地址 ──────────────────────────────
+//   实测（第五十五对话，probe4/probe5）：
+//     · 加密串 base64 解出来是 protobuf 二进制，**静态解不出 URL** ⇒ 只能真跳一次；
+//     · `ses.webRequest.onBeforeRedirect` 能拿到 redirectURL（那一跳的 Location）；
+//     · `ses.fetch(url, {redirect:"follow"})` 也能拿 resp.url；两条互补；
+//     · 12 条并发、每条 3 秒上限 ≈ 3.0 秒全部解开，0 失败 ⇒ 这个代价可以接受。
+//   🔴 纪律：
+//     ① 任何一条失败都不许影响别的（并发 + 各自 try/catch）；
+//     ② 解出来的还是谷歌自家域名的，一律当失败（别把 google.com 当出处）；
+//     ③ 会话上没有 webRequest/fetch（离线判据里的假件）⇒ 原样返回，不许抛；
+//     ④ 钩子用完必须摘掉，否则这份会话后续的每一次跳转都会往这里灌数据。
+/**
+ * @param {Array<{url:string,title?:string,y?:number}>} links EXTRACT 交回的锚点
+ * @param {{ses?:object|null,budgetMs?:number,maxLinks?:number,onNote?:(m:string)=>void}} opts
+ * @returns {Promise<{links:Array<object>,resolved:number,attempted:number,failed:number,note:string}>}
+ */
+export async function resolveGotoLinks(links, { ses = null, budgetMs = 6000, maxLinks = 28, onNote = null } = {}) {
+  const list = Array.isArray(links) ? links : [];
+  const note = typeof onNote === "function" ? onNote : () => {};
+  const targets = [];
+  for (const item of list) {
+    if (!isGotoUrl(item?.url)) continue;
+    targets.push(item);
+    if (targets.length >= Math.max(1, Number(maxLinks) || 28)) break;
+  }
+  if (!targets.length) return { links: list, resolved: 0, attempted: 0, failed: 0, note: "没有壳链" };
+  if (!ses || !ses.webRequest || typeof ses.fetch !== "function") {
+    return { links: list, resolved: 0, attempted: 0, failed: 0, note: "这份会话没有 webRequest/fetch，壳链原样保留" };
+  }
+
+  const resolved = new Map();   // goto 地址 → 真地址
+  const onRedirect = (details) => {
+    try {
+      const from = String(details?.url || "");
+      const to = String(details?.redirectURL || "");
+      if (!from || !to) return;
+      if (!/^https?:\/\//i.test(to)) return;
+      if (SELF_HOST_RE.test(safeHost(to))) return;          // 谷歌自家跳谷歌自家：不算解开
+      if (!resolved.has(from)) resolved.set(from, to);
+    } catch { /* 回调里绝不抛 */ }
+  };
+  let hooked = false;
+  try { ses.webRequest.onBeforeRedirect(onRedirect); hooked = true; } catch (err) { note("注册重定向钩子失败：" + shortErr(err)); }
+
+  const budget = Math.max(1500, Number(budgetMs) || 6000);
+  const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch { /* 已经停了 */ } }, budget) : null;
+  try {
+    await Promise.all(targets.map(async (item) => {
+      const url = String(item.url);
+      try {
+        const resp = await ses.fetch(url, { redirect: "follow", credentials: "omit", cache: "no-store", signal: ctrl?.signal });
+        const finalUrl = String(resp?.url || "");
+        if (finalUrl && !isGotoUrl(finalUrl) && !SELF_HOST_RE.test(safeHost(finalUrl)) && !resolved.has(url)) resolved.set(url, finalUrl);
+        try { if (resp?.body && typeof resp.body.cancel === "function") await resp.body.cancel(); } catch { /* 有的实现没有 cancel */ }
+      } catch { /* 单条失败不影响其它条 */ }
+    }));
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (hooked) { try { ses.webRequest.onBeforeRedirect(null); } catch { /* 摘不掉也不影响结果 */ } }
+  }
+
+  let ok = 0;
+  const out = [];
+  for (const item of list) {
+    const url = String(item?.url || "");
+    const real = resolved.get(url);
+    if (real) { ok++; out.push({ ...item, url: real, fromGoto: true }); continue; }
+    // 解不开的壳链**丢掉**：留着它只会被当成"谷歌自家链接"再筛一遍，白占位置
+    if (isGotoUrl(url)) continue;
+    out.push(item);
+  }
+  const failed = targets.length - ok;
+  const detail = targets.length ? ("壳链 " + targets.length + " 条 ⇒ 解开 " + ok + (failed ? "，失败 " + failed : "")) : "没有壳链";
+  return { links: out, resolved: ok, attempted: targets.length, failed, note: detail };
+}
+
 /**
  * 从锚点列表里挑"能当出处"的链接。
- * @param {Array<{url:string,title?:string}>} links 页面里的原始锚点
+ * @param {Array<{url:string,title?:string,y?:number}>} links 页面里的原始锚点（已解过壳的）
+ * @param {{limit?:number,marks?:Array<object>}} opts limit=最多给几条（默认 8，管理端可改）；marks=分区边界
  * @returns {{direct: Array<object>, others: Array<object>, scanned: number}}
- *          direct = 已知作品站（pixiv/DLsite/E-Hentai/FANZA…）；others = 其它非谷歌站点（兜底）
+ *          direct = 已知作品站（pixiv/DLsite/E-Hentai/FANZA…，kind="work"）
+ *          others = 其它非谷歌站点（kind="thirdparty"：论坛帖/贴吧/推特转发/博客…可能提到出处，但不是权威）
  */
-export function pickWorkLinks(links, { limit = 5 } = {}) {
+export function pickWorkLinks(links, { limit = 8, marks = [] } = {}) {
   const list = Array.isArray(links) ? links : [];
   const direct = [];
+  const social = [];
   const others = [];
   const seen = new Set();
   let scanned = 0;
@@ -118,15 +299,23 @@ export function pickWorkLinks(links, { limit = 5 } = {}) {
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);
     const title = String(item?.title || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    const section = pickSectionFor(item?.y, marks);
     const hit = WORK_HOSTS.find((h) => h.re.test(u.hostname));
-    if (hit) direct.push({ url: clean, site: hit.site, title });
-    // 兜底：只要不是谷歌，也可能是出处站（博客/推特镜像/自建站）
-    else others.push({ url: clean, site: u.hostname, title });
+    if (hit) direct.push({ url: clean, site: hit.site, title, kind: "work", section });
+    else {
+      // 通用平台（X/微博/bilibili/YouTube/Reddit/DeviantArt…）：可能是原帖、也可能是转发
+      const plat = PLATFORM_HOSTS.find((h) => h.re.test(u.hostname));
+      if (plat) social.push({ url: clean, site: plat.site, title, kind: "social", section });
+      // 兜底：论坛求图帖 / 贴吧 / 博客 / 自建站 —— 用户原话「非常鱼龙混杂」
+      else others.push({ url: clean, site: u.hostname, title, kind: "thirdparty", section });
+    }
   }
   // 已知作品站按 WORK_HOSTS 的优先级排（用户点名的那几类排最前），同级保持页面顺序
   const rank = (site) => { const i = WORK_HOSTS.findIndex((h) => h.site === site); return i < 0 ? 999 : i; };
   direct.sort((a, b) => rank(a.site) - rank(b.site));
-  return { direct: direct.slice(0, limit), others: others.slice(0, limit), scanned };
+  // ⚠️ social 与 others **不排序**：优先级只属于真正的作品站。
+  //    通用平台按页面顺序反而更有信息量（Lens 把最像的排在上面）。
+  return { direct: direct.slice(0, limit), social: social.slice(0, limit), others: others.slice(0, limit), scanned };
 }
 
 const READY_LEN = 600;          // 正文超过这个长度就算渲染好了（实测结果页 1300~6400）
@@ -209,7 +398,7 @@ function resolveResultUrl(win, seenUrls) {
  *    这正是"测试夹具的形状漏进了被测代码"那一类错。
  */
 async function pollPage(win, left, logNote) {
-  let last = { text: "", links: [] };
+  let last = { text: "", links: [], sections: [] };
   let first = true;
   // 锚点宽限的截止时刻（**必须是局部变量**：写到函数属性上就成了模块级共享状态，
   // 两次并发搜图会互相把对方的宽限清掉 —— 那类 bug 只在"同时搜两张图"时才出现）。
@@ -219,14 +408,18 @@ async function pollPage(win, left, logNote) {
     try {
       const raw = await win.webContents.executeJavaScript(EXTRACT);
       if (raw && typeof raw === "object") {
-        last = { text: String(raw.text || ""), links: Array.isArray(raw.links) ? raw.links : [] };
+        last = {
+          text: String(raw.text || ""),
+          links: Array.isArray(raw.links) ? raw.links : [],
+          sections: Array.isArray(raw.sections) ? raw.sections : []
+        };
       } else {
-        last = { text: String(raw || ""), links: [] };
+        last = { text: String(raw || ""), links: [], sections: [] };
       }
     } catch (err) {
       logNote("取正文失败：" + shortErr(err));
     }
-    if (first) { logNote("结果页首帧长度 " + last.text.length + (last.links.length ? "、锚点 " + last.links.length + " 个" : "")); first = false; }
+    if (first) { logNote("结果页首帧长度 " + last.text.length + (last.links.length ? "、锚点 " + last.links.length + " 个" : "") + (last.sections.length ? "、标题 " + last.sections.length + " 个" : "")); first = false; }
     // 正文够长就收；但**锚点可能比正文晚到**（Lens 是动态渲染的）⇒ 正文够了也再给锚点一小段时间。
     if (last.text.length > READY_LEN) {
       // 剩余时间不够宽限就别等了（否则"为了多等链接"会把整次搜图拖到超时，反而全丢）
@@ -261,12 +454,14 @@ function describeLensFailure(err, notes, usedProxy) {
  *        browserApi 不给就自己 await import('electron')（测试注入假件）
  * @returns {Promise<{ok: true, text: string, url: string, directLinks: Array<{url:string,site:string,title:string}>, otherLinks: Array<object>, linksScanned: number} | {ok: false, error: string}>}
  */
-export async function lensSearch(buffer, mime, { timeoutMs = DEFAULT_TIMEOUT_MS, proxyEndpoint = null, browserApi = null } = {}) {
+export async function lensSearch(buffer, mime, { timeoutMs = DEFAULT_TIMEOUT_MS, proxyEndpoint = null, browserApi = null, linkLimit = 8 } = {}) {
   const api = browserApi || await electronApi();
   if (!api) return { ok: false, error: '当前环境没有 Electron，谷歌搜图不可用' };
   if (!buffer || !buffer.length) return { ok: false, error: '谷歌搜图：没有拿到图片字节，发不出去' };
 
   const budget = Number(timeoutMs) > 0 ? Number(timeoutMs) : DEFAULT_TIMEOUT_MS;
+  // 最多交回几条线索（管理端可改 imageSearch.lensLinkLimit）：夹在 1~20，防手滑填 0 或 999
+  const linkLimitClamped = Math.max(1, Math.min(20, Math.round(Number(linkLimit)) || 8));
   const deadline = Date.now() + budget;
   const left = () => deadline - Date.now();
   const notes = [];
@@ -310,18 +505,41 @@ export async function lensSearch(buffer, mime, { timeoutMs = DEFAULT_TIMEOUT_MS,
       // 有过真实加载错误 ⇒ 报网络人话；否则就是纯粹"等不到内容"
       return { ok: false, error: loadErr ? describeLensFailure(loadErr, notes, !!proxyEndpoint) : timeoutError(pageUrl, budget) };
     }
-    // ④ 从锚点里挑"能当出处"的直连作品页（提案 a0009a16）
+    // ④ 🔴 先把 goto 壳链解成真地址（不解的话锚点里**一个真实网址都没有**，实测）
+    //   代价实测：12 条并发 ≈ 3.0 秒；解不开的丢掉，绝不留谷歌自己的壳链。
+    const unRes = await resolveGotoLinks(page.links, {
+      ses,
+      budgetMs: Math.max(1500, Math.min(6000, left() - 1200)),
+      maxLinks: 40,
+      onNote: logNote
+    });
+    if (unRes.attempted) logNote('解壳：' + unRes.note);
+
+    // ⑤ 分区边界（h1/h2 实测有 Visual matches / Web results；Exact matches 不在其中，是顶部 tab）
+    const marks = sectionMarks(page.sections);
+    if (marks.length) logNote('分区：' + marks.map((m) => m.label + '@' + m.y).join(' / '));
+
+    // ⑥ 从锚点里挑"能当出处"的链接（提案 a0009a16 + 用户第五十五对话追加：第三方页也要列）
     //   🔴 挑不到就给空数组，**不要**退回 resultPageUrl —— 那是本次搜索的地址，
     //      不是这幅画的出处（把这句写进注释，是因为"顺手兜一下"太自然了）。
-    const picked = pickWorkLinks(page.links, { limit: 5 });
-    logNote('锚点 ' + page.links.length + ' 个 ⇒ 已知作品站 ' + picked.direct.length + ' 条、其它外链 ' + picked.others.length + ' 条');
+    const picked = pickWorkLinks(unRes.links, { limit: linkLimitClamped, marks });
+    logNote('锚点 ' + page.links.length + ' 个 ⇒ 作品站 ' + picked.direct.length +
+      ' 条、通用平台 ' + picked.social.length + ' 条、其它第三方页 ' + picked.others.length + ' 条');
     return {
       ok: true,
       text: capText(page.text),
       url: pageUrl,
       directLinks: picked.direct,
+      // 通用平台（X/微博/bilibili/YouTube/Reddit/DeviantArt…）：可能是原帖、也可能是转发，
+      // 代码不替模型下结论 —— 单列一类交上去（用户原话「非常鱼龙混杂」）。
+      socialLinks: picked.social,
       otherLinks: picked.others,
-      linksScanned: picked.scanned
+      linkSections: marks,
+      linksScanned: picked.scanned,
+      linksResolved: unRes.resolved,
+      linksResolveAttempted: unRes.attempted,
+      // 解壳后仍没有一条外部链接 ⇒ 上层要如实说"只有正文"，不许拿结果页充数
+      linksEmpty: picked.direct.length === 0 && picked.social.length === 0 && picked.others.length === 0
     };
   } catch (err) {
     return { ok: false, error: describeLensFailure(err, notes, !!proxyEndpoint) };

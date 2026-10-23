@@ -1078,6 +1078,15 @@ function renderAbilitiesSection(c) {
   // 🆕 2026-10-22（第五十三对话 · 方案 §5.12）：种子/磁力只读清单的那一组开关。
   //    ⚠️ 与上面两个一样，默认方向是「默认开」⇒ 判定一律 `!== false`（⛔ 别写成 `=== true`）。
   const ti = c.torrentInspect || {};
+  // 🆕 2026-10-23（第五十五对话 · 用户 m01886 ①「有什么可以改的参数可以放到管理端我来手动改，
+  //    比如合并转发阅读层数等」）；配置键 `forward.{maxDepth,maxNodes,maxChars}` 在 src/config.js 里新加。
+  //    ⚠️ 三个都是**数**（不是开关）⇒ 一律走 `??` 回落，不要用 `||`（`||` 会把 0 当"没填"，
+  //      虽然这三项下限都不是 0，但同一页已经为 `engineRetries` 踩过这个坑，口径保持一致）。
+  const fw = c.forward || {};
+  // 🆕 2026-10-23（第五十五对话 · 用户 m01886 ①的「等」）：部署环境自查（envAudit）四个键
+  //    此前**只能手改 config.json**。默认方向：两个开关都是「默认开」⇒ 判定一律 `!== false`
+  //    （⛔ 别写成 `=== true`，那会把"默认开"静默变成"默认关" —— 本项目老坑）。
+  const ea = c.envAudit || {};
   // ⚠️ 这一节**一个新 `.hint` 都不许加**：`test-设置页说明小字分层.mjs` 有一条棘轮
   //    （`class="hint"` 计数 ≤ 44，"本轮只减不增"）。所以说明一律走既有的两级载体：
   //      · 一行常显 / 一句要点 ⇒ `hintLine(…)`（= `.ihint-line` + ⓘ）
@@ -1167,14 +1176,29 @@ function renderAbilitiesSection(c) {
         <div class="field"><label>谷歌搜图超时（毫秒）</label>
           <input type="number" id="cfg-img-lens-timeout" min="5000" max="120000" value="${esc(img.lensTimeoutMs ?? 30000)}" /></div>
       </div>
+      <!-- 🆕 2026-10-23（第五十五对话 · 用户 m01886 ④ + m01973）：谷歌搜图**最多交回几条线索**。
+           背景：Lens 结果页里拿到的「线索」分两类 —— 已知作品站直链（kind=work）与第三方页
+           （论坛求图帖 / 贴吧 / 推特转发，kind=thirdparty）。以前上限写死在代码里（5 条、只给直链）；
+           用户描述真实页面「很多不给直链、给的是求来源的帖子」，并要求这个上限自己能在界面改。
+           ⚠️ 钳制范围与保存侧（15-allow-saveconfig.js 的 abilities 块）**同口径**（1~20）。
+           ⚠️ 默认值现读配置 ⇒ ⛔ 别在这里写死 8（那会造成"界面显示的 ≠ 实际生效的"）。
+           ⚠️ 说明写进下面那个既有折叠里 ⇒ ⛔ 不新增 hintLine / class="hint"（两条棘轮）。
+           🔴 本段在模板字符串里 ⇒ ⛔ 一个字反引号都不许有（坑 186）。 -->
+      <div class="field"><label>谷歌搜图最多交回几条线索（作品站直链 + 第三方页，各算）</label>
+        <input type="number" id="cfg-img-lens-links" min="1" max="20" value="${esc(img.lensLinkLimit ?? 8)}" /></div>
       <details class="hint-more">
-        <summary>这四个数分别管什么、填错了会怎样</summary>
+        <summary>这几个数分别管什么、填错了会怎样</summary>
         <div class="hint-more-body">
           <b>单引擎超时</b>：一个引擎最多等多久，超时就换下一个（不是整个搜图的总时限）。<br>
           <b>失败重试次数</b>：同一个引擎失败后再试几次，<b>0</b> = 不重试、直接换下一个引擎。<br>
           <b>auto 链总预算</b>：auto 把几个引擎挨个试一遍的<b>总</b>时限 —— 到点就带着<b>已拿到的</b>结果返回，
           不会因为后面还有引擎没试就一直挂着。<br>
-          <b>谷歌搜图超时</b>：浏览器那一路<b>单独</b>算，它比普通引擎慢得多，所以默认给得宽。
+          <b>谷歌搜图超时</b>：浏览器那一路<b>单独</b>算，它比普通引擎慢得多，所以默认给得宽。<br>
+          <b>最多交回几条线索</b>：谷歌结果页里能拿到两类东西 —— 已知作品站（pixiv / DLsite / E-Hentai 这类）
+          的<b>直链</b>，和论坛求图帖 / 贴吧 / 推特转发这类<b>第三方页</b>。这个数对两类<b>各</b>算上限：
+          填 8 就是最多 8 条直链 + 8 条第三方页（实际通常远少于这个数，页面里有多少给多少）。
+          调小 = 回给她的线索更少、更省 token；调大 = 更容易撞上"有人在帖子里写出了 pid"那种线索。
+          ⚠️ 第三方页<b>不是权威出处</b> —— 里面有 pid 或画师名也只是"可能"，她自己会带不确定语气。
         </div>
       </details>
       <!-- 🆕 2026-10-05（第四十三对话 · 用户要求）：把"搜/发图片"有关的分级开关也收进这一节。
@@ -1234,6 +1258,88 @@ function renderAbilitiesSection(c) {
       </details>
     </div>
 
+
+    <!-- 🆕 2026-10-23（第五十五对话 · 用户 m01886 ①）：合并转发的展开预算搬到管理端。
+         用户原话：「刚刚那轮有什可以改的参数可以放到管理端我来手动改，比如合并转发阅读层数等。」
+         🔴 为什么要有这一节：maxDepth 以前**三处写死**（src/onebot.js 的 expandForwardNodes 默认 2、
+            src/tools.js 的 read_forward 传 3、入站钩子 src/app.js 传 1），模型读到的
+            「最多 3 层」也是 tools.js 里的静态字符串 ⇒ 想改一次得改三个文件。
+          🔴 为什么 **maxDepth 的硬上限是 4**：单层就要多打一次 get_forward_msg，转发的 res_id 会过期；
+            再深一层就多一次必失败的请求 —— 这个上限在 src/onebot.js 的 FORWARD_DEPTH_CAP 里做死，
+            界面这里只是照抄（⛔ 别把 max 写成 4 以上的数，那会让用户"填了却没生效"）。
+         ⚠️ 说明**只能**走下面的折叠：这一页有两条棘轮（class="hint" 只减不增 / hintLine 调用数被钉死在 21）。
+         🔴 本段在模板字符串里 ⇒ ⛔ 一个字反引号都不许有（坑 186）。 -->
+    <div class="form-panel">
+      <h4 style="margin-top:0">合并转发展开多少</h4>
+      <div class="field-row">
+        <div class="field"><label>最多展开几层（1~4）</label>
+          <input type="number" id="cfg-fwd-maxdepth" min="1" max="4" value="${esc(fw.maxDepth ?? 3)}" /></div>
+        <div class="field"><label>最多列几条（所有层加起来）</label>
+          <input type="number" id="cfg-fwd-maxnodes" min="1" max="500" value="${esc(fw.maxNodes ?? 30)}" /></div>
+      </div>
+      <div class="field"><label>最多列多少字（所有层加起来）</label>
+        <input type="number" id="cfg-fwd-maxchars" min="200" max="40000" value="${esc(fw.maxChars ?? 3000)}" />
+      </div>
+      <details class="hint-more">
+        <summary>这三个数管的是哪一次展开、调大会怎样</summary>
+        <div class="hint-more-body">
+          <b>它们只管 read_forward 这个工具</b>（她主动去展开某条转发时）。
+          群友发来一条合并转发、她在<b>收消息那一瞬间</b>看到的摘要<b>永远只展开 1 层</b> ——
+          那条路每多一层就要多打一次接口，放大它会让她收消息变慢甚至丢消息，所以那一处写死在代码里，
+          界面上<b>改不动</b>（这是故意的，不是漏了）。
+          <br><br>
+          <b>最多展开几层</b>：转发里套转发、套转发，最多往里走几层。填 1 = 只展开最外层。
+          上限是 4 —— 再深就不展开了，并如实写「嵌套太深，只展开 1 层」而不是假装没有。
+          <br>
+          <b>最多列几条 / 最多列多少字</b>：这两条预算<b>所有层共用一份</b>（不是每层各一份），
+          超了就停下来并如实写「还有 N 条未展开」，不会静默截断。
+          <br><br>
+          ⚠️ 调大不一定更好：层数越深、每层要多打一次接口（转发的 id 会过期，越深越可能失败），
+          而且内容会一起进上下文烧 token。默认的 3 层 / 30 条 / 3000 字是"能看明白又不至于太贵"的折中。
+        </div>
+      </details>
+    </div>
+
+    <!-- 🆕 2026-10-23（第五十五对话 · 用户 m01886 ①「有什么可以改的参数可以放到管理端」）：
+         部署环境自查（envAudit）四个键。这四个键在提案 17a954dc 落地时**只能手改 config.json**。
+         🔴 为什么这一节必须写清"它不联网"：它的返回里有一句"没探到 ≠ 没装"、"本地名单未联网"，
+            用户看到"没查到 PHP"很容易以为是真没装 —— 这一层误会只能靠界面上说清楚。
+         🔴 为什么强调"别放进 15 秒轮询"：这个工具会起 9 个子进程、最坏 8 秒；
+            它只在她真去问的时候跑，绝不进状态轮询（那会把整个界面拖慢）。
+         ⚠️ 说明只能走折叠（两条棘轮：class="hint" 只减不增 / hintLine 调用数被钉死在 21）。
+         🔴 本段在模板字符串里 ⇒ ⛔ 一个字反引号都不许有（坑 186）。 -->
+    <div class="form-panel">
+      <h4 style="margin-top:0">部署环境自查</h4>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-envaudit" ${ea.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-envaudit">允许她查这台机器的环境和依赖版本</label></div>
+      <div class="checkbox-row"><input type="checkbox" id="cfg-envaudit-group" ${ea.allowInGroup !== false ? 'checked' : ''} ${ea.enabled !== false ? '' : 'disabled'} />
+        <label for="cfg-envaudit-group">群里也能问（默认允许）</label></div>
+      <div class="field-row">
+        <div class="field"><label>一轮最多查几次</label>
+          <input type="number" id="cfg-envaudit-max" min="1" max="10" value="${esc(ea.maxPerRun ?? 1)}" ${ea.enabled !== false ? '' : 'disabled'} /></div>
+        <div class="field"><label>单次总超时（毫秒，2000~30000）</label>
+          <input type="number" id="cfg-envaudit-timeout" min="2000" max="30000" step="500" value="${esc(ea.timeoutMs ?? 8000)}" ${ea.enabled !== false ? '' : 'disabled'} /></div>
+      </div>
+      <details class="hint-more">
+        <summary>这个自查到底查什么、查不到算什么、为什么慢</summary>
+        <div class="hint-more-body">
+          <b>查什么</b>：运行时（Node / Electron / Chrome / V8 / 系统版本）＋三个依赖的版本 ＋
+          9 类外部程序（Python / Node / Go / PHP / Java / nginx / Chrome / Edge / Firefox）。
+          <br><br>
+          <b>⚠️ 查不到 ≠ 没装</b>：它只做<b>本地只读探测</b>（读注册表、跑 <code>--version</code>、读安装目录里的版本文件），
+          <b>不联网</b>、也不查安全公告。所以：装在别处的、绿色版、改过名字的都可能查不到；
+          它给的版本号也<b>不能</b>拿来判断"这个版本安不安全"。
+          <br><br>
+          <b>为什么慢</b>：每条外部程序都要真的起一个进程问一次，最坏要好几秒（所以给了个总超时）。
+          它只在有人真要它查的时候跑一次，<b>不会</b>放进界面每 15 秒的状态刷新里 ——
+          放进去了会把整个界面拖慢。
+          <br><br>
+          <b>关掉会怎样</b>：她就完全查不了（工具会直接从列表里消失，不是查了返回空）。
+          <br>
+          <b>群里也能问</b>：默认允许。关掉之后群聊里连调都调不到（私聊不受影响）。
+        </div>
+      </details>
+    </div>
 
     <div class="form-panel">
       <h4 style="margin-top:0">改进提议</h4>

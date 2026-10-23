@@ -1322,14 +1322,44 @@ async function renderForwardNodes(nodes, st, prefix, depth) {
  * @param {Array} nodes get_forward_msg 返回的 messages 数组
  * @returns {{ text: string, media: Array } | null} 无可用节点返回 null
  */
+/** 合并转发深度硬上限：再深就要逐层打 get_forward_msg，res_id 会过期、还可能自转自。 */
+const FORWARD_DEPTH_CAP = 4;
+
+/**
+ * 合并转发展开的预算（config.forward）：{ maxDepth, maxNodes, maxChars }。
+ * 每一档都**现读 + 钳制**，坏值一律退回默认，绝不抛（这条路径在每条转发消息上都跑）。
+ * ⚠️ 入站钩子**不许**用它 —— 它必须显式传 maxDepth: 1（见 app.js 的注释）。
+ */
+export function forwardLimits() {
+  let raw = null;
+  try { raw = getConfig()?.forward; } catch { raw = null; }
+  const cfg = raw && typeof raw === "object" ? raw : DEFAULT_CONFIG.forward || {};
+  const num = (v, def, min, max) => {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return def;
+    return Math.max(min, Math.min(max, n));
+  };
+  return {
+    maxDepth: num(cfg.maxDepth, 3, 1, FORWARD_DEPTH_CAP),
+    maxNodes: num(cfg.maxNodes, 30, 1, 500),
+    maxChars: num(cfg.maxChars, 3000, 200, 40000)
+  };
+}
+
 export async function expandForwardNodes(nodes, {
-  maxNodes = 30, maxChars = 3000, onebot = null, maxDepth = 2, depth = 1, visited = null
+  maxNodes = null, maxChars = null, onebot = null, maxDepth = null, depth = 1, visited = null
 } = {}) {
   if (!Array.isArray(nodes) || !nodes.length) return null;
+  // 🆕 2026-10-23（第五十五对话 · 用户点名「合并转发阅读层数」要能在管理端改）：
+  //   三个预算键以前是写死的函数默认值，现在不传就**现读配置**（config.forward）。
+  //   显式传值仍然优先 —— 入站钩子必须能钉死 maxDepth: 1，不能被用户配置带歪。
+  const lim = forwardLimits();
   const st = {
     lines: [], media: [], chars: 0, truncated: 0, stop: false,
-    maxNodes, maxChars, onebot,
-    maxDepth: Math.max(1, Math.min(4, Number(maxDepth) || 2)),
+    maxNodes: Math.max(1, Math.min(500, Number(maxNodes) || lim.maxNodes)),
+    maxChars: Math.max(200, Math.min(40000, Number(maxChars) || lim.maxChars)),
+    onebot,
+    maxDepth: Math.max(1, Math.min(FORWARD_DEPTH_CAP, Number(maxDepth) || lim.maxDepth)),
     visited: visited instanceof Set ? visited : new Set()
   };
   await renderForwardNodes(nodes, st, '', Math.max(1, Number(depth) || 1));
@@ -1362,7 +1392,7 @@ export async function expandForwardNodes(nodes, {
  *
  * @returns {{text:string, media:Array, via:string, nestedLeft:boolean}|{text:'',media:[],error:string}}
  */
-export async function fetchForward(onebot, { messageId = null, resId = null, maxDepth = 2 } = {}) {
+export async function fetchForward(onebot, { messageId = null, resId = null, maxDepth = null, maxNodes = null, maxChars = null } = {}) {
   const attempts = [];
   if (resId) attempts.push(['res_id', { id: String(resId) }]);
   if (messageId !== null && messageId !== undefined && String(messageId) !== '') {
@@ -1378,7 +1408,7 @@ export async function fetchForward(onebot, { messageId = null, resId = null, max
       // 外层这一跳自己也算一层：把它塞进 visited，嵌套里再指回它时就直接判循环，
       // 不会为"自己套自己"再发一次请求。
       const visited = new Set(resId ? [String(resId)] : []);
-      const ex = await expandForwardNodes(nodes, { onebot, maxDepth, depth: 1, visited });
+      const ex = await expandForwardNodes(nodes, { onebot, maxDepth, maxNodes, maxChars, depth: 1, visited });
       if (ex && ex.text) {
         // nestedLeft = 展开完了、但里面还有没钻完的（到顶 / 循环 / 服务端没给）。
         // 单独告诉调用方，是为了让它**如实**回一句"还有更里面那层没展开"，

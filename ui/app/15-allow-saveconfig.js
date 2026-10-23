@@ -468,7 +468,15 @@ async function saveConfig({ quiet = false } = {}) {
       engineTimeoutMs: numIn(val('#cfg-img-engine-timeout', c.imageSearch?.engineTimeoutMs ?? 15000), 3000, 60000, c.imageSearch?.engineTimeoutMs ?? 15000),
       engineRetries: numIn(val('#cfg-img-engine-retries', c.imageSearch?.engineRetries ?? 1), 0, 3, c.imageSearch?.engineRetries ?? 1),
       autoBudgetMs: numIn(val('#cfg-img-auto-budget', c.imageSearch?.autoBudgetMs ?? 90000), 15000, 115000, c.imageSearch?.autoBudgetMs ?? 90000),
-      lensTimeoutMs: numIn(val('#cfg-img-lens-timeout', c.imageSearch?.lensTimeoutMs ?? 30000), 5000, 120000, c.imageSearch?.lensTimeoutMs ?? 30000)
+      lensTimeoutMs: numIn(val('#cfg-img-lens-timeout', c.imageSearch?.lensTimeoutMs ?? 30000), 5000, 120000, c.imageSearch?.lensTimeoutMs ?? 30000),
+      // ── 🆕 2026-10-23（第五十五对话 · 用户 m01873）：谷歌搜图**最多交回几条线索** ─────────
+      //   起因：lens 以前只把"已知作品站直链"当线索、上限写死 5 条；真机抓页面发现
+      //   结果页里大量是**论坛求图帖 / 贴吧 / 推特转发**（第三方页），而用户明确要求
+      //   "这个上限要能在管理端改"。
+      //   ⚠️ 钳制范围与渲染侧（12-settings-render.js 的 min/max 1~20）**同口径**；
+      //   ⚠️ 后端 src/image-search.js 的 lens() 里还有一层 intIn(…,1,20)，三道都不互相信任；
+      //   ⚠️ 没渲染时回落 `c.imageSearch?.lensLinkLimit` 原值（"这一节没渲染" ≠ "把它设成默认值"）。
+      lensLinkLimit: numIn(val('#cfg-img-lens-links', c.imageSearch?.lensLinkLimit ?? 8), 1, 20, c.imageSearch?.lensLinkLimit ?? 8)
     };
 
     // ── 🆕 2026-10-22（第五十三对话 · 方案 §5.12）：种子/磁力**只读**清单 ──────────────
@@ -498,6 +506,41 @@ async function saveConfig({ quiet = false } = {}) {
     patch.proposals = {
       ...c.proposals,
       enabled: chk('#cfg-improvement', c.proposals?.enabled !== false)
+    };
+
+    // ── 🆕 2026-10-23（第五十五对话 · 用户 m01886 ①）：合并转发的展开预算 ──────────────
+    //   🔴 `...c.forward` 展开**必须有**：这个顶层键在 config.js 里是新加的，
+    //      以后再加字段时靠它保住"这一页没渲染的键不被一次保存抹掉"（本项目老坑）。
+    //   ⚠️ 钳制范围与渲染侧（12-settings-render.js 的 min/max）**同口径**：
+    //      maxDepth 1~4（4 是 src/onebot.js 的 FORWARD_DEPTH_CAP 硬上限，⛔ 别放宽）、
+    //      maxNodes 1~500、maxChars 200~40000。
+    //   ⚠️ three 个都走 `numIn` 而不是 `Number(...) || 默认值`：与本块上面 engineRetries 同一个理由
+    //      （不许把显式的合法值当"没填"丢掉），口径统一。
+    //   ⚠️ 入站钩子（src/app.js 的 fetchForward maxDepth:1）**不读这里** —— 那条路是写死的，
+    //      放大它会让收消息变慢、甚至丢消息。
+    patch.forward = {
+      ...(c.forward || {}),
+      maxDepth: numIn(val('#cfg-fwd-maxdepth', c.forward?.maxDepth ?? 3), 1, 4, c.forward?.maxDepth ?? 3),
+      maxNodes: numIn(val('#cfg-fwd-maxnodes', c.forward?.maxNodes ?? 30), 1, 500, c.forward?.maxNodes ?? 30),
+      maxChars: numIn(val('#cfg-fwd-maxchars', c.forward?.maxChars ?? 3000), 200, 40000, c.forward?.maxChars ?? 3000)
+    };
+
+    // ── 🆕 2026-10-23（第五十五对话 · 用户 m01886 ① 的「等」）：部署环境自查（envAudit）四个键 ──
+    //   🔴 `...c.envAudit` 展开**必须有**：这四个键是提案 17a954dc 新加的顶层键，以后再加字段时
+    //      靠它保住"这一页没渲染的键不被一次保存抹掉"（本项目老坑）。
+    //   ⚠️ 两个开关的方向相反，**别抄反**：
+    //      · enabled         默认 **开** ⇒ 判定 `!== false`（写成 === true 会把默认开变默认关）；
+    //      · allowInGroup    默认 **开** ⇒ 同上（⛔ 这个不是"默认关"的群聊闸）。
+    //   ⚠️ timeoutMs 走 numIn 夹 2000~30000：与 src/app.js 路由里那一层
+    //      `Math.min(30000, Math.max(2000, ...))` 同口径（两道互不信任）。
+    //   ⚠️ 关掉总开关时下面三个控件是 disabled ⇒ `val()` 仍读得到旧值（disabled 不清值），
+    //      所以这里**不做**"关了就把别的清零"——保原值，重新打开时用户的选择还在。
+    patch.envAudit = {
+      ...(c.envAudit || {}),
+      enabled: chk('#cfg-envaudit', c.envAudit?.enabled !== false),
+      allowInGroup: chk('#cfg-envaudit-group', c.envAudit?.allowInGroup !== false),
+      maxPerRun: numIn(val('#cfg-envaudit-max', c.envAudit?.maxPerRun ?? 1), 1, 10, c.envAudit?.maxPerRun ?? 1),
+      timeoutMs: numIn(val('#cfg-envaudit-timeout', c.envAudit?.timeoutMs ?? 8000), 2000, 30000, c.envAudit?.timeoutMs ?? 8000)
     };
   }
 

@@ -598,54 +598,106 @@ async function iqdbSearch(host, engineName, buffer, mime) {
 //   🔴 它的失败**不抛错**（lensSearch 返回 {ok:false,error}），因为"没等到内容"和"引擎报错"
 //      在这里的成因几乎一样（出口网络），而文案已经够清楚；这里把它转成 Error 交给上层统一处理。
 async function lens(buffer, mime) {
-  const timeoutMs = intIn(getConfig().imageSearch?.lensTimeoutMs, 30000, 5000, 120000);
+  const cfgImg = getConfig().imageSearch || {};
+  const timeoutMs = intIn(cfgImg.lensTimeoutMs, 30000, 5000, 120000);
+  // 最多交回几条线索（管理端可改；用户第五十五对话原话「那个上限要能在管理端改」）
+  const linkLimit = intIn(cfgImg.lensLinkLimit, 8, 1, 20);
   const out = await lensSearch(buffer, mime, {
     timeoutMs,
-    proxyEndpoint: proxyEndpointFor('lens.google.com')
+    linkLimit,
+    proxyEndpoint: proxyEndpointFor("lens.google.com")
   });
   if (!out.ok) throw new Error(out.error);
-  // 🆕 2026-10-23（提案 a0009a16「希望返回直连的作品页链接，而不是只给结果页」）：
-  //   改造前这里**只有一条** result，url 是结果页地址（= 你刚才那次搜索），正文塞进 extra
-  //   ⇒ 模型手里除了"一段网页正文"什么都没有，报出处只能报个站点名。
-  //   现在把从锚点里解析出的**直连作品页**放在 results 最前面，结果页单独收在 resultPageUrl。
+  // 🆕 2026-10-23（提案 a0009a16「希望返回直连的作品页链接，而不是只给结果页」）
+  //   + 第五十五对话用户追加：「谷歌搜图不止用于搜本子插画…推特成人博主的图片或者别的什么图片
+  //     也会让她用谷歌搜（比之前那些搜现实图片的引擎要好）」「他很多时候不会直接给出 p站eh等
+  //     直接的链接，而是一些求图片来源的论坛链接或者贴吧还有什么链接（里面可能有 pid 或者出处），
+  //     有的也可能是 x 上的转发画师帖子的链接」。
   //
-  //   🔴 三个不许：
-  //     ① 解析不到就**不编**（directLinks 空 ⇒ 只剩结果页 + 正文，note 里明说"没解析到直连"）；
-  //     ② **不拿结果页冒充作品页**（见 lens-search.js 里 pickWorkLinks 的注释）；
-  //     ③ 不动"这不是结构化匹配结果"这个诚实口径 —— 解析出来的链接也只是"页面上的锚点"，
-  //        不保证就是这张图的出处（Lens 结果页会混推荐、广告）。
-  const body = String(out.text || '').replace(/\s+/g, ' ').trim();
+  //   🔴 于是这里要交**三类**线索，各标类型、别混成一锅（第五十五对话 2026-10-23 从两类扩成三类）：
+  //     · work       = 已知作品站（pixiv/DLsite/E-Hentai/FANZA…）⇒ 点开基本就是出处
+  //     · social     = 通用平台（X/微博/bilibili/YouTube/Reddit/DeviantArt…）
+  //                    ⇒ 同一条链接**可能是原帖、也可能是转发/搬运**，代码不替模型下结论
+  //                    （用户 ③ 问"优先级表会不会影响非二次元搜图"，答案就在这里：
+  //                      这些平台原来混在 WORK_HOSTS 里按 pixiv 之后的顺序排、还被说成"作品页"，
+  //                      现在单列、不参与优先级竞争）
+  //     · thirdparty = 论坛求图帖/贴吧/博客这类 ⇒ 里面**可能**提到 pid 或原作者，但**不是权威**
+  //
+  //   🔴 三个不许（判据钉着）：
+  //     ① 解析不到就**不编**（空数组 + note 里明说"只有正文，别自己拼链接"）；
+  //     ② **不拿结果页冒充作品页**；
+  //     ③ 不说"这就是出处" —— 页面上的锚点不保证是这张图的出处（Lens 会混推荐/广告）。
+  //
+  //   ⚠️ 实测（第五十五对话真页探针）：Lens 结果页的链接**全部**是 /goto?url=<加密串> 壳链，
+  //      DOM 里一个真实网址都没有 ⇒ 真地址由 lens-search.js 的 resolveGotoLinks 真跳一次拿回来。
+  const body = String(out.text || "").replace(/\s+/g, " ").trim();
   const direct = Array.isArray(out.directLinks) ? out.directLinks : [];
+  const social = Array.isArray(out.socialLinks) ? out.socialLinks : [];
   const others = Array.isArray(out.otherLinks) ? out.otherLinks : [];
+  const resolved = Number(out.linksResolved) || 0;
+  const attempted = Number(out.linksResolveAttempted) || 0;
   const results = [];
-  for (const d of direct.slice(0, 4)) {
+  const sectionText = (s) => (s === "visual" ? "视觉匹配区" : s === "web" ? "网页结果区" : s === "ai" ? "AI 概览区" : s === "exact" ? "完全匹配页" : "");
+  const push = (d, kind) => {
+    const where = sectionText(d.section);
+    const tail = where ? "；出现在结果页的「" + where + "」" : "";
     results.push({
-      title: d.title ? `${d.site}：${d.title}` : d.site,
+      title: d.title ? d.site + "：" + d.title : d.site,
       url: d.url,
-      similarity: '',
-      extra: '从结果页锚点解析出的**直连作品页**（点开就是原站点，不是谷歌搜索页）'
+      similarity: "",
+      kind,
+      site: d.site,
+      section: d.section || null,
+      extra: kind === "work"
+        ? ("**直连作品页**（点开就是原站点，不是谷歌搜索页）" + tail)
+        : kind === "social"
+          ? ("**通用平台页**（" + d.site + "）：这条**可能是原作者的帖、也可能是别人的转发/搬运** —— " +
+             "先去正文里找作者名能不能和画风对上，对上了才算出处；对不上就只当线索" + tail)
+          : ("**第三方页面**（" + d.site + "）：可能是论坛求图帖/贴吧/博客，里面也许有 pid 或原作者，" +
+             "但**不是权威出处**，要自己判断" + tail)
     });
-  }
+  };
+  // 🔴 三类分开列、顺序固定：作品站 → 通用平台 → 其它第三方页。
+  //   为什么把通用平台单独拎出来（用户 m01886 ③ 的问题，2026-10-23 定）：
+  //   推特/bilibili/YouTube 这些**不是作品站**，同一条链接可能是原帖也可能是转发 ——
+  //   混进"直连作品页"里会让她把搬运帖当成出处报给群友。
+  for (const d of direct.slice(0, linkLimit)) push(d, "work");
+  for (const d of social.slice(0, linkLimit)) push(d, "social");
+  for (const d of others.slice(0, linkLimit)) push(d, "thirdparty");
   // 再补一条"结果页正文"（既有口径保留：模型认识这个形状，判据也钉着）
   results.push({
-    title: '谷歌 Lens 结果页正文',
-    url: out.url || '',
-    similarity: '',
+    title: "谷歌 Lens 结果页正文",
+    url: out.url || "",
+    similarity: "",
+    kind: "text",
     extra: body.slice(0, 1200)
   });
+  const workSites = [...new Set(direct.slice(0, linkLimit).map((d) => d.site))];
+  const socialSites = [...new Set(social.slice(0, linkLimit).map((d) => d.site))];
+  const thirdSites = [...new Set(others.slice(0, linkLimit).map((d) => d.site))];
   const noteLines = [
-    '🔴 这是**谷歌 Lens 结果页**的解析结果，不是结构化匹配结果：正文里可能混着无关推荐、广告文案或界面文字。',
+    "🔴 这是**谷歌 Lens 结果页**的解析结果，不是结构化匹配结果：正文里可能混着无关推荐、广告文案或界面文字。",
     direct.length
-      ? `上面的 ${direct.length} 条${direct.length >= 4 ? '+' : ''}是结果页里**指向已知站点的直连链接**（站点：${[...new Set(direct.map((d) => d.site))].join('/')}），优先用它们报出处。`
-      : '⚠️ 这次**没解析到直连作品页**（只拿到正文）：只能按正文里出现过的站点名/作品名/作者说，别自己拼链接。',
-    others.length ? `另有 ${others.length} 条其它外链（非已知作品站，仅供参考）。` : '',
-    '只采纳其中**明确指向出处**的部分，拿不准就说不确定。'
+      ? ("上面的 " + direct.length + (direct.length >= linkLimit ? "+" : "") + " 条是结果页里**指向已知作品站的直连链接**（站点：" + workSites.join("/") + "），优先用它们报出处。")
+      : "⚠️ 这次**没解析到已知作品站的直连链接**。",
+    social.length
+      ? (social.length + (social.length >= linkLimit ? "+" : "") + " 条是**通用平台页**（" + socialSites.join("/") + "）：X/微博/bilibili 这类地方，" +
+         "同一条链接**可能是原画师自己发的、也可能是别人的转发或搬运**。先用正文里的作者名/画风去对，对上了才当出处；对不上就只当线索，别急着报。")
+      : "",
+    others.length
+      ? (others.length + (others.length >= linkLimit ? "+" : "") + " 条是**其它第三方页面**（" + thirdSites.join("/") + "）：可能是论坛求图帖/贴吧/博客。" +
+         "这类页面里**常常写着 pid、画师名或原帖地址**，但没有完全匹配时谷歌给的多半只是相似图，" +
+         "所以**要自己判断**：能从标题/正文里认出 pid 或作者就用它，认不出就只当参考，别说「就是这张」。")
+      : "",
+    (out.linksEmpty ? "⚠️ 这次一条外部链接都没拿到（只有正文）：只能按正文里出现过的站点名/作品名/作者说，**别自己拼链接**。" : ""),
+    attempted ? ("（解壳 " + attempted + " 条 ⇒ 成功 " + resolved + " 条；解不开的已丢弃，不会把谷歌自己的地址当出处。）") : "",
+    "只采纳其中**明确指向出处**的部分，拿不准就说不确定。"
   ].filter(Boolean);
   return {
-    engine: 'lens',
+    engine: "lens",
     results,
-    resultPageUrl: out.url || '',
-    note: noteLines.join('')
+    resultPageUrl: out.url || "",
+    note: noteLines.join("")
   };
 }
 
