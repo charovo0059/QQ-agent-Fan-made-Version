@@ -1201,6 +1201,22 @@ export function buildToolDefs() {
             note.push(`（其中 ${dedupedCount} 条与${winText}刚发过的内容完全相同，已跳过 —— **本轮没有重复发**；不要再发一遍，也不要向用户提这件事。）`);
           }
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
+          // ── 🆕 2026-10-23（第五十六对话 · v2 任务书 P2-1）────────────────────
+          // 协议端（微信中继）会把**降级事实**放进响应的 data 里：`fakeAt`（没有真 @ 能力）
+          // 与 `warnings`（内容过滤告警 / 段级跳过）。⛔ 改前这些到 sender 就断了 ⇒
+          // 模型以为真 @ 成功了，转头跟用户说"已经 @ 了他"。这里是它们**唯一的**可见去处
+          // （决策记录 §126、能力矩阵 §3 的 S2）。
+          // ⚠️ 拼进 note 而不是新增字段：note 是模型**一定会读**的那段话（工具回执正文）。
+          // ⚠️ 去重后按文本聚合：同一句降级说明出现多次只提一遍，别把回执撑成一篇日志。
+          const degradedMsgs = [];
+          for (const s of real) {
+            if (s?.fakeAt) degradedMsgs.push('这次**没有真 @**：这个协议端没有真 @ 能力，对方只会看到「@昵称」文字，**收不到 @ 提醒**。不要跟用户说"已经 @ 了他"。');
+            for (const w of (Array.isArray(s?.warnings) ? s.warnings : [])) {
+              const t = String(w == null ? '' : w).replace(/\s+/g, ' ').trim();
+              if (t) degradedMsgs.push(t.length > 120 ? t.slice(0, 120) + '…' : t);
+            }
+          }
+          if (degradedMsgs.length) note.push(`（注意：${[...new Set(degradedMsgs)].join('；')}）`);
           return ok({ sent: real.length, deduped: dedupedCount, messageIds: real.map((s) => s.messageId), note: note.join('') });
         } catch (error) {
           return err(error?.message ?? error);
@@ -1258,7 +1274,17 @@ export function buildToolDefs() {
           ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
           ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
           ctx.emit('session-update', ctx.session.id);
-          return ok({ sent: true, messageId: result?.message_id ?? null, note: '表情已发送。' });
+          // ── 🆕 2026-10-23（第五十六对话 · 能力矩阵 S6）──────────────────────
+          // 微信侧"发表情"其实走的是**发图片**（onebot.js 的 sendSticker → sendImage），
+          // 对方收到的是一张图、不是表情包 —— 改前这里固定写死「表情已发送。」，
+          // 把降级事实一起吞了。现在把协议端给的 warnings 说明拼进来（QQ 侧没有 ⇒ 文案逐字不变）。
+          let note = '表情已发送。';
+          const warns = Array.isArray(result?.warnings) ? result.warnings : [];
+          if (warns.length) {
+            const uniq = [...new Set(warns.map((w) => String(w == null ? '' : w).replace(/\s+/g, ' ').trim()).filter(Boolean))];
+            if (uniq.length) note += `（注意：${uniq.join('；')}）`;
+          }
+          return ok({ sent: true, messageId: result?.message_id ?? null, note });
         } catch (error) {
           return err(error?.message ?? error);
         }

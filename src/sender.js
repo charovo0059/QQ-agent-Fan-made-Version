@@ -283,7 +283,9 @@ export class SendQueue {
    *   `origin`（2026-09-26 第二十四对话，提案 57e7ab37）：`'self'`（默认，她自己说的）
    *   或 `'admin'`（**管理端代发**，如群发通知 / 测试发送）。它只影响**记账**：
    *   成功那条会带上 `origin:'admin'`，她看上下文时就能分清"这句不是我说的"。
-   * 返回 { sent: [{text, messageId}], failed: [{text, error}] }；全部失败时抛错。
+   * 返回 { sent: [{text, messageId, fakeAt?, warnings?}], failed: [{text, error}] }；全部失败时抛错。
+   *   `fakeAt` / `warnings` **只有协议端真的降级了才会出现**（微信 hook 无真 @ 能力、
+   *   内容过滤告警、段级跳过），QQ 分支永远不会带 ⇒ 调用方按"可选字段"处理即可。
    */
   async sendTextBatch(chatKey, messages, options = {}) {
     const [kind, id] = String(chatKey).split(':');
@@ -340,7 +342,17 @@ export class SendQueue {
         const ts = Date.now();
         this.store.appendSelf(chatKey, { text, ts, mid: data?.message_id ?? null, origin: options.origin || 'self' });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
-        return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
+        // 🆕 2026-10-23（第五十六对话 · v2 任务书 P2-1）：把**降级事实**原样带上去。
+        //   中继会把两样东西放进 OneBot 响应的 data 里（见 relay-wechat/src/server.js 的 #send）：
+        //     · `fakeAt:true` = 这个 hook 没有真 @ 能力，只是把「@昵称」拼进了文本；
+        //     · `warnings[]` = 内容过滤告警 / 段级跳过 / 假 @ 的一句人话。
+        //   改前这里**只取 `message_id`** ⇒ 那些话到这一层就断了，模型永远不知道
+        //   "我这个 @ 对方其实收不到"，于是会照常跟用户说"已经 @ 了他"。
+        //   ⚠️ QQ 分支的响应里没有这两个字段 ⇒ 展开后是 `{}`，QQ 侧行为**逐字不变**。
+        const degraded = {};
+        if (data?.fakeAt) degraded.fakeAt = true;
+        if (Array.isArray(data?.warnings) && data.warnings.length) degraded.warnings = data.warnings.slice();
+        return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts), ...degraded };
       }));
     }
 
@@ -645,7 +657,15 @@ export class SendQueue {
       const ts = Date.now();
       this.store.appendSelf(chatKey, { text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, ts, mid: data?.message_id ?? null });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
-      return { message_id: data?.message_id ?? null };
+      // 🆕 2026-10-23（第五十六对话 · 能力矩阵 S6）：与 `sendTextBatch` 同一条纪律——
+      //   协议端的降级事实（`fakeAt` / `warnings`）要带出去，别在发送这一层吞掉。
+      //   微信侧"发表情"实际走的是**发图片**（onebot.js 的 sendSticker → sendImage）⇒
+      //   对方收到的是图片而不是表情包，回执必须能说出这件事（现在中继会如实给 warnings）。
+      //   ⚠️ QQ 分支的响应里没有这两个字段 ⇒ 返回对象**逐字不变**。
+      const degraded = {};
+      if (data?.fakeAt) degraded.fakeAt = true;
+      if (Array.isArray(data?.warnings) && data.warnings.length) degraded.warnings = data.warnings.slice();
+      return { message_id: data?.message_id ?? null, ...degraded };
     });
   }
 
