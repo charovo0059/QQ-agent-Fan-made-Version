@@ -875,6 +875,10 @@ export function createApp({ log = console.log, resume = [] } = {}) {
       path.join(WORKSPACE_DIR, 'relay-wechat', 'tools', 'version.dll'),
       path.join(APP_DIR, 'relay-wechat', 'tools', 'version.dll')
     ],
+    // 注入前的版本闸（2026-10-24 自更新事故）：version.dll 只适配 4.1.10.27，
+    // 微信自更新后注进去会连崩 → 现在先核对版本，不符就拒绝注入并说明怎么还原。
+    // 留空 = 不校验（老配置文件里没有这个键时，由 config.js 的默认值兜住）。
+    requiredWeixinVersion: wxPathFromConfig('requiredWeixinVersion'),
     // 两个端口都在配置里（默认 30001 / 18999），且必须与中继的 config.json、微信目录的 wx.ini 三处一致。
     hookPort: Number(wxPathFromConfig('hookPort')) || 30001,
     hookCallbackPort: Number(wxPathFromConfig('hookCallbackPort')) || 18999,

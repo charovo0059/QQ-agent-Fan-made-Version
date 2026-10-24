@@ -35,6 +35,40 @@ const WX_PROC_NAME = 'Weixin.exe'
 const WX_LOGIN_PROBE_TTL_MS = 10 * 1000
 
 /**
+ * 读 Weixin.exe 的 FileVersion（PE 头里的 VS_FIXEDFILEINFO，形如 `4.1.10.27`）。
+ *
+ * ── 为什么不用 PowerShell / wmic 读（2026-10-24 自更新事故后加）─────────────
+ *   这条判据要在**注入前每次启动**都跑，而 spawn 一个 PowerShell 要 300~800ms，
+ *   还会在部分机器上撞执行策略（`running scripts is disabled`）。直接读 PE 资源是**零依赖、零进程、1ms**。
+ *   本机实测两种版本都只有 **1 处** 0xFEEF04BD 签名，取它后面第 8/12 字节的
+ *   MS/LS 两个 DWORD 拼出四段版本号，与 `Get-Item .VersionInfo.FileVersion` 逐位一致
+ *   （4.1.10.27 / 4.1.15.13 都验过）。
+ *
+ * @returns {string} 读不出来回 **空串**（三态纪律：不许编一个"看起来对"的值）
+ */
+function readWeixinFileVersion(exePath) {
+  try {
+    const st = fs.statSync(exePath)
+    const hit = VER_CACHE.get(exePath)
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.version
+    const buf = fs.readFileSync(exePath)
+    const sig = Buffer.from([0xbd, 0x04, 0xef, 0xfe])   // FEEF04BD（小端）
+    const i = buf.indexOf(sig)
+    let version = ''
+    if (i >= 0 && i + 16 <= buf.length) {
+      const ms = buf.readUInt32LE(i + 8)
+      const ls = buf.readUInt32LE(i + 12)
+      version = [ms >>> 16, ms & 0xffff, ls >>> 16, ls & 0xffff].join('.')
+    }
+    VER_CACHE.set(exePath, { mtimeMs: st.mtimeMs, size: st.size, version })
+    return version
+  } catch { return '' }
+}
+
+/** 版本缓存（按 mtime+size 失效；微信换了版本 ⇒ mtime 必变）。 */
+const VER_CACHE = new Map()
+
+/**
  * 「这个中继是我拉起来的」的归属标记（环境变量名）。
  *
  * 🔴 为什么需要它（2026-10-23 第五十六对话，线上事故）：
@@ -105,11 +139,18 @@ export class WechatChannel {
    * @param {string|(()=>string[])} o.hookDll 被注入的 version.dll 候选
    * @param {number} o.hookPort 注入后微信进程内 HTTP API 端口（默认 30001）
    * @param {number} o.hookCallbackPort 中继收推送的端口（默认 18999，写进 wxinject 命令行的 CallBackURL）
+   * @param {string} o.requiredWeixinVersion 注入前必须匹配的微信版本（默认 4.1.10.27；空串 = 不做版本闸）
    * @param {string} o.nodeExe 用哪个 node 跑脚本（默认 process.execPath + ELECTRON_RUN_AS_NODE）
    * @param {(msg:string)=>void} [o.log]
    */
   constructor({ isPortOpen, relayStatusUrl, scriptCandidates = [], weixinExe = '', injectExe = '', hookDll = '',
     hookPort = 30001, hookCallbackPort = 18999, nodeExe = '', findPids = null, findChannelProcs = null, log = () => {},
+    // 🆕 2026-10-24（自更新事故）：注入前必须核对微信版本。
+    //   为什么必须有：version.dll 的偏移表是**按 4.1.10.27 写死**的，
+    //   微信一夜之间自更新到 4.1.15.13 后，注入进去必崩（弹「微信错误」窗口，连崩三次进安全模式）。
+    //   而链路看起来"点了有反应、端口没通"—— 正是本项目最忌的那种静默失败。
+    //   ⇒ 在杀进程/注入**之前**先读一下 Weixin.exe 的 FileVersion，不符就拒绝注入并说明原因。
+    requiredWeixinVersion = '4.1.10.27',
     // 🆕 2026-10-23（第五十四对话 · 中继稳定性）：中继进程**意外退出后自动拉起**的参数。
     //   ⚠️ 判据是"**连续**快速退出"，不是"退出就重启"：崩溃通常会立刻再崩一次，
     //     无限重启只会把日志刷满、把端口抢得一团糟。所以退避 + 次数上限。
@@ -129,6 +170,8 @@ export class WechatChannel {
     this.#dllFn = typeof hookDll === 'function' ? hookDll : () => (hookDll ? [hookDll] : [])
     this.hookPort = Number(hookPort) || 30001
     this.hookCallbackPort = Number(hookCallbackPort) || 18999
+    /** 注入前必须匹配的微信版本（空串 = 不校验，只给读数为准的提示）。 */
+    this.requiredWeixinVersion = String(requiredWeixinVersion || '')
     this.nodeExe = nodeExe || process.execPath
     // ⚠️ 进程探测**可注入**：它读的是"这台机器上真有没有微信在跑"，
     //    测试里必须能固定住，否则断言会随测试机状态飘。
@@ -234,6 +277,45 @@ export class WechatChannel {
     }
   }
 
+  /**
+   * 注入前的**版本闸**：微信主程序的 FileVersion 必须等于 `requiredWeixinVersion`。
+   *
+   * ── 为什么拦在注入之前（2026-10-24 自更新事故的正面修复）────────────────
+   *   事故当天：微信 12:51 自更新到 4.1.15.13 → 12:52 起连崩三次 → 用户看到「微信错误」弹窗。
+   *   根因不是注入器坏了，而是**version.dll 的偏移表是按 4.1.10.27 写死的**，
+   *   注进 4.1.15.13 必崩。当时唯一的表现是「点了启动、30001 不通」——静默失败。
+   *   ⇒ 现在在杀进程/注入之前先读版本，不符就**拒绝注入并把两边的版本都说出来**，
+   *     并且把「怎么修」也一并给出（脚本本身不修，改版本是破坏性操作，要人点头）。
+   *
+   * @returns {{ok:boolean, expected:string, actual:string, exe:string, error?:string, hint?:string}}
+   */
+  checkWeixinVersion() {
+    const expected = this.requiredWeixinVersion
+    const wx = this.resolveWeixinExe()
+    const exe = wx.path
+    const actual = exe ? readWeixinFileVersion(exe) : ''
+    // 不设闸 ⇒ 恒通过（但把读数带出去，界面照样能显示"实际是哪个版本"）
+    if (!expected) return { ok: true, expected: '', actual, exe }
+    if (!exe) {
+      // 找不到 exe 是另一件事（launchWeixin 会报"路径都不存在"），这里不抢那个错
+      return { ok: true, expected, actual: '', exe: '', skipped: true }
+    }
+    if (!actual) {
+      // 读不出 FileVersion ≠ 版本不对：三态纪律 —— 报"问不到"，并**放行**（否则读不到就永远起不来）
+      return {
+        ok: true, expected, actual: '', exe, unreadable: true,
+        hint: `读不出 ${path.basename(exe)} 的 FileVersion（文件可能被占用/损坏）。按"没验证"放行，请自行确认版本是 ${expected}。`
+      }
+    }
+    if (actual === expected) return { ok: true, expected, actual, exe }
+    return {
+      ok: false, expected, actual, exe,
+      error: `微信版本不符：现在装的是 ${actual}，hook DLL 只适配 ${expected} ⇒ 拒绝注入（注进去必崩，会弹「微信错误」窗口）。`,
+      hint: '修法：跑「工具-运维\\还原微信版本.mjs」看体检结论，加 --apply 还原到 ' + expected
+        + '（还原前先把微信退出）；装完再点「启动微信」。桌面/开始菜单里若有指向别的版本的快捷方式，也别去点。'
+    }
+  }
+
   /** 按进程名找微信（端口还没开、但进程已经在加载时，这个能看出"它其实起来了"）。 */
   findWeixinPids() {
     try { return (this.#findPids() || []).map(Number).filter((n) => Number.isInteger(n) && n > 0) } catch { return [] }
@@ -312,6 +394,7 @@ export class WechatChannel {
       } catch { relay = null }
     }
     const exe = this.resolveWeixinExe();
+    const ver = this.checkWeixinVersion();
     const pids = hookOk ? [] : this.findWeixinPids();
     const running = hookOk || pids.length > 0;
     const login = await this.#probeLogin(hookOk);
@@ -332,7 +415,13 @@ export class WechatChannel {
         starting: !hookOk && pids.length > 0,
         exe: exe.path,
         exeSource: exe.source,
-        exeCandidates: exe.candidates
+        exeCandidates: exe.candidates,
+        // 🆕 2026-10-24：把"实际装的版本"和"适配的版本"直接摆到状态里，
+        //   出事时不用再去翻注册表/右键属性。versionOk 为 null = 没读出来（不是"不对"）。
+        exeVersion: ver.actual || '',
+        requiredVersion: ver.expected || '',
+        versionOk: ver.expected ? (ver.actual ? ver.actual === ver.expected : null) : null,
+        versionError: ver.ok ? '' : ver.error
       },
       // ② 中继：`bridgeConnected` = 中继说 hook 那头连着（它自己的 akasha.connected）。
       //    中继在跑但这一位 false = **看着通了其实收不到**，正是最容易假绿的状态。
@@ -554,6 +643,15 @@ export class WechatChannel {
     if (await this.isPortOpen('127.0.0.1', this.hookPort).catch(() => false)) {
       return { ok: true, alreadyRunning: true, exe: this.resolveWeixinExe().path };
     }
+    // ⚠️ 版本闸在这里也拦一次（不能只拦在 launchWeixin 里）：
+    //   ensureWeixin 是 app 启动时**自动拉起整条通道**走的那条路，它会先去杀进程再注入；
+    //   若只在更深处拦，用户看到的就是"app 一启动就把我微信关了、然后又起不来"。
+    const ver = this.checkWeixinVersion();
+    if (!ver.ok) {
+      this.#push('⛔ ' + ver.error);
+      return { ok: false, exe: ver.exe, versionBlocked: true, expected: ver.expected, actual: ver.actual, error: ver.error, hint: ver.hint };
+    }
+    if (ver.hint) this.#push('⚠️ ' + ver.hint);
     const r = this.launchWeixin();
     if (!r.ok) return r;
     const step = 1000;
@@ -586,6 +684,14 @@ export class WechatChannel {
    *     （源码 src/wx_ini_reader.cpp:9 GetWxRecvUrl）
    */
   launchWeixin() {
+    // ⛔ 版本闸**必须排在 #killTree 之前**：注错版本会崩，而崩之前那一步的杀进程
+    //    已经把用户正在用的微信关掉了 —— 那是"越修越糟"。先判断，再动手。
+    const ver = this.checkWeixinVersion();
+    if (!ver.ok) {
+      this.#push('⛔ ' + ver.error);
+      return { ok: false, exe: ver.exe, versionBlocked: true, expected: ver.expected, actual: ver.actual, error: ver.error, hint: ver.hint };
+    }
+    if (ver.hint) this.#push('⚠️ ' + ver.hint);
     const already = this.findWeixinPids();
     if (already.length > 0) {
       this.#push(`微信已经在跑（pid ${already.join(',')}），但 hook 端口 ${this.hookPort} 没通 ⇒ 先把它关掉再注入启动`);

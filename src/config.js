@@ -633,6 +633,12 @@ export const DEFAULT_CONFIG = {
     weixinExe: '',
     injectExe: '',
     hookDll: '',
+    // 🔴 注入前必须匹配的微信版本（留空 = 不校验）。**2026-10-24 自更新事故后加**：
+    //    那天微信趁夜自更新到 4.1.15.13，而 version.dll 的偏移表是按 4.1.10.27 写死的
+    //    ⇒ 注进去连崩三次、弹「微信错误」窗口，界面上只显示"点了没反应"。
+    //    现在会在**杀进程之前**先读 Weixin.exe 的 FileVersion，不符就拒绝注入并给出修法。
+    //    换 hook DLL（适配别的微信版本）时，把这个值一起改。
+    requiredWeixinVersion: '4.1.10.27',
     // 微信进程内 hook 的 HTTP 端口（version.dll 在那个进程里起的）。
     //    必须与中继的 wxhookPort 一致（relay-wechat/config.json）。
     hookPort: 30001,
